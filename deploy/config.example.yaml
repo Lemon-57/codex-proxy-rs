@@ -78,6 +78,15 @@ api:
 openai:
   # 数据驻留约束；省略或 null 不指定地域约束，与管理端客户端身份无关。
   residency: us
+  # 普通 HTTP 会话的上游 WS 空闲池；不关闭在途请求或绑定下游 WS 的精确续写连接。
+  # 代理隧道也会被空闲连接占用，预算应低于逐账号代理的总连接上限。
+  # ws_pool:
+  #   enabled: true
+  #   max_age_ms: 3300000
+  #   max_connecting: 8
+  #   max_idle_per_account: 16 # 0 表示普通会话归还后不保留空闲连接
+  #   idle_timeout_ms: 120000 # 0 表示不按空闲时长回收
+  #   stream_idle_timeout_ms: 300000
 
 # Compose 启动桥接区；密码仍只维护在 store 中。
 services:

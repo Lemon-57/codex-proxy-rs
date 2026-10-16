@@ -286,6 +286,12 @@ OpenAI 上游池化 WebSocket 默认每 25 秒发送一次 Ping，发出后允�
 收到 Pong 或其他入站帧即解除本次心跳截止，持续无响应则以 `pong_timeout` 关闭连接。
 此策略也覆盖正在生成的请求，与等待下一条上游消息的 `stream_idle_timeout_ms` 分别计时
 
+普通 HTTP 会话归还的上游 WebSocket 每账号默认最多保留 16 条，空闲 120 秒后回收，
+由 `openai.ws_pool.max_idle_per_account` 和 `idle_timeout_ms` 控制，完整配置见 [配置示例](config.example.yaml)。
+前者为 `0` 时归还后不保留，后者为 `0` 时不按空闲时间回收。
+该预算不关闭在途请求，也不驱逐绑定下游 WebSocket 的精确续写连接，因此不是账号总连接上限；
+代理连接上限还需覆盖活动请求和这些续写连接。被回收连接的续接仍遵循现有的客户端完整回放恢复合同
+
 若 Codex 在压缩或长时间生成时出现 `error decoding response body`，这表示
 客户端读取 HTTP 响应体失败。请结合网关请求诊断中的 `upstream.read.failed`、
 `downstream.body.closed` 和反向代理日志判断断开位置，不能仅凭此消息认定是 JSON 格式错误。

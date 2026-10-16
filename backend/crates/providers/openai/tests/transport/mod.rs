@@ -69,6 +69,7 @@ mod subscription;
 mod tls;
 mod usage;
 mod websocket;
+mod websocket_idle;
 mod websocket_pool;
 
 fn websocket_accept_config() -> WebSocketConfig {
@@ -526,6 +527,8 @@ fn websocket_pool_config_for_tests(
         enabled: true,
         max_age: Duration::from_mins(1),
         max_connecting: 16,
+        max_idle_per_account: usize::MAX,
+        idle_timeout: None,
         maintenance_interval,
         ping_interval,
         ping_timeout: Duration::from_secs(1),

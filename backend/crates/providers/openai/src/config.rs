@@ -167,6 +167,10 @@ pub struct CodexWebSocketPoolSettings {
     pub enabled: bool,
     pub max_age_ms: u64,
     pub max_connecting: usize,
+    #[serde(default = "default_max_idle_per_account")]
+    pub max_idle_per_account: usize,
+    #[serde(default = "default_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
     pub stream_idle_timeout_ms: u64,
 }
 
@@ -176,6 +180,8 @@ impl Default for CodexWebSocketPoolSettings {
             enabled: true,
             max_age_ms: 55 * 60 * 1000,
             max_connecting: 8,
+            max_idle_per_account: default_max_idle_per_account(),
+            idle_timeout_ms: default_idle_timeout_ms(),
             stream_idle_timeout_ms: 300_000,
         }
     }
@@ -194,11 +200,21 @@ impl CodexWebSocketPoolSettings {
             enabled: self.enabled,
             max_age: Duration::from_millis(self.max_age_ms),
             max_connecting: self.max_connecting,
+            max_idle_per_account: self.max_idle_per_account,
+            idle_timeout: (self.idle_timeout_ms != 0)
+                .then(|| Duration::from_millis(self.idle_timeout_ms)),
             stream_idle_timeout: (self.stream_idle_timeout_ms != 0)
                 .then(|| Duration::from_millis(self.stream_idle_timeout_ms)),
             ..CodexWebSocketPoolConfig::default()
         }
     }
+}
+
+const fn default_max_idle_per_account() -> usize {
+    16
+}
+const fn default_idle_timeout_ms() -> u64 {
+    120_000
 }
 
 /// OpenAI Provider 的额度刷新策略

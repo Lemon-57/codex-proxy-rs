@@ -63,6 +63,10 @@ impl CodexWebSocketPoolKey {
         &self.account_id
     }
 
+    pub(super) fn preserves_downstream_continuation(&self) -> bool {
+        !self.downstream_connection_id.is_empty()
+    }
+
     pub(crate) fn with_egress_key(mut self, key: &str) -> Self {
         self.egress_key = key.to_owned();
         self
@@ -192,6 +196,7 @@ impl WebSocketContinuationState {
 pub(super) enum WebSocketPoolSlot {
     Idle {
         connection: Box<PooledWebSocketConnection>,
+        idle_since: Instant,
     },
     Busy(WebSocketPoolReservation),
     Connecting(WebSocketPoolConnecting),

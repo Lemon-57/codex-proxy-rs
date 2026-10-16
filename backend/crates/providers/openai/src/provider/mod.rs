@@ -890,9 +890,14 @@ impl CodexProvider {
             crate::credential::CodexRuntimeAuthentication::OAuth(_)
         );
         if codex_oauth {
+            let responses_lite = upstream_request
+                .responses_lite
+                .as_deref()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
             normalize_selected_codex_downstream_body(
                 upstream_request.body_mut(),
                 generate.protocol_payload().context(),
+                responses_lite,
             );
         }
         if let Some(location) = lease

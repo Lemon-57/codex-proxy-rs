@@ -5,6 +5,27 @@ use std::path::Path;
 use provider_openai::config::{DEFAULT_STREAM_MAX_RETRIES, MAX_STREAM_MAX_RETRIES, OpenAiConfig};
 
 #[test]
+fn websocket_idle_budget_defaults_preserve_existing_config_and_allow_disabling_retention() {
+    let config: OpenAiConfig = serde_json::from_value(serde_json::json!({"ws_pool":{
+        "enabled":true,"max_age_ms":3300000,"max_connecting":8,"stream_idle_timeout_ms":300000
+    }}))
+    .unwrap();
+    assert_eq!(
+        (
+            config.ws_pool.max_idle_per_account,
+            config.ws_pool.idle_timeout_ms
+        ),
+        (16, 120000)
+    );
+    let mut disabled = config;
+    disabled.ws_pool.max_idle_per_account = 0;
+    disabled.ws_pool.idle_timeout_ms = 0;
+    let pool = disabled.websocket_pool_config();
+    assert_eq!(pool.max_idle_per_account, 0);
+    assert!(pool.idle_timeout.is_none());
+}
+
+#[test]
 fn openai_config_ignores_removed_yaml_identity_fields() {
     let config: OpenAiConfig = serde_json::from_value(serde_json::json!({
         "wire_profile": {"originator": "legacy-client", "codex_version": "invalid", "residency": "us"}

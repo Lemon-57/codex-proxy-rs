@@ -12,6 +12,7 @@ mod precommit;
 mod privacy;
 mod recovery;
 mod response_interrupt;
+mod search_history;
 mod session_binding;
 mod timing;
 mod upstream_adapter;

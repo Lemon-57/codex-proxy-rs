@@ -1,5 +1,6 @@
 //! Codex WebSocket 连接池
 
+mod idle;
 mod lease;
 mod state;
 mod supervisor;
@@ -15,8 +16,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use uuid::Uuid;
 
 use self::state::{
-    WebSocketPoolConnecting, WebSocketPoolSlot, WebSocketPoolState, close_pooled_connection,
-    close_pooled_connections,
+    WebSocketPoolConnecting, WebSocketPoolSlot, WebSocketPoolState, close_pooled_connections,
 };
 use super::pump::PumpKeepalive;
 use super::pump::WebSocketConnectionObservation;
@@ -66,6 +66,10 @@ pub struct CodexWebSocketPoolConfig {
     pub max_age: Duration,
     /// 所有账号合计允许并发执行的 opening 数
     pub max_connecting: usize,
+    /// 每账号保留的普通 HTTP 会话空闲连接数；下游 WS 精确续写连接不参与驱逐
+    pub max_idle_per_account: usize,
+    /// 普通 HTTP 会话连接归还后的最长空闲时间；None 表示不按空闲时间回收
+    pub idle_timeout: Option<Duration>,
     /// 后台维护间隔；`None` 表示不启动后台任务
     pub maintenance_interval: Option<Duration>,
     /// 池化连接的探活 ping 间隔（包括正在生成的连接）；`None` 表示不主动 ping
@@ -84,11 +88,12 @@ impl Default for CodexWebSocketPoolConfig {
             enabled: true,
             max_age: DEFAULT_MAX_AGE,
             max_connecting: DEFAULT_MAX_CONNECTING,
+            max_idle_per_account: 16,
+            idle_timeout: Some(Duration::from_secs(120)),
             maintenance_interval: Some(DEFAULT_MAINTENANCE_INTERVAL),
             ping_interval: Some(DEFAULT_PING_INTERVAL),
             ping_timeout: DEFAULT_PING_TIMEOUT,
-            // idle 连接不设失活截断：靠 ping/pong 保活，只在 max_age（55 分钟）
-            // 或 ping 失败时关闭，维持跨轮可复用连接
+            // pump 用心跳探测传输存活；普通会话的空闲预算由 pool owner 单独维护
             liveness_timeout: None,
             stream_idle_timeout: Some(DEFAULT_STREAM_IDLE_TIMEOUT),
         }
@@ -111,6 +116,8 @@ impl CodexWebSocketPool {
     pub fn new(max_age: Duration) -> Self {
         Self::with_config(CodexWebSocketPoolConfig {
             max_age,
+            max_idle_per_account: usize::MAX,
+            idle_timeout: None,
             maintenance_interval: None,
             ping_interval: None,
             liveness_timeout: None,
@@ -190,13 +197,19 @@ impl CodexWebSocketPool {
                     });
                 }
                 Some(WebSocketPoolSlot::Idle { .. }) => {
-                    let Some(WebSocketPoolSlot::Idle { connection, .. }) = state.slots.remove(&key)
+                    let Some(WebSocketPoolSlot::Idle {
+                        connection,
+                        idle_since,
+                    }) = state.slots.remove(&key)
                     else {
                         return WebSocketPoolAcquire::Bypass(WebSocketPoolBypassReason::Busy);
                     };
                     // 零成本探活：后台 pump 已实时感知连接死亡（RST/Close/EOF/失活），
                     // 复用前只需读取 is_closed 标志，避免复用到静默死连接后卡到超时
-                    let expired = connection.created_at.elapsed() >= self.config.max_age;
+                    let idle_expired =
+                        self.idle_expired(&key, idle_since, tokio::time::Instant::now());
+                    let expired =
+                        connection.created_at.elapsed() >= self.config.max_age || idle_expired;
                     let closed = connection.websocket.is_closed();
                     if !expired && !closed {
                         let lease = WebSocketPoolLease::reserve(
@@ -214,7 +227,11 @@ impl CodexWebSocketPool {
                         connection
                             .websocket
                             .observation()
-                            .with_exit_reason("max_age_expired")
+                            .with_exit_reason(if idle_expired {
+                                "idle_timeout"
+                            } else {
+                                "max_age_expired"
+                            })
                     } else {
                         connection.websocket.observation()
                     };
@@ -275,6 +292,7 @@ impl CodexWebSocketPool {
         connection: PooledWebSocketConnection,
     ) {
         let mut connection = Some(connection);
+        let mut close = Vec::new();
         {
             let mut state = self.lock_state();
             let expired = connection
@@ -303,13 +321,20 @@ impl CodexWebSocketPool {
                     key.clone(),
                     WebSocketPoolSlot::Idle {
                         connection: Box::new(connection),
+                        idle_since: tokio::time::Instant::now(),
                     },
+                );
+                close = self.take_excess_idle(
+                    &mut state,
+                    key.account_id(),
+                    tokio::time::Instant::now(),
                 );
             }
         }
         if let Some(connection) = connection {
-            close_pooled_connection(connection).await;
+            close.push(connection);
         }
+        close_pooled_connections(close).await;
     }
 
     fn discard_reserved_now(&self, key: &CodexWebSocketPoolKey, reservation_id: Uuid) {
