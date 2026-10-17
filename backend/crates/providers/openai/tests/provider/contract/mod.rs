@@ -12,6 +12,7 @@ mod precommit;
 mod privacy;
 mod recovery;
 mod response_interrupt;
+mod search_history;
 mod search_model_access;
 mod selection_retry;
 mod session_binding;
