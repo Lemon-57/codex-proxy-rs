@@ -270,8 +270,8 @@ export function useSettingsForm() {
       return
     }
     const resetCreditLeadMinutes = form.resetCreditLeadMinutes
-    if (resetCreditLeadMinutes === null || !Number.isInteger(resetCreditLeadMinutes) || resetCreditLeadMinutes < 1 || resetCreditLeadMinutes > 1440) {
-      ZNotification.warning({ message: '重置卡提前使用时间应为 1～1440 分钟的整数' })
+    if (resetCreditLeadMinutes === null || !Number.isSafeInteger(resetCreditLeadMinutes) || resetCreditLeadMinutes < 1) {
+      ZNotification.warning({ message: '重置卡提前使用时间应为正整数分钟' })
       return
     }
     const usageRetentionDays = form.usageRetentionDays

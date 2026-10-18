@@ -1627,13 +1627,17 @@ async fn account_affinity_and_rotation_budget_round_trip_and_reject_invalid_valu
 }
 
 #[test]
-fn reset_credit_lead_minutes_requires_an_integer_within_one_day() {
+fn reset_credit_lead_minutes_accepts_long_windows_within_storage_representation() {
     for (value, valid) in [
         (0, false),
         (1, true),
         (10, true),
         (1440, true),
-        (1441, false),
+        (1441, true),
+        (43_200, true),
+        (525_600, true),
+        (i32::MAX as u32, true),
+        (i32::MAX as u32 + 1, false),
     ] {
         let mut body = update_body();
         body["resetCreditLeadMinutes"] = json!(value);

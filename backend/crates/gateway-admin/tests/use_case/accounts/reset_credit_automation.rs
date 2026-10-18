@@ -717,6 +717,7 @@ async fn threshold_services(
         .accounts(store)
         .settings(Arc::new(StaticSettingsStore {
             reset_credit_max_weekly_remaining_percent: max_remaining,
+            ..Default::default()
         }))
         .provider(provider)
         .probe(Arc::new(SuccessfulAccountProbe))
@@ -814,6 +815,45 @@ async fn automation_weekly_threshold_is_optional_inclusive_and_uses_remaining_qu
             assert!(record.state.retry_at.unwrap() > Utc::now());
             assert!(record.state.retry_at.unwrap() <= record.state.credits[0].expires_at);
         }
+    }
+}
+
+#[tokio::test]
+async fn month_lead_consumes_only_exhausted_weekly_quota_and_covers_long_lived_cards() {
+    for (days_remaining, used, consume) in
+        [(15, 99.9, false), (15, 100.0, true), (40, 100.0, false)]
+    {
+        let provider = FakeProviderAdmin::new("openai", events());
+        enable_capability(&provider);
+        let store = FakeAccountStore::new("openai", events());
+        let expiry = Utc::now() + TimeDelta::days(days_remaining);
+        provider.reset_credits.lock().unwrap().push(card(expiry));
+        store
+            .automations
+            .lock()
+            .unwrap()
+            .insert("acct_test".into(), plan(expiry));
+        provider.set_quota(weekly_quota(used));
+        let services = super::super::AdminHarness::new()
+            .accounts(store)
+            .settings(Arc::new(StaticSettingsStore {
+                reset_credit_lead_minutes: 43_200,
+                reset_credit_max_weekly_remaining_percent: Some(0),
+            }))
+            .provider(provider.clone())
+            .probe(Arc::new(SuccessfulAccountProbe))
+            .build()
+            .await;
+        services
+            .accounts()
+            .reconcile_reset_credit_automation(ProviderAccountId::new("acct_test").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            !provider.reset_credit_commands().is_empty(),
+            consume,
+            "days={days_remaining}, used={used}"
+        );
     }
 }
 

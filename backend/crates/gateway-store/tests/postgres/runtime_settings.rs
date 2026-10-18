@@ -1525,3 +1525,50 @@ async fn reset_credit_weekly_threshold_upgrade_defaults_unset_and_round_trips() 
     }
     database.close().await;
 }
+
+#[tokio::test]
+async fn reset_credit_lead_window_upgrade_preserves_settings_and_round_trips_long_durations() {
+    let Some(database) = TestDatabase::create_through("reset_long_lead", 33).await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let before = repository.load_runtime_settings().await.unwrap();
+    assert!(
+        sqlx::query("update runtime_settings set reset_credit_lead_minutes = 43200 where id = 1")
+            .execute(&database.pool)
+            .await
+            .is_err()
+    );
+    super::TEST_MIGRATOR.run(&database.pool).await.unwrap();
+    assert_eq!(
+        repository
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .values
+            .reset_credit_lead_minutes,
+        before.values.reset_credit_lead_minutes
+    );
+    for lead in [1, 1_441, 43_200, 525_600, i32::MAX as u32] {
+        let mut update = settings_with_margin(600);
+        update.values.reset_credit_lead_minutes = lead;
+        update.values.reset_credit_max_weekly_remaining_percent = Some(0);
+        repository.update_runtime_settings(update).await.unwrap();
+        let after = repository.load_runtime_settings().await.unwrap();
+        assert_eq!(after.values.reset_credit_lead_minutes, lead);
+        assert_eq!(
+            after.values.reset_credit_max_weekly_remaining_percent,
+            Some(0)
+        );
+    }
+    for invalid in [-1, 0] {
+        assert!(
+            sqlx::query("update runtime_settings set reset_credit_lead_minutes = $1 where id = 1")
+                .bind(invalid)
+                .execute(&database.pool)
+                .await
+                .is_err()
+        );
+    }
+    database.close().await;
+}
