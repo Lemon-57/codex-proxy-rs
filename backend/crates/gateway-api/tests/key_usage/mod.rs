@@ -320,7 +320,7 @@ async fn records_keep_pagination_and_hide_admin_and_upstream_data() {
                 &record["latencyDetails"],
                 &[
                     "upstreamResponseMs",
-                    "upstreamEngineIapiTbtMs",
+                    "upstreamEngineMs",
                     "firstEventMs",
                     "firstReasoningMs",
                     "firstTextMs",
@@ -328,10 +328,7 @@ async fn records_keep_pagination_and_hide_admin_and_upstream_data() {
             );
             assert_eq!(record["latencyDetails"]["firstEventMs"], 100);
             assert_eq!(record["latencyDetails"]["upstreamResponseMs"], 1000);
-            assert_eq!(
-                record["latencyDetails"]["upstreamEngineIapiTbtMs"],
-                2.450638
-            );
+            assert_eq!(record["latencyDetails"]["upstreamEngineMs"], 2.450638);
             assert!(record["statusCode"].is_null());
         } else {
             assert_eq!(record["statusCode"], 502);

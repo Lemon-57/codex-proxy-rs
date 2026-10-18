@@ -197,10 +197,6 @@ export function usageLatencyDetails(record: UsageLatencyRecord) {
   const performanceItems = [
     { label: 'API 开销', value: durationValue(latencyDetails?.upstreamApiOverheadMs) },
     { label: '引擎耗时', value: durationValue(latencyDetails?.upstreamEngineMs) },
-    { label: 'TTFT · IAPI', value: durationValue(latencyDetails?.upstreamEngineIapiTtftMs) },
-    { label: 'TTFT · Service', value: durationValue(latencyDetails?.upstreamEngineServiceTtftMs) },
-    { label: 'Token 间隔 · IAPI', value: durationValue(latencyDetails?.upstreamEngineIapiTbtMs) },
-    { label: 'Token 间隔 · Service', value: durationValue(latencyDetails?.upstreamEngineServiceTbtMs) },
   ]
   for (const item of performanceItems) {
     if (item.value !== null)

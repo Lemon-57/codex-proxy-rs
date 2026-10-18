@@ -955,10 +955,6 @@ pub struct ModelRequestTimings {
     pub upstream_response_ms: Option<u64>,
     pub upstream_api_overhead_ms: Option<f64>,
     pub upstream_engine_ms: Option<f64>,
-    pub upstream_engine_iapi_ttft_ms: Option<f64>,
-    pub upstream_engine_service_ttft_ms: Option<f64>,
-    pub upstream_engine_iapi_tbt_ms: Option<f64>,
-    pub upstream_engine_service_tbt_ms: Option<f64>,
     pub latency_ms: Option<u64>,
 }
 

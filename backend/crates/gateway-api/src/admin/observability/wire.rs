@@ -230,14 +230,6 @@ pub struct UsageLatencyDetailsView {
     pub upstream_api_overhead_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_engine_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_engine_iapi_ttft_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_engine_service_ttft_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_engine_iapi_tbt_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstream_engine_service_tbt_ms: Option<f64>,
 }
 
 /// 单次上游尝试展示

@@ -505,10 +505,6 @@ struct FinalState {
     upstream_response_ms: Option<u64>,
     upstream_api_overhead_ms: Option<f64>,
     upstream_engine_ms: Option<f64>,
-    upstream_engine_iapi_ttft_ms: Option<f64>,
-    upstream_engine_service_ttft_ms: Option<f64>,
-    upstream_engine_iapi_tbt_ms: Option<f64>,
-    upstream_engine_service_tbt_ms: Option<f64>,
     provider_metadata_json: Option<String>,
     cost_source: CostSource,
     cost_ticks: Option<u128>,
@@ -684,12 +680,6 @@ impl ExecutionStore for FakeStore {
                 upstream_response_ms: finalization.timings.upstream_response_ms,
                 upstream_api_overhead_ms: finalization.timings.upstream_api_overhead_ms,
                 upstream_engine_ms: finalization.timings.upstream_engine_ms,
-                upstream_engine_iapi_ttft_ms: finalization.timings.upstream_engine_iapi_ttft_ms,
-                upstream_engine_service_ttft_ms: finalization
-                    .timings
-                    .upstream_engine_service_ttft_ms,
-                upstream_engine_iapi_tbt_ms: finalization.timings.upstream_engine_iapi_tbt_ms,
-                upstream_engine_service_tbt_ms: finalization.timings.upstream_engine_service_tbt_ms,
                 provider_metadata_json: finalization.provider_metadata_json,
                 cost_source: finalization.cost.source(),
                 cost_ticks: finalization
@@ -2067,10 +2057,6 @@ fn discarded_attempt_observation_does_not_leak_into_retry_result() {
         upstream_response_ms: Some(7_000),
         upstream_api_overhead_ms: Some(120.25),
         upstream_engine_ms: Some(6400.0),
-        upstream_engine_iapi_ttft_ms: Some(650.5),
-        upstream_engine_service_ttft_ms: Some(720.25),
-        upstream_engine_iapi_tbt_ms: Some(18.45),
-        upstream_engine_service_tbt_ms: Some(20.12),
         ..ProviderResponseTimings::default()
     });
     let second_observation = ProviderResponseObservation::new(
@@ -2164,10 +2150,6 @@ fn discarded_attempt_observation_does_not_leak_into_retry_result() {
     assert_eq!(finalization.upstream_response_ms, None);
     assert_eq!(finalization.upstream_api_overhead_ms, None);
     assert_eq!(finalization.upstream_engine_ms, None);
-    assert_eq!(finalization.upstream_engine_iapi_ttft_ms, None);
-    assert_eq!(finalization.upstream_engine_service_ttft_ms, None);
-    assert_eq!(finalization.upstream_engine_iapi_tbt_ms, None);
-    assert_eq!(finalization.upstream_engine_service_tbt_ms, None);
     let contexts = provider.contexts.lock().unwrap();
     assert_eq!(contexts.len(), 2);
     assert_eq!(

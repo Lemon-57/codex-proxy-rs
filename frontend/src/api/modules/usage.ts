@@ -59,10 +59,6 @@ export interface UsageLatencyDetails {
   upstreamResponseMs?: number
   upstreamApiOverheadMs?: number
   upstreamEngineMs?: number
-  upstreamEngineIapiTtftMs?: number
-  upstreamEngineServiceTtftMs?: number
-  upstreamEngineIapiTbtMs?: number
-  upstreamEngineServiceTbtMs?: number
   admissionDecisionMs?: number
   accountSelectionWaitMs?: number
   capacityUsedSlots?: number

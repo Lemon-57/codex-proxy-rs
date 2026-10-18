@@ -186,7 +186,7 @@ async fn facts_are_readable_without_replacing_or_duplicating_the_original_execut
             .with_timings(ProviderResponseTimings {
                 headers_ms: Some(19),
                 upstream_response_ms: Some(7_000),
-                upstream_engine_iapi_tbt_ms: Some(2.450638),
+                upstream_engine_ms: Some(2.450638),
                 ..Default::default()
             }),
     );
@@ -273,7 +273,7 @@ async fn facts_are_readable_without_replacing_or_duplicating_the_original_execut
     );
     assert_eq!(facts["observation"]["timings"]["headers_ms"], 19);
     assert_eq!(
-        facts["observation"]["timings"]["upstream_engine_iapi_tbt_ms"],
+        facts["observation"]["timings"]["upstream_engine_ms"],
         2.450638
     );
     assert_eq!(

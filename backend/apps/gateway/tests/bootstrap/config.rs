@@ -106,8 +106,11 @@ fn config_loader_should_apply_only_explicit_topology_overrides() {
             "postgres://codex_proxy@127.0.0.1:5432/codex_proxy",
         )
         .env("CPR_REDIS_URL", "redis://127.0.0.1:6379/")
-        .env("CPR_DATABASE_PASSWORD", POSTGRES_PASSWORD)
-        .env("CPR_REDIS_PASSWORD", REDIS_PASSWORD)
+        .env(
+            "CPR_DATABASE_PASSWORD",
+            "RdsTest9!abcdefGhRdsTest9!abcdefGh",
+        )
+        .env("CPR_REDIS_PASSWORD", "ManagedRedis9!abcdefGh")
         .status()
         .expect("run isolated environment override test");
     assert!(status.success());
@@ -282,13 +285,53 @@ fn config_loader_should_reject_embedded_database_password() {
 }
 
 #[test]
-fn config_loader_should_reject_non_hex_postgres_password() {
-    assert_rejected(valid_config().replace(POSTGRES_PASSWORD, &"g".repeat(48)));
+fn config_loader_should_accept_managed_store_passwords() {
+    for password in [
+        "RdsTest9!abcdefGh".to_owned(),
+        "RdsTest9!abcdefGhRdsTest9!abcdefGh".to_owned(),
+        POSTGRES_PASSWORD.to_owned(),
+        "x".repeat(128),
+        "Managed@:/?#%&+Password9!".to_owned(),
+        "数据库密码".repeat(4),
+    ] {
+        for field in ["database", "redis"] {
+            let mut document = valid_config_document();
+            document["store"][field]["password"] = serde_json::json!(password);
+            let (config, _directory) =
+                parse_config(&document.to_string()).expect("managed store password");
+            assert!(!format!("{config:?}").contains(&password));
+        }
+    }
 }
 
 #[test]
-fn config_loader_should_reject_wrong_length_redis_password() {
-    assert_rejected(valid_config().replace(REDIS_PASSWORD, "1234"));
+fn config_loader_should_reject_invalid_store_passwords() {
+    for password in [
+        String::new(),
+        "x".repeat(15),
+        "x".repeat(129),
+        " ".repeat(32),
+        "\u{3000}".repeat(6),
+        "数据库密码".repeat(9),
+        "RdsTest9!abcdefGh\u{0000}".to_owned(),
+        "RdsTest9!abcdefGh\n".to_owned(),
+        "RdsTest9!abcdefGh\t".to_owned(),
+        "RdsTest9!abcdefGh\u{007f}".to_owned(),
+    ] {
+        for field in ["database", "redis"] {
+            let mut document = valid_config_document();
+            document["store"][field]["password"] = serde_json::json!(password);
+            assert_rejected(document.to_string());
+        }
+    }
+}
+
+#[test]
+fn config_loader_should_reject_embedded_redis_password() {
+    assert_rejected(valid_config().replace(
+        "redis://127.0.0.1:6379/",
+        "redis://default:embedded@127.0.0.1:6379/",
+    ));
 }
 
 #[test]

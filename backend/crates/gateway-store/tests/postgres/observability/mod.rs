@@ -110,7 +110,7 @@ async fn output_throughput_uses_official_response_duration_without_local_fallbac
                'firstTokenMs', $2::bigint,
                'latencyMs', $3::bigint),
              'upstream', coalesce(request_observation_json #> '{timings,upstream}', '{}'::jsonb) || jsonb_build_object(
-               'responseMs', $4::bigint, 'engineIapiTbtMs', 2.450638))))
+               'responseMs', $4::bigint, 'engineMs', 2.450638))))
              where id = 'req_observe_success'",
         )
         .bind(output)
@@ -150,8 +150,6 @@ async fn output_throughput_uses_official_response_duration_without_local_fallbac
             detail.request.upstream_response_ms,
             record.upstream_response_ms
         );
-        assert_eq!(record.upstream_engine_iapi_tbt_ms, Some(2.450638));
-        assert_eq!(detail.request.upstream_engine_iapi_tbt_ms, Some(2.450638));
 
         super::drain_analytics(&database.pool).await;
         let summary = repository

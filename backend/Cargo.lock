@@ -1915,6 +1915,7 @@ dependencies = [
  "gateway-admin",
  "gateway-core",
  "hex",
+ "percent-encoding",
  "redis",
  "secrecy",
  "serde",

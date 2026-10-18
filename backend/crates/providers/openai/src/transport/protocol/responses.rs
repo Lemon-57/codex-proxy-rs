@@ -255,10 +255,6 @@ pub(crate) fn response_duration_ms(value: &Value) -> Option<u64> {
 pub(crate) struct ResponseTimingMetrics {
     pub upstream_api_overhead_ms: Option<f64>,
     pub upstream_engine_ms: Option<f64>,
-    pub upstream_engine_iapi_ttft_ms: Option<f64>,
-    pub upstream_engine_service_ttft_ms: Option<f64>,
-    pub upstream_engine_iapi_tbt_ms: Option<f64>,
-    pub upstream_engine_service_tbt_ms: Option<f64>,
 }
 
 impl ResponseTimingMetrics {
@@ -287,7 +283,6 @@ impl ResponseTimingMetrics {
             return Self {
                 upstream_api_overhead_ms: overhead,
                 upstream_engine_ms: milliseconds(path, "engine_wall_ms"),
-                ..Self::default()
             };
         }
         // 直接返回的专项指标保留原口径，明确标为整轮累计的值不能归入单次请求
@@ -303,16 +298,6 @@ impl ResponseTimingMetrics {
                 "responses_duration_excl_engine_and_client_tool_time_ms",
             ),
             upstream_engine_ms: milliseconds(metrics, "engine_service_total_ms"),
-            upstream_engine_iapi_ttft_ms: milliseconds(metrics, "engine_iapi_ttft_total_ms"),
-            upstream_engine_service_ttft_ms: milliseconds(metrics, "engine_service_ttft_total_ms"),
-            upstream_engine_iapi_tbt_ms: milliseconds(
-                metrics,
-                "engine_iapi_tbt_across_engine_calls_ms",
-            ),
-            upstream_engine_service_tbt_ms: milliseconds(
-                metrics,
-                "engine_service_tbt_across_engine_calls_ms",
-            ),
         }
     }
 
@@ -322,18 +307,6 @@ impl ResponseTimingMetrics {
         }
         if incoming.upstream_engine_ms.is_some() {
             self.upstream_engine_ms = incoming.upstream_engine_ms;
-        }
-        if incoming.upstream_engine_iapi_ttft_ms.is_some() {
-            self.upstream_engine_iapi_ttft_ms = incoming.upstream_engine_iapi_ttft_ms;
-        }
-        if incoming.upstream_engine_service_ttft_ms.is_some() {
-            self.upstream_engine_service_ttft_ms = incoming.upstream_engine_service_ttft_ms;
-        }
-        if incoming.upstream_engine_iapi_tbt_ms.is_some() {
-            self.upstream_engine_iapi_tbt_ms = incoming.upstream_engine_iapi_tbt_ms;
-        }
-        if incoming.upstream_engine_service_tbt_ms.is_some() {
-            self.upstream_engine_service_tbt_ms = incoming.upstream_engine_service_tbt_ms;
         }
     }
 }

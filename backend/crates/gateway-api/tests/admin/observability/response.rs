@@ -288,10 +288,6 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
     record.upstream_response_ms = Some(1_000);
     record.upstream_api_overhead_ms = Some(120.25);
     record.upstream_engine_ms = Some(6400.0);
-    record.upstream_engine_iapi_ttft_ms = Some(650.5);
-    record.upstream_engine_service_ttft_ms = Some(720.25);
-    record.upstream_engine_iapi_tbt_ms = Some(18.45);
-    record.upstream_engine_service_tbt_ms = Some(20.12);
     fixture
         .usage_detail
         .lock()
@@ -361,22 +357,6 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
     assert_eq!(
         value["data"]["latencyDetails"]["upstreamEngineMs"],
         json!(6400.0)
-    );
-    assert_eq!(
-        value["data"]["latencyDetails"]["upstreamEngineIapiTtftMs"],
-        json!(650.5)
-    );
-    assert_eq!(
-        value["data"]["latencyDetails"]["upstreamEngineServiceTtftMs"],
-        json!(720.25)
-    );
-    assert_eq!(
-        value["data"]["latencyDetails"]["upstreamEngineIapiTbtMs"],
-        json!(18.45)
-    );
-    assert_eq!(
-        value["data"]["latencyDetails"]["upstreamEngineServiceTbtMs"],
-        json!(20.12)
     );
     assert!(value["data"].get("firstTokenMs").is_none());
     assert!(value["data"].get("firstTokenLatencyMsDisplay").is_none());
@@ -734,10 +714,6 @@ pub(super) fn usage_record_with_account(
         upstream_response_ms: None,
         upstream_api_overhead_ms: None,
         upstream_engine_ms: None,
-        upstream_engine_iapi_ttft_ms: None,
-        upstream_engine_service_ttft_ms: None,
-        upstream_engine_iapi_tbt_ms: None,
-        upstream_engine_service_tbt_ms: None,
         latency_ms: None,
         admission_decision_ms: None,
         account_selection_wait_ms: None,
@@ -877,10 +853,6 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             upstream_response_ms: Some(2_000),
             upstream_api_overhead_ms: None,
             upstream_engine_ms: None,
-            upstream_engine_iapi_ttft_ms: None,
-            upstream_engine_service_ttft_ms: None,
-            upstream_engine_iapi_tbt_ms: None,
-            upstream_engine_service_tbt_ms: None,
             latency_ms: Some(31),
             admission_decision_ms: Some(1),
             account_selection_wait_ms: Some(2),

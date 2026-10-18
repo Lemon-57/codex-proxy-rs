@@ -536,12 +536,8 @@ pub struct ProviderResponseTimings {
     pub upstream_response_ms: Option<u64>,
     /// 上游排除引擎与客户端工具时间后的 API 耗时
     pub upstream_api_overhead_ms: Option<f64>,
-    /// 上游响应级引擎耗时；以下专项指标保留毫秒小数及各自内部计量层级
+    /// 上游响应级引擎耗时，保留毫秒小数
     pub upstream_engine_ms: Option<f64>,
-    pub upstream_engine_iapi_ttft_ms: Option<f64>,
-    pub upstream_engine_service_ttft_ms: Option<f64>,
-    pub upstream_engine_iapi_tbt_ms: Option<f64>,
-    pub upstream_engine_service_tbt_ms: Option<f64>,
 }
 
 /// Provider 已筛选的响应观测 JSON

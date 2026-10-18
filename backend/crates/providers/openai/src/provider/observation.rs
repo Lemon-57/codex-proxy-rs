@@ -199,18 +199,6 @@ impl OpenAiResponseObservationState {
         if metrics.upstream_engine_ms.is_some() {
             self.timings.upstream_engine_ms = metrics.upstream_engine_ms;
         }
-        if metrics.upstream_engine_iapi_ttft_ms.is_some() {
-            self.timings.upstream_engine_iapi_ttft_ms = metrics.upstream_engine_iapi_ttft_ms;
-        }
-        if metrics.upstream_engine_service_ttft_ms.is_some() {
-            self.timings.upstream_engine_service_ttft_ms = metrics.upstream_engine_service_ttft_ms;
-        }
-        if metrics.upstream_engine_iapi_tbt_ms.is_some() {
-            self.timings.upstream_engine_iapi_tbt_ms = metrics.upstream_engine_iapi_tbt_ms;
-        }
-        if metrics.upstream_engine_service_tbt_ms.is_some() {
-            self.timings.upstream_engine_service_tbt_ms = metrics.upstream_engine_service_tbt_ms;
-        }
         self.timings != previous
     }
 

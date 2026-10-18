@@ -56,7 +56,7 @@ jobs:
             const marker = '<!-- agents-md-guard -->';
             const body = [
               marker,
-              '佬友，我看到这个 PR 涉及受保护的协作规则文件，按仓库约定需要先关闭',
+              '我看到这个 PR 涉及受保护的协作规则文件，按仓库约定需要先关闭',
               '',
               '保护范围包括根目录或子目录的 `AGENTS.md`、根目录的 `CONTRIBUTING.md`，以及 `.agents/skills/` 和 `.github/` 中的所有文件，涵盖新增、修改、删除和重命名',
               '',
