@@ -1138,8 +1138,9 @@ OAuth start 使用：
   不验证上游账号是否已经恢复，下一次真实请求仍可重新写入失败事实
 - 成功额度观测会 revision-fenced 写入 quota；明确 `Allowed` 投影为 `normal`，明确耗尽投影为
   `quota_exhausted`。额度观测不会清除凭据过期、无效或封禁事实；这些事实统一投影为 `error`，并由
-  `errorReason` 区分。额度接口的 401/403 也不足以判定 refresh token 永久失效，credential 终态只由
-  OAuth refresh 的明确永久错误写入
+  `errorReason` 区分。普通额度接口 401/403 不改变凭据或额度事实；明确的 HTTP 401 / `token_revoked`
+  将对应凭据版本标记为无效，启用账号显示 `error` / `credential_invalid`，说明访问令牌已被撤销、需要刷新凭据或重新授权。
+  停用账号仍显示 `disabled`，旧额度快照保留；过期查询不能覆盖已轮换的新凭据。这不表示账号封禁或 refresh token 永久失效
 - xAI 额度百分比只读取 `creditUsagePercent`，缺失时保持未知，不由旧月额度与用量计算。
   预付余额保留上游账本符号，非零余额及剩余按量额度可独立证明可用；窗口已过期或缺少可用证据时，
   不凭旧快照恢复账号

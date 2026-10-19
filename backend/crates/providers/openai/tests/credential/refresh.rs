@@ -888,11 +888,7 @@ impl TokenRefresher for QuotaRejectionDuringRefresh {
         // 模拟 RT 请求在途时，手动或周期额度查询先收到 401
         if self.background_quota {
             assert_eq!(
-                self.quota
-                    .synchronize()
-                    .await
-                    .expect("quota cycle")
-                    .transient,
+                self.quota.synchronize().await.expect("quota cycle").stale,
                 1
             );
         } else {
@@ -906,7 +902,7 @@ impl TokenRefresher for QuotaRejectionDuringRefresh {
 }
 
 #[tokio::test]
-async fn quota_rejection_during_oauth_refresh_preserves_terminal_result() {
+async fn quota_revocation_during_oauth_refresh_preserves_newer_credential_fact() {
     for background_quota in [false, true] {
         let store = Arc::new(MemoryAccountStore::default());
         let account_id = "acct_quota_during_refresh";
@@ -951,15 +947,17 @@ async fn quota_rejection_during_oauth_refresh_preserves_terminal_result() {
         assert!(
             matches!(
                 outcomes.as_slice(),
-                [CodexCredentialRefreshOutcome::Invalidated { .. }]
+                [CodexCredentialRefreshOutcome::Stale { .. }]
             ),
             "{outcomes:?}"
         );
         let current = store.account(account_id).expect("terminal account");
-        assert_eq!(current.credential_state(), CredentialState::Expired);
+        // 明确撤销已写入较新的凭据事实；刷新失败不能绕过完整快照保护覆盖它。
+        // 成功轮换仍通过凭据 revision CAS 提交，另由 quota 测试覆盖。
+        assert_eq!(current.credential_state(), CredentialState::Invalid);
         assert_eq!(
             current.last_error_message(),
-            Some("refresh token invalidated")
+            Some("访问令牌已被撤销，请刷新凭据或重新授权")
         );
     }
 }

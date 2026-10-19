@@ -7,6 +7,7 @@ mod recovery;
 mod refresh_timing;
 mod reset_credits;
 mod reset_recovery;
+mod revoked;
 mod scheduling;
 mod slots;
 mod snapshot;
@@ -723,7 +724,7 @@ async fn quota_endpoint_auth_rejections_do_not_reclassify_credentials_or_quota()
 }
 
 #[tokio::test]
-async fn quota_endpoint_rejection_preserves_details_without_changing_account_facts() {
+async fn quota_endpoint_revoked_token_marks_error_and_allows_in_flight_refresh_commit() {
     let store = Arc::new(MemoryAccountStore::default());
     let account_id = "acct_quota_rejection_detail";
     create_account(&store, account_id).await;
@@ -757,14 +758,38 @@ async fn quota_endpoint_rejection_preserves_details_without_changing_account_fac
         }
         other => panic!("expected upstream rejection, got {other:?}"),
     }
-    // 额度查询诊断不能进入凭据快照，否则会干扰在途 OAuth 刷新的终态提交
     let current = store.account(account_id).expect("account after refresh");
-    assert_eq!(current, before);
+    assert_eq!(current.credential_state(), CredentialState::Invalid);
+    assert_eq!(current.revision(), before.revision());
+    assert_eq!(current.quota(), before.quota());
+    assert_eq!(current.enabled(), before.enabled());
+    assert_eq!(
+        current.last_error_reason(),
+        Some(gateway_core::account::AccountErrorReason::CredentialInvalid)
+    );
+    assert_eq!(
+        current.last_error_message(),
+        Some("访问令牌已被撤销，请刷新凭据或重新授权")
+    );
+    assert_eq!(
+        current.status_projection(SystemTime::now(), None).status,
+        AccountStatus::Error
+    );
+    // 已开始的 RT exchange 仍可按原 revision 提交，并恢复新凭据状态
     store
         .repository()
-        .load_runtime_credential(&before)
+        .rotate_refreshed_oauth_secret(
+            &before,
+            secret("rotated-after-revocation-observation"),
+            before.access_token_expires_at(),
+            None,
+        )
         .await
-        .expect("unchanged credential");
+        .expect("revocation observation must not discard a successful credential rotation");
+    let rotated = store.account(account_id).expect("rotated account");
+    assert_eq!(rotated.credential_state(), CredentialState::Ready);
+    assert_eq!(rotated.last_error_reason(), None);
+    assert_eq!(rotated.last_error_message(), None);
 }
 
 #[tokio::test]

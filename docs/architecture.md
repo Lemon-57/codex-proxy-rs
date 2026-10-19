@@ -870,8 +870,9 @@ PostgreSQL schema 由迁移目录按编号管理。已应用迁移按字节冻�
 
 ## 9. Credential、额度与主动重置
 
-credential 与 quota 是两组独立事实：credential refresh 不等于 quota refresh，额度接口的 401/403
-也不能单独证明 refresh token 永久失效
+credential 与 quota 是两组独立事实：credential refresh 不等于 quota refresh，普通额度接口的 401/403
+不能单独证明 refresh token 永久失效。明确的访问令牌撤销由 Provider 通过现有凭据 revision 与观测时间保护
+写入凭据无效事实，保留额度快照和人工设置；已完成的轮换不会被旧查询覆盖，在途成功轮换仍可提交
 
 - OpenAI 支持 OAuth、AT/RT、PAT 和上游 API Key。OAuth 身份来自官方 JWT claims，PAT 经官方身份接口验证，
   不信任导入文档顶层身份字段。RT-only 导入先换取 AT；AT-only、PAT 与 API Key 不参加 OAuth 自动续期。
