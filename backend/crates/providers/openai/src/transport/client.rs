@@ -81,17 +81,20 @@ pub(super) fn build_account_http_client_with_timeout(
         return Ok(client.clone());
     }
 
-    // 连接池与 TCP、HTTP/2 保活沿用官方 Core 的 reqwest 默认值
+    // TCP、HTTP/2 保活沿用原画像；代理的空闲隧道不能按单客户端的无限池保留
     let mut builder = Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(timeout)
         .connector_layer(super::connection::ConnectionLayer);
     if let Some(proxy) = proxy {
-        builder = builder.proxy(
-            reqwest::Proxy::all(proxy.expose_url())
-                .map_err(|_| CustomCaError::ProxyConfiguration)?,
-        );
+        builder = builder
+            .pool_max_idle_per_host(4)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .proxy(
+                reqwest::Proxy::all(proxy.expose_url())
+                    .map_err(|_| CustomCaError::ProxyConfiguration)?,
+            );
     }
     let client = build_reqwest_client_with_custom_ca(builder)?;
     let mut clients = cache

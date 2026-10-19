@@ -160,7 +160,8 @@ pub enum PreDeliveryRetry {
         /// 发起下一次传输尝试前的退避时长
         delay: Duration,
     },
-    /// 可靠 NotSent 的建连恢复；次数与时间由 Core 的请求级预算裁决
+    /// 可靠 NotSent 的建连恢复；先重试同账号，持续失败时由既有路由约束决定是否换号
+    /// 次数与时间始终受 Core 的请求级建连预算约束
     SameAccountConnectionRetry {
         /// Provider 明确指定实际失败的传输，避免 HTTP 恢复重新进入 WS
         transport: crate::upstream::AttemptTransport,

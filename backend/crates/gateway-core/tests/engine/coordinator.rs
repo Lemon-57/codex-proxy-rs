@@ -5831,9 +5831,56 @@ fn provider_default_profile_is_applied_once_and_frozen_across_account_retries() 
 }
 
 #[test]
-fn connection_recovery_keeps_one_account_and_http_transport_until_success() {
+fn connection_recovery_rotates_failed_exit_after_one_same_account_retry() {
     let operation = generate_operation();
     let route_plan = plan(&operation);
+    let failure = || Script::Stream {
+        account_id: "acct_first",
+        items: vec![Err(ProviderError::new(
+            ProviderErrorKind::Transport,
+            UpstreamSendState::NotSent,
+        )
+        .with_connection_retry(AttemptTransport::Fallback))],
+    };
+    let (coordinator, store, provider) = coordinator(vec![
+        failure(),
+        failure(),
+        Script::Stream {
+            account_id: "acct_second",
+            items: complete_stream(None),
+        },
+    ]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    block_on(session.collect_uncommitted()).unwrap();
+    block_on(session.commit_downstream(Some(200))).unwrap();
+    let contexts = provider.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 3);
+    let failed = ProviderAccountId::new("acct_first").unwrap();
+    assert_eq!(contexts[1].required_account(), Some(&failed));
+    assert!(contexts[2].required_account().is_none());
+    assert!(contexts[2].excluded_accounts().contains(&failed));
+    assert_eq!(
+        store.state.lock().unwrap().finalizations[0].outcome,
+        ExecutionOutcome::Succeeded
+    );
+}
+
+#[test]
+fn connection_recovery_honors_disabled_rotation_and_http_transport() {
+    let operation = generate_operation();
+    let route_plan = plan_with_policy(
+        &operation,
+        AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(2).unwrap())
+            .with_max_account_rotations(0),
+    );
     let failure = || Script::Stream {
         account_id: "acct_only",
         items: vec![Err(ProviderError::new(
@@ -5881,7 +5928,11 @@ fn connection_recovery_keeps_one_account_and_http_transport_until_success() {
 #[test]
 fn connection_recovery_exhaustion_preserves_transport_failure() {
     let operation = generate_operation();
-    let route_plan = plan(&operation);
+    let route_plan = plan_with_policy(
+        &operation,
+        AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(2).unwrap())
+            .with_max_account_rotations(0),
+    );
     let (coordinator, store, provider) = coordinator(
         (0..4)
             .map(|_| Script::Stream {

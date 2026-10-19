@@ -1600,11 +1600,26 @@ where
                 error.pre_delivery_retry(),
                 Some(crate::error::PreDeliveryRetry::SameAccountConnectionRetry { .. })
             );
+        // 原账号一次建连恢复后仍失败时，不能把全部启动预算耗在同一故障出口
+        // 仅处理未发送、未交付、无精确续接及无强制账号的请求，固定代理绑定不变
+        let connection_rotation_requested = connection_retry_requested
+            && self.connection_retries > 0
+            && !execution_effect_observed
+            && self.account_selection.required_account().is_none()
+            && self.continuation_attempt == ContinuationAttempt::None
+            && !self.replay_barrier_reached
+            && !self.delivery_pending
+            && attempt_send_state == UpstreamSendState::NotSent
+            && !self.connection_budget.exhausted()
+            && self.routing_attempts < self.plan.max_attempts().get()
+            && self.account_rotations
+                < self.plan.account_selection_policy().max_account_rotations();
         // Provider 的有界同账号传输恢复是尽力重试策略，不要求把 Sent/Ambiguous
         // 改写成安全证明；外部副作用、取消、预算与下游提交仍由 Core 拦截
         let transport_recovery = match error.pre_delivery_retry() {
             Some(crate::error::PreDeliveryRetry::SameAccountConnectionRetry { transport })
                 if !execution_effect_observed
+                    && !connection_rotation_requested
                     && !self.connection_budget.exhausted()
                     && !self.replay_barrier_reached
                     && !self.delivery_pending
@@ -1706,7 +1721,7 @@ where
             && transient_retry.is_none()
             && !is_return_error_retry(&error)
             && transport_recovery.is_none()
-            && (ordinary_retry || account_rotation_retry)
+            && (ordinary_retry || account_rotation_retry || connection_rotation_requested)
             && self.account_rotations
                 < self.plan.account_selection_policy().max_account_rotations();
         let retryable = !error.retry_is_prohibited()
@@ -1754,6 +1769,7 @@ where
             "clientRetrySuppressed": suppress_transient_retry,
             "rotationRetry": rotation_retry, "accountRotations": self.account_rotations,
             "connectionRetry": connection_retry_requested,
+            "connectionRotation": connection_rotation_requested,
             "connectionRetries": self.connection_retries,
             "connectionBudgetRemainingMs": self.connection_budget.remaining().map(duration_ms),
             "executionEffectObserved": execution_effect_observed,
