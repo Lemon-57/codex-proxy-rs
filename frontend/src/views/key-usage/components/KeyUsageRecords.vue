@@ -34,7 +34,7 @@ const { visibleColumns, columnOptions, setColumnVisible, setColumnOrder, resetCo
       {{ error || '请求日志刷新失败，暂时保留上次结果' }}
     </p>
     <div class="flex h-120 min-h-0 overflow-hidden">
-      <ZTable class="min-w-0 flex-1" :columns="visibleColumns" :data="rows" :loading="loading" scrollbar-always-visible :empty-text="error ? '请求日志加载失败，请点击顶部刷新重试' : '所选条件下暂无记录'">
+      <ZTable class="min-w-0 flex-1" :columns="visibleColumns" :data="rows" :loading="loading" :empty-text="error ? '请求日志加载失败，请点击顶部刷新重试' : '所选条件下暂无记录'">
         <template #model="{ row }">
           <UsageModelCell :record="row" />
         </template>

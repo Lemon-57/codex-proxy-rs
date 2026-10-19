@@ -6,7 +6,7 @@ import { getAccountConcurrency } from '@/api'
 import { useRequestState } from '@/composables/useRequestState'
 
 export function useAccountConcurrency(account: Ref<Account | null>, open: Ref<boolean>) {
-  const data = shallowRef<Pick<AccountConcurrencyPage, 'entries' | 'total'> | null>(null)
+  const data = shallowRef<Pick<AccountConcurrencyPage, 'entries'> | null>(null)
   const receivedAt = shallowRef(0)
   const now = shallowRef(performance.now())
   const visibility = useDocumentVisibility()
@@ -60,7 +60,6 @@ export function useAccountConcurrency(account: Ref<Account | null>, open: Ref<bo
       }
       const snapshotAt = performance.now()
       data.value = {
-        total: result.total,
         entries: [...collected.values()].map(({ entry, receivedAt }) => ({
           ...entry,
           occupiedMs: entry.occupiedMs === null ? null : entry.occupiedMs + snapshotAt - receivedAt,
@@ -95,5 +94,5 @@ export function useAccountConcurrency(account: Ref<Account | null>, open: Ref<bo
   }, { immediate: true })
   onScopeDispose(stop)
 
-  return { data, entries, loading: request.loading, error: request.error, refresh }
+  return { data, entries, loading: request.loading, error: request.error }
 }

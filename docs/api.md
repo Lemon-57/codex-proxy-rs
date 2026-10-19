@@ -2048,7 +2048,8 @@ OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内�
 
 `latencyMs` 从模型执行会话开始计到终结，包含账号选择、重试及流交付等待，不包含此前的入口解析、路由和准入。
 `firstTokenLatencyMs` 与它使用同一计时起点，首字边界由 Provider 协议定义。
-OpenAI Responses 采用官方 Codex 的首个 `response.output_item.added` 边界；
+OpenAI Responses 在 HTTP SSE 收到首个非空且非 `[DONE]` 的 `data` 载荷、
+或 WebSocket 收到首个非空响应消息时记录首字，不要求实际输出内容；
 xAI 采用首个非空文本、推理或工具参数输出。对应事件缺失时保留未知，不用其他事件补齐首字。
 请求级首字统一通过 `firstTokenLatencyMs` 返回，由前端格式化。
 `latencyDetails` 的首事件、首推理和首正文时间也使用请求级起点，首推理与首正文仍要求实际内容，

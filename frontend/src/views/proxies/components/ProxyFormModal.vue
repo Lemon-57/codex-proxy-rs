@@ -55,8 +55,6 @@ const manualLocationWarning = computed(() => {
   const location = props.testResult?.location
   if (location?.status === 'conflict')
     return 'IPv4 与 IPv6 出口时区不一致，请手动填写'
-  if (location?.status === 'failed')
-    return location.message
   return ''
 })
 const busy = computed(() => props.saving || props.testingConnection || props.detectingLocation || batchBusy.value)
@@ -103,10 +101,7 @@ function clearForm() {
         <ZSwitch v-model="customLocation" label="自定义时区位置" :disabled="busy" />
         <RequestLocationDetectButton :loading="detectingLocation" :disabled="busy" @detect="emit('detectLocation')" />
       </div>
-      <p v-if="testResult?.success === false" class="m-0 text-cp-sm text-cp-error-text" role="alert">
-        连接测试失败：{{ testResult.message }}
-      </p>
-      <p v-else-if="manualLocationWarning" class="m-0 text-cp-sm text-cp-warning-text" role="status">
+      <p v-if="manualLocationWarning" class="m-0 text-cp-sm text-cp-warning-text" role="status">
         {{ manualLocationWarning }}
       </p>
       <RequestLocationFields v-if="customLocation" v-model="location" :disabled="busy" />

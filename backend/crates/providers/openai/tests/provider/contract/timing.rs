@@ -138,7 +138,6 @@ async fn official_response_duration_is_observed_independently_of_the_request_clo
         assert_eq!(timings.upstream_response_ms, Some(7_000));
         assert_eq!(timings.upstream_api_overhead_ms, Some(120.25));
         assert_eq!(timings.upstream_engine_ms, Some(6400.0));
-        assert_eq!(timings.first_token_ms, None);
         assert!(timings.first_event_ms.is_some_and(|value| value >= 20_000));
     }
 }
@@ -195,7 +194,6 @@ async fn response_critical_path_is_observed_without_logical_turn_totals_on_both_
         assert_eq!(timings.upstream_engine_ms, Some(6710.68507));
         assert!((timings.upstream_api_overhead_ms.unwrap() - 81.409594).abs() < 0.000001);
         assert_eq!(timings.upstream_response_ms, Some(7000));
-        assert_eq!(timings.first_token_ms, None);
     }
 }
 
@@ -289,12 +287,39 @@ async fn timing_frames_outside_the_active_response_do_not_enter_request_metrics(
     let timings = finish_timings(&mut stream, ProviderResponseTimings::default()).await;
     assert_eq!(timings.upstream_api_overhead_ms, None);
     assert_eq!(timings.upstream_engine_ms, None);
-    assert_eq!(timings.first_token_ms, None);
     server.await.unwrap();
 }
 
 #[tokio::test]
-async fn content_without_output_item_start_keeps_ttft_unknown_on_every_attempt() {
+async fn sse_keepalive_and_empty_data_do_not_start_ttft() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let (base_url, release, _, server) = paused_chunked_sse_server(
+        ": ping\n\nevent: response.created\n\ndata: \t\n\ndata: [DONE]\n\n".to_owned(),
+        CAPTURE_COMPLETED_SSE.to_owned(),
+    )
+    .await;
+    let mut stream = provider_with_base_url(&store, base_url)
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            timed_context(Instant::now() - Duration::from_secs(3), 1),
+        )
+        .await
+        .unwrap();
+    let first = first_upstream_timings(&mut stream).await;
+    assert_eq!(first.first_token_ms, None);
+    release.send(()).unwrap();
+    let final_timings = finish_timings(&mut stream, first).await;
+    assert!(
+        final_timings
+            .first_token_ms
+            .is_some_and(|value| value >= 3_000)
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn first_response_uses_request_clock_on_every_attempt() {
     for attempt in [1, 2] {
         let store = Arc::new(MemoryAccountStore::default());
         create_account(&store, "acct_provider_contract").await;
@@ -318,7 +343,7 @@ async fn content_without_output_item_start_keeps_ttft_unknown_on_every_attempt()
             .unwrap();
         let first = first_upstream_timings(&mut stream).await;
         assert!(first.first_event_ms.is_some_and(|value| value >= 3_000));
-        assert_eq!(first.first_token_ms, None);
+        assert!(first.first_token_ms.is_some_and(|value| value >= 3_000));
         assert!(first.first_text_ms.is_some_and(|value| value >= 3_000));
         release.send(()).unwrap();
         let final_timings = finish_timings(&mut stream, first).await;
@@ -328,7 +353,7 @@ async fn content_without_output_item_start_keeps_ttft_unknown_on_every_attempt()
 }
 
 #[tokio::test]
-async fn structural_frames_start_ttft_before_content_on_http_and_websocket() {
+async fn created_response_starts_ttft_before_output_on_http_and_websocket() {
     for websocket in [false, true] {
         for (output, has_content) in [
             (
@@ -382,13 +407,11 @@ async fn structural_frames_start_ttft_before_content_on_http_and_websocket() {
                     )
                     .await;
                     ws.next().await.unwrap().unwrap();
-                    for event in [created, added] {
-                        ws.send(Message::Text(event.to_string().into()))
-                            .await
-                            .unwrap();
-                    }
+                    ws.send(Message::Text(created.to_string().into()))
+                        .await
+                        .unwrap();
                     released.await.unwrap();
-                    for event in [output, completed] {
+                    for event in [added, output, completed] {
                         ws.send(Message::Text(event.to_string().into()))
                             .await
                             .unwrap();
@@ -397,8 +420,8 @@ async fn structural_frames_start_ttft_before_content_on_http_and_websocket() {
                 (base_url, release, server)
             } else {
                 let (base_url, release, _, server) = paused_chunked_sse_server(
-                    format!("data: {created}\n\ndata: {added}\n\n"),
-                    format!("data: {output}\n\ndata: {completed}\n\n"),
+                    format!("data: {created}\n\n"),
+                    format!("data: {added}\n\ndata: {output}\n\ndata: {completed}\n\n"),
                 )
                 .await;
                 (base_url, release, server)
@@ -423,10 +446,10 @@ async fn structural_frames_start_ttft_before_content_on_http_and_websocket() {
                         return observation.timings();
                     }
                 }
-                panic!("missing structural first-token observation");
+                panic!("missing first-response observation");
             })
             .await
-            .expect("structural first token before releasing content");
+            .expect("first response before releasing output");
             assert!(first.first_token_ms.is_some_and(|value| value >= 3_000));
             assert_eq!(first.first_text_ms, None);
             assert_eq!(first.first_reasoning_ms, None);

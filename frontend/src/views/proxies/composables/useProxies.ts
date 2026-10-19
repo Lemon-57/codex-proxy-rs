@@ -90,13 +90,16 @@ export function useProxies() {
     if (testing.has(proxy.id))
       return
     try {
-      const result = proxyResultData((await testSavedProxies([proxy]))[0])
-      if (result.lastTest?.success === false)
-        ZNotification.error({ message: `${result.name}：${result.lastTest.message}` })
-      else if (result.lastTest?.success)
-        ZNotification.success({ message: `${result.name}：连接成功` })
+      const result = proxyResultData((await testSavedProxies([proxy], {}, true))[0])
+      const test = result.lastTest
+      if (!test?.success)
+        ZNotification.error({ message: `${result.name}：${test?.message ?? '代理测试失败'}` })
+      else if (test.location.status === 'failed')
+        ZNotification.warning({ message: `${result.name}：连接成功，${test.location.message}` })
+      else if (test.location.status === 'conflict')
+        ZNotification.warning({ message: `${result.name}：连接成功，IPv4 与 IPv6 出口时区不一致` })
       else
-        ZNotification.error({ message: result.lastTest?.message ?? '代理测试失败' })
+        ZNotification.success({ message: `${result.name}：连接成功` })
     }
     catch (error) {
       if (!(error instanceof ApiError))

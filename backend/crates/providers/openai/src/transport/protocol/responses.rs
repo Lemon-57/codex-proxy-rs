@@ -222,14 +222,14 @@ pub(crate) fn is_replaceable_response_prelude(event_type: &str, value: &Value) -
     }
 }
 
-/// 单个 Responses 事件对计时系统提供的稳定语义信号
+/// Responses 响应载荷与实际内容的观测信号
 ///
-/// `output_start` 只表示官方输出项开始事件；`semantic_output` 仍要求
+/// `response_data` 表示收到非空响应载荷；`semantic_output` 仍要求
 /// 实际内容，供重试与交付边界使用，不能与首字观测互换
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResponseEventSignals {
     pub protocol_progress: bool,
-    pub output_start: bool,
+    pub response_data: bool,
     pub semantic_output: bool,
     pub reasoning_output: bool,
     pub text_output: bool,
@@ -313,12 +313,11 @@ impl ResponseTimingMetrics {
 
 /// 从已解析的 Responses 事件提取计时语义
 ///
-/// 首字采用官方 Codex 的首个 output_item.added 边界
+/// 首响应载荷由解码器在 JSON 解析前观测
 /// 语义输出仍要求文本、推理、工具参数、图片结果或工具执行
 pub fn response_event_signals(event_type: Option<&str>, value: &Value) -> ResponseEventSignals {
     let mut signals = ResponseEventSignals {
         protocol_progress: !matches!(event_type, Some("response.failed" | "error")),
-        output_start: event_type == Some("response.output_item.added"),
         ..ResponseEventSignals::default()
     };
     match event_type {
