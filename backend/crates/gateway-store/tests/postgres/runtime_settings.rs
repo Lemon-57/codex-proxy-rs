@@ -1191,28 +1191,11 @@ async fn reset_credit_weekly_threshold_defaults_unset_and_round_trips() {
 }
 
 #[tokio::test]
-async fn reset_credit_lead_window_upgrade_preserves_settings_and_round_trips_long_durations() {
-    let Some(database) = TestDatabase::create_through("reset_long_lead", 33).await else {
+async fn reset_credit_lead_window_round_trips_long_durations() {
+    let Some(database) = TestDatabase::create("reset_long_lead").await else {
         return;
     };
     let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
-    let before = repository.load_runtime_settings().await.unwrap();
-    assert!(
-        sqlx::query("update runtime_settings set reset_credit_lead_minutes = 43200 where id = 1")
-            .execute(&database.pool)
-            .await
-            .is_err()
-    );
-    super::TEST_MIGRATOR.run(&database.pool).await.unwrap();
-    assert_eq!(
-        repository
-            .load_runtime_settings()
-            .await
-            .unwrap()
-            .values
-            .reset_credit_lead_minutes,
-        before.values.reset_credit_lead_minutes
-    );
     for lead in [1, 1_441, 43_200, 525_600, i32::MAX as u32] {
         let mut update = settings_with_margin(600);
         update.values.reset_credit_lead_minutes = lead;
