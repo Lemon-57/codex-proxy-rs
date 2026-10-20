@@ -23,15 +23,15 @@ async fn committed_state_transitions_notify_without_replaying_identical_or_stale
         expected_revision: CredentialRevision::new(1).unwrap(),
         credential_state: state,
         observed_at: (anchor + TimeDelta::seconds(offset)).into(),
-        error_reason: if state == CredentialState::Expired {
-            Some(AccountErrorReason::CredentialExpired)
+        error_reason: if state == CredentialState::Invalid {
+            Some(AccountErrorReason::CredentialInvalid)
         } else {
             None
         },
         message: None,
     };
     repository
-        .apply_state_change(change(1, CredentialState::Expired))
+        .apply_state_change(change(1, CredentialState::Invalid))
         .await
         .unwrap();
     assert_eq!(changes.next().now_or_never(), Some(Some(())));
@@ -43,10 +43,10 @@ async fn committed_state_transitions_notify_without_replaying_identical_or_stale
             .unwrap()
             .summary
             .credential_state,
-        CredentialState::Expired
+        CredentialState::Invalid
     );
     repository
-        .apply_state_change(change(2, CredentialState::Expired))
+        .apply_state_change(change(2, CredentialState::Invalid))
         .await
         .unwrap();
     assert!(changes.next().now_or_never().is_none());
