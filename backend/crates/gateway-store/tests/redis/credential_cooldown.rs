@@ -495,7 +495,7 @@ async fn ordinary_success_and_later_429_preserve_capacity_freeze_and_peak_eviden
     let id = ProviderAccountId::new("acct_late_success").expect("account id");
     let revision = CredentialRevision::new(1).expect("revision");
     repository
-        .record_capacity_failure(&id, StdDuration::from_secs(600), 8)
+        .record_capacity_failure(&id, "req_initial", StdDuration::from_secs(600), 8)
         .await
         .expect("failure evidence");
     let frozen = CredentialCooldown {
@@ -536,7 +536,7 @@ async fn ordinary_success_still_clears_rate_limit_and_unfrozen_failure_evidence(
     };
     let id = ProviderAccountId::new("acct_success_429").expect("id");
     repository
-        .record_capacity_failure(&id, StdDuration::from_secs(600), 3)
+        .record_capacity_failure(&id, "req_initial", StdDuration::from_secs(600), 3)
         .await
         .expect("failure evidence");
     repository
@@ -561,4 +561,62 @@ async fn ordinary_success_still_clears_rate_limit_and_unfrozen_failure_evidence(
             .expect("peak")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn capacity_evidence_deduplicates_a_request_per_account_across_success() {
+    let Some((repository, _, _)) = repository().await else {
+        return;
+    };
+    let id = ProviderAccountId::new("acct_capacity_dedup").unwrap();
+    let other = ProviderAccountId::new("acct_capacity_other").unwrap();
+    let window = StdDuration::from_secs(600);
+    assert_eq!(
+        repository
+            .record_capacity_failure(&id, "req_one", window, 3)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        repository
+            .record_capacity_failure(&id, "req_one", window, 8)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        repository.capacity_peak_in_flight(&id).await.unwrap(),
+        Some(3)
+    );
+    assert_eq!(
+        repository
+            .record_capacity_failure(&other, "req_one", window, 2)
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    repository
+        .clear_after_success(&id, CredentialRevision::new(1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .record_capacity_failure(&id, "req_one", window, 3)
+            .await
+            .unwrap(),
+        None
+    );
+    let concurrent = futures::future::join_all(
+        (0..8).map(|_| repository.record_capacity_failure(&id, "req_two", window, 2)),
+    )
+    .await
+    .into_iter()
+    .map(Result::unwrap)
+    .collect::<Vec<_>>();
+    assert_eq!(
+        concurrent.iter().filter(|count| **count == Some(1)).count(),
+        1
+    );
+    assert_eq!(concurrent.iter().filter(|count| count.is_none()).count(), 7);
 }

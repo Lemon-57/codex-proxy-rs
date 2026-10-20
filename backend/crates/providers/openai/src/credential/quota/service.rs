@@ -99,15 +99,20 @@ impl CodexCredentialQuotaService {
     /// `CapacityFreeze` 类别的账号级冷却
     /// 调度侧立即屏蔽该账号，恢复由
     /// freeze-recovery worker 处理；本路径只依赖 Redis 可丢失事实
-    pub async fn apply_capacity_failure(&self, account: &ProviderAccount, observed_at: SystemTime) {
+    pub async fn apply_capacity_failure(
+        &self,
+        account: &ProviderAccount,
+        request_id: &str,
+        observed_at: SystemTime,
+    ) {
         let policy = self.freeze_policy().await;
         if !policy.enabled() {
             return;
         }
         let in_flight = self.current_in_flight(account.id()).await;
-        let Ok(count) = self
+        let Ok(Some(count)) = self
             .cooldowns
-            .record_capacity_failure(account.id(), policy.window(), in_flight)
+            .record_capacity_failure(account.id(), request_id, policy.window(), in_flight)
             .await
         else {
             return;

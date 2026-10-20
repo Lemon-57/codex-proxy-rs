@@ -45,9 +45,9 @@ async fn capacity_failures_below_threshold_do_not_freeze() {
         .expect("created account");
     let (quota, cooldowns) = freeze_service(&store, freeze_policy(3)).await;
 
-    for _ in 0..2 {
+    for index in 0..2 {
         quota
-            .apply_capacity_failure(&account, SystemTime::now())
+            .apply_capacity_failure(&account, &format!("req_{index}"), SystemTime::now())
             .await;
     }
 
@@ -75,9 +75,9 @@ async fn capacity_failures_reaching_threshold_write_capacity_freeze_cooldown() {
         .expect("created account");
     let (quota, cooldowns) = freeze_service(&store, freeze_policy(3)).await;
 
-    for _ in 0..3 {
+    for index in 0..3 {
         quota
-            .apply_capacity_failure(&account, SystemTime::now())
+            .apply_capacity_failure(&account, &format!("req_{index}"), SystemTime::now())
             .await;
     }
 
@@ -110,9 +110,9 @@ async fn disabled_freeze_policy_records_nothing() {
         .expect("created account");
     let (quota, cooldowns) = freeze_service(&store, ProviderFreezePolicy::disabled()).await;
 
-    for _ in 0..5 {
+    for index in 0..5 {
         quota
-            .apply_capacity_failure(&account, SystemTime::now())
+            .apply_capacity_failure(&account, &format!("req_{index}"), SystemTime::now())
             .await;
     }
 
@@ -135,9 +135,9 @@ async fn successful_inference_clears_capacity_evidence() {
         .expect("created account");
     let (quota, cooldowns) = freeze_service(&store, freeze_policy(100)).await;
 
-    for _ in 0..3 {
+    for index in 0..3 {
         quota
-            .apply_capacity_failure(&account, SystemTime::now())
+            .apply_capacity_failure(&account, &format!("req_{index}"), SystemTime::now())
             .await;
     }
     assert!(cooldowns.capacity_evidence(account.id()).is_some());
@@ -167,14 +167,41 @@ fn freeze_policy_rejects_out_of_range_configuration() {
 }
 
 #[tokio::test]
+async fn capacity_retries_do_not_repeat_evidence_or_extend_a_freeze() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_capacity_deduplicated").await;
+    let account = store.account("acct_capacity_deduplicated").unwrap();
+    let (quota, cooldowns) = freeze_service(&store, freeze_policy(2)).await;
+    for _ in 0..4 {
+        quota
+            .apply_capacity_failure(&account, "req_first", SystemTime::now())
+            .await;
+    }
+    assert_eq!(cooldowns.capacity_evidence(account.id()).unwrap().0, 1);
+    assert!(quota.cooldown(account.id()).await.unwrap().is_none());
+    quota
+        .apply_capacity_failure(&account, "req_second", SystemTime::now())
+        .await;
+    let frozen = cooldowns.read(account.id()).await.unwrap().unwrap();
+    quota
+        .apply_capacity_failure(
+            &account,
+            "req_second",
+            SystemTime::now() + Duration::from_secs(30),
+        )
+        .await;
+    assert_eq!(cooldowns.read(account.id()).await.unwrap(), Some(frozen));
+}
+
+#[tokio::test]
 async fn in_flight_success_does_not_release_a_new_capacity_freeze() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_freeze_late_success").await;
     let account = store.account("acct_freeze_late_success").expect("account");
     let (quota, cooldowns) = freeze_service(&store, freeze_policy(2)).await;
-    for _ in 0..2 {
+    for index in 0..2 {
         quota
-            .apply_capacity_failure(&account, SystemTime::now())
+            .apply_capacity_failure(&account, &format!("req_{index}"), SystemTime::now())
             .await;
     }
     let before = cooldowns.read(account.id()).await.expect("freeze");

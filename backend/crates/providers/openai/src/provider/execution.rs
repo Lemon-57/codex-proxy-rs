@@ -618,6 +618,7 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
     Box::pin(async_stream::try_stream! {
         let allows_account_state_mutation = request.lease.allows_account_state_mutation();
         let failure_context = OpenAiFailureContext {
+            request_id: request.context.request_id().as_str(),
             client: &request.client,
             selector: &request.selector,
             quota: &request.quota,
@@ -786,6 +787,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let cyber_policy_scope = lease.cyber_policy_scope().cloned();
         let allows_account_state_mutation = lease.allows_account_state_mutation();
         let failure_context = OpenAiFailureContext {
+            request_id: context.request_id().as_str(),
             client: &client,
             selector: &selector,
             quota: &quota,

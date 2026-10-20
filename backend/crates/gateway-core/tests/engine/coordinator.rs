@@ -4590,6 +4590,131 @@ fn transient_retry_is_suppressed_for_required_accounts_and_committed_output() {
 }
 
 #[test]
+fn unavailable_transient_account_rotates_only_when_the_retained_policy_allows_it() {
+    for (policy, rotations, selection_prohibited, should_recover) in [
+        (TransientRetryPolicy::RetryThenRotateAccount, 3, false, true),
+        (TransientRetryPolicy::RetryThenReturnError, 3, false, false),
+        (
+            TransientRetryPolicy::RetryThenRotateAccount,
+            0,
+            false,
+            false,
+        ),
+        (TransientRetryPolicy::RetryThenRotateAccount, 3, true, false),
+    ] {
+        let operation = generate_operation();
+        let route_plan = plan_with_policy(
+            &operation,
+            AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(8).unwrap())
+                .with_max_account_rotations(rotations),
+        );
+        let failure = || Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(ProviderError::new(
+                ProviderErrorKind::UpstreamCapacityUnavailable,
+                UpstreamSendState::Sent,
+            )
+            .with_status(503)
+            .with_replay_safe()
+            .with_transient_retry(
+                NonZeroU32::new(3).unwrap(),
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                policy,
+            ))],
+        };
+        let selection_error = ProviderError::new(
+            ProviderErrorKind::AccountCapacityUnavailable,
+            UpstreamSendState::NotSent,
+        );
+        let selection_error = if selection_prohibited {
+            selection_error.with_retry_prohibited()
+        } else {
+            selection_error
+        };
+        let (coordinator, store, provider) = coordinator(vec![
+            failure(),
+            failure(),
+            failure(),
+            Script::Error(selection_error),
+            Script::Stream {
+                account_id: "acct_second",
+                items: complete_stream(None),
+            },
+        ]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        assert_eq!(
+            block_on(session.collect_uncommitted()).is_ok(),
+            should_recover
+        );
+        let contexts = provider.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), if should_recover { 5 } else { 4 });
+        assert_eq!(
+            contexts[3].required_account(),
+            Some(&ProviderAccountId::new("acct_first").unwrap())
+        );
+        if should_recover {
+            assert!(contexts[4].required_account().is_none());
+            assert!(
+                contexts[4]
+                    .excluded_accounts()
+                    .contains(&ProviderAccountId::new("acct_first").unwrap())
+            );
+            block_on(session.commit_downstream(Some(200))).unwrap();
+            let state = store.state.lock().unwrap();
+            assert_eq!(
+                state.finalizations.last().unwrap().send_state,
+                UpstreamSendState::Sent
+            );
+            assert_eq!(state.finalizations.last().unwrap().attempt_count, 4);
+        }
+    }
+}
+
+#[test]
+fn unavailable_transient_account_with_no_alternative_returns_the_original_failure() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, _, provider) = coordinator(vec![
+        Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(transient_rejection())],
+        },
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::AccountCapacityUnavailable,
+            UpstreamSendState::NotSent,
+        )),
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        )),
+    ]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let error = block_on(session.collect_uncommitted()).unwrap_err();
+    assert!(
+        matches!(error, EngineError::Provider(error) if error.kind()==ProviderErrorKind::UpstreamCapacityUnavailable)
+    );
+    assert_eq!(provider.contexts.lock().unwrap().len(), 3);
+}
+
+#[test]
 fn transient_backoff_can_be_cancelled_before_the_next_attempt() {
     for policy in [
         TransientRetryPolicy::RetryThenRotateAccount,

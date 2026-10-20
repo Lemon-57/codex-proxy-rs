@@ -8766,10 +8766,11 @@ async fn capacity_feedback_only_counts_overload_rejections_and_excludes_diagnost
                 // 同时验证窗口证据已过期与尚未过期：探测不能重建峰值，也不能改写原计数
                 for existing_evidence in [None, Some((4, 20))] {
                     if let Some((count, peak)) = existing_evidence {
-                        for _ in 0..count {
+                        for index in 0..count {
                             cooldowns
                                 .record_capacity_failure(
                                     account.id(),
+                                    &format!("req_seed_{index}"),
                                     Duration::from_secs(600),
                                     peak,
                                 )
@@ -8781,7 +8782,14 @@ async fn capacity_feedback_only_counts_overload_rejections_and_excludes_diagnost
                     let attempt = if diagnostic {
                         diagnostic_context("req_capacity_feedback_probe", account_id)
                     } else {
-                        context("req_capacity_feedback_business", CancellationToken::new())
+                        context(
+                            if existing_evidence.is_some() {
+                                "req_capacity_feedback_seeded"
+                            } else {
+                                "req_capacity_feedback_business"
+                            },
+                            CancellationToken::new(),
+                        )
                     };
                     let operation = if websocket {
                         capacity_websocket_operation()
@@ -8966,9 +8974,14 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
             let account = store.account("acct_provider_contract").expect("account");
             let cooldowns = Arc::new(MemoryCooldownPort::new());
             // 距离冻结阈值只差一次，验证非容量错误不会把可调度账号推入冷却
-            for _ in 0..11 {
+            for index in 0..11 {
                 cooldowns
-                    .record_capacity_failure(account.id(), Duration::from_secs(600), 20)
+                    .record_capacity_failure(
+                        account.id(),
+                        &format!("req_seed_{index}"),
+                        Duration::from_secs(600),
+                        20,
+                    )
                     .await
                     .expect("seed capacity evidence");
             }

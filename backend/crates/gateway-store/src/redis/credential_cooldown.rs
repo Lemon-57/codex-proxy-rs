@@ -99,11 +99,12 @@ end
 return 1
 "#;
 
-// 每次容量失败都顺延窗口 TTL（与刷新退避计数同语义），并把本次观测到的
+// 每个请求的首次容量失败顺延窗口 TTL，并把本次观测到的
 // 在途并发并入峰值证据；峰值与计数共享同一窗口生命周期
 const RECORD_CAPACITY_FAILURE_SCRIPT: &str = r#"
-local count = redis.call('INCR', KEYS[1])
 local ttl_ms = tonumber(ARGV[1])
+if not redis.call('SET', KEYS[3], '1', 'NX', 'PX', ttl_ms) then return 0 end
+local count = redis.call('INCR', KEYS[1])
 redis.call('PEXPIRE', KEYS[1], ttl_ms)
 local in_flight = tonumber(ARGV[2])
 if in_flight > 0 then
@@ -668,28 +669,39 @@ impl ProviderCooldownPort for RedisCredentialCooldownRepository {
     fn record_capacity_failure<'a>(
         &'a self,
         account_id: &'a ProviderAccountId,
+        request_id: &'a str,
         window: Duration,
         in_flight: u32,
-    ) -> futures::future::BoxFuture<'a, Result<u32, ProviderStoreError>> {
+    ) -> futures::future::BoxFuture<'a, Result<Option<u32>, ProviderStoreError>> {
         Box::pin(async move {
             let mut connection = self.connection.clone();
             let window_ms = u64::try_from(window.as_millis())
                 .map_err(|_| provider_invalid("encode capacity failure window"))?;
+            let request = resource_fingerprint("capacity failure request", request_id)
+                .map_err(|_| provider_invalid("encode capacity failure request"))?;
+            let account_key = self
+                .capacity_failures_key(account_id.as_str())
+                .map_err(|_| provider_invalid("encode capacity failure key"))?;
             let count: i64 = Script::new(RECORD_CAPACITY_FAILURE_SCRIPT)
-                .key(
-                    self.capacity_failures_key(account_id.as_str())
-                        .map_err(|_| provider_invalid("encode capacity failure key"))?,
-                )
+                .key(&account_key)
                 .key(
                     self.capacity_peak_key(account_id.as_str())
                         .map_err(|_| provider_invalid("encode capacity peak key"))?,
                 )
+                // 独立的有界去重标记不随其它请求成功清除，防止在途重试重新累加
+                .key(format!("{account_key}:request:{request}"))
                 .arg(i64::try_from(window_ms).unwrap_or(i64::MAX))
                 .arg(i64::from(in_flight))
                 .invoke_async(&mut connection)
                 .await
                 .map_err(|source| crate::provider_unavailable("record capacity failure", source))?;
-            u32::try_from(count).map_err(|_| provider_invalid("decode capacity failure count"))
+            if count == 0 {
+                Ok(None)
+            } else {
+                u32::try_from(count)
+                    .map(Some)
+                    .map_err(|_| provider_invalid("decode capacity failure count"))
+            }
         })
     }
 

@@ -1150,6 +1150,7 @@ pub(crate) fn account_policy() -> gateway_core::account::AccountSelectionPolicy 
 pub(crate) struct MemoryCooldownPort {
     pub(crate) cooldowns: Arc<Mutex<BTreeMap<ProviderAccountId, ProviderCooldown>>>,
     capacity_failures: Arc<Mutex<BTreeMap<ProviderAccountId, (u32, u32)>>>,
+    capacity_requests: Arc<Mutex<BTreeSet<(ProviderAccountId, String)>>>,
 }
 
 impl MemoryCooldownPort {
@@ -1244,10 +1245,19 @@ impl ProviderCooldownPort for MemoryCooldownPort {
     fn record_capacity_failure<'a>(
         &'a self,
         account_id: &'a ProviderAccountId,
+        request_id: &'a str,
         _window: Duration,
         in_flight: u32,
-    ) -> BoxFuture<'a, Result<u32, ProviderStoreError>> {
+    ) -> BoxFuture<'a, Result<Option<u32>, ProviderStoreError>> {
         Box::pin(async move {
+            if !self
+                .capacity_requests
+                .lock()
+                .expect("capacity requests lock")
+                .insert((account_id.clone(), request_id.to_owned()))
+            {
+                return Ok(None);
+            }
             let mut failures = self
                 .capacity_failures
                 .lock()
@@ -1255,7 +1265,7 @@ impl ProviderCooldownPort for MemoryCooldownPort {
             let entry = failures.entry(account_id.clone()).or_insert((0, 0));
             entry.0 = entry.0.saturating_add(1);
             entry.1 = entry.1.max(in_flight);
-            Ok(entry.0)
+            Ok(Some(entry.0))
         })
     }
 

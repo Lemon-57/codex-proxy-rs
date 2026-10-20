@@ -188,16 +188,29 @@ async fn diagnostics_preserve_abrupt_disconnect_facts_without_response_content()
             )
             .await;
         let mut failed = result.is_err();
+        let mut classified_before_first_event = false;
         if let Ok(response) = result {
             let mut body = response.body;
             while let Some(chunk) = body.next().await {
-                if chunk.is_err() {
+                if let Err(CodexClientError::WebSocket(error)) = chunk {
+                    // 已发送后的结果仍不确定；分类只补充池连接诊断，不授权重放
+                    let CodexWebSocketExchangeError::PostSendAmbiguous {
+                        source: Some(source),
+                        ..
+                    } = error
+                    else {
+                        panic!("sent payload must retain the ambiguous outcome");
+                    };
+                    classified_before_first_event = matches!(*source,
+                        CodexWebSocketExchangeError::ConnectionObserved { source, .. }
+                        if matches!(*source, CodexWebSocketExchangeError::ReusedConnectionDiedBeforeFirstEvent { .. }));
                     failed = true;
                     break;
                 }
             }
         }
         assert!(failed, "an abrupt disconnect must fail the exchange");
+        assert_eq!(classified_before_first_event, reuse && !send_event);
         server.await.unwrap();
         let snapshot = trace.snapshot().unwrap();
         let events = snapshot["events"].as_array().unwrap();

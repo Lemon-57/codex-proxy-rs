@@ -1004,6 +1004,9 @@ where
         let is_transport_recovery = pending_retry
             .as_ref()
             .is_some_and(|retry| retry.transport_recovery);
+        let is_transient_recovery = pending_retry
+            .as_ref()
+            .is_some_and(|retry| !retry.transport_recovery);
         let connection_rotation_reserved = pending_retry
             .as_ref()
             .is_some_and(|retry| retry.reserve_connection_rotation);
@@ -1214,7 +1217,9 @@ where
                         );
                     let continuation_retry = !error.retry_is_prohibited()
                         && self.prepare_unavailable_native_continuation_replay(&error);
-                    let candidate_retry = !error.retry_is_prohibited() && !connection_fallback && !continuation_retry
+                    let transient_rotation = is_transient_recovery
+                        && self.can_rotate_unavailable_transient_account(&error);
+                    let candidate_retry = !error.retry_is_prohibited() && !connection_fallback && !continuation_retry && !transient_rotation
                         && matches!(
                             error.kind(),
                             ProviderErrorKind::AccountCapacityUnavailable
@@ -1252,6 +1257,7 @@ where
                             remaining_deadline: Duration::ZERO,
                             retry_allowed: connection_fallback
                                 || continuation_retry
+                                || transient_rotation
                                 || candidate_retry,
                         })
                         .await?;
@@ -1259,6 +1265,7 @@ where
                         "phase": "prepare", "retryable": retryable,
                         "continuationRetry": continuation_retry, "candidateRetry": candidate_retry,
                         "connectionFallback": connection_fallback,
+                        "transientRotation": transient_rotation,
                         "retryProhibited": error.retry_is_prohibited(),
                         "sendState": error.send_state().as_str(),
                         "requestSendState": self.current_send_state().as_str(),
@@ -1275,6 +1282,11 @@ where
                                 .expect("pending connection rotation");
                             self.excluded_accounts.remove(&recovery.account);
                             self.pending_retry = Some(recovery);
+                        } else if transient_rotation {
+                            // 只解除请求内恢复钉选；外部账号约束与 Provider 会话策略仍由原入口校验
+                            if let Some(account) = pinned_account {
+                                self.excluded_accounts.insert(account);
+                            }
                         } else if candidate_retry {
                             // 原账号只属于原 Provider，跨候选后不能拿旧钉选作恢复兜底
                             self.connection_rotation = None;
@@ -2106,6 +2118,37 @@ where
         self.continuation_attempt = ContinuationAttempt::ReplayAny;
         self.excluded_accounts.insert(pin.account().clone());
         true
+    }
+
+    fn can_rotate_unavailable_transient_account(&self, error: &ProviderError) -> bool {
+        self.account_selection.required_account().is_none()
+            && self.continuation_attempt == ContinuationAttempt::None
+            && !self.replay_barrier_reached
+            && !self.delivery_pending
+            && !self.execution_effect_observed()
+            && !error.retry_is_prohibited()
+            && error.send_state() == UpstreamSendState::NotSent
+            && matches!(
+                error.kind(),
+                ProviderErrorKind::NoEligibleAccount
+                    | ProviderErrorKind::AccountCapacityUnavailable
+                    | ProviderErrorKind::QuotaExhausted
+                    | ProviderErrorKind::ConcurrencyQueueFull
+                    | ProviderErrorKind::ConcurrencyQueueTimeout
+            )
+            && self.routing_attempts < self.plan.max_attempts().get()
+            && self.account_rotations < self.plan.account_selection_policy().max_account_rotations()
+            && self.last_retryable_failure.as_ref().is_some_and(|failure| {
+                !failure.retry_is_prohibited()
+                    && provider_proved_replay_safe(failure)
+                    && matches!(
+                        failure.pre_delivery_retry(),
+                        Some(crate::error::PreDeliveryRetry::SameAccountTransientRetry {
+                            policy: crate::error::TransientRetryPolicy::RetryThenRotateAccount,
+                            ..
+                        })
+                    )
+            })
     }
 
     fn reset_uncommitted_observations(&mut self) {

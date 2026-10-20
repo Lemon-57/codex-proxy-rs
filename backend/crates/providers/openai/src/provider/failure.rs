@@ -153,6 +153,7 @@ impl ReplayBoundary {
 }
 
 pub(super) struct OpenAiFailureContext<'a> {
+    pub(super) request_id: &'a str,
     pub(super) client: &'a CodexBackendClient,
     pub(super) selector: &'a CodexCredentialSelector,
     pub(super) quota: &'a Arc<CodexCredentialQuotaService>,
@@ -361,7 +362,7 @@ pub(super) async fn apply_failure(
     if context.allows_capacity_feedback && failure.upstream_capacity_failure {
         context
             .quota
-            .apply_capacity_failure(account, SystemTime::now())
+            .apply_capacity_failure(account, context.request_id, SystemTime::now())
             .await;
     }
 }

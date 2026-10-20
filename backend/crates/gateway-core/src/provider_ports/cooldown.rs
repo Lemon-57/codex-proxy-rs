@@ -194,15 +194,17 @@ pub trait ProviderCooldownPort: Send + Sync {
         account_id: &'a ProviderAccountId,
     ) -> BoxFuture<'a, Result<bool, ProviderStoreError>>;
 
-    /// 记录一次容量类失败并返回滑动窗口内的累计次数，同时把观测到的账号
+    /// 同一逻辑请求对同一账号在统计窗口内只记录一次容量失败，重复观测返回 `None`
+    /// 新观测返回窗口内累计次数，同时把观测到的账号
     /// 在途并发并入窗口峰值（`in_flight` 为 0 表示本次未观测，跳过峰值更新）
     /// 只服务容量熔断触发器；调用频率受失败频率约束，不需要批量接口
     fn record_capacity_failure<'a>(
         &'a self,
         account_id: &'a ProviderAccountId,
+        request_id: &'a str,
         window: Duration,
         in_flight: u32,
-    ) -> BoxFuture<'a, Result<u32, ProviderStoreError>>;
+    ) -> BoxFuture<'a, Result<Option<u32>, ProviderStoreError>>;
 
     /// 普通请求成功后原子清除临时限流及失败证据；必须保留任何容量冻结
     fn clear_after_success<'a>(

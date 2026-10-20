@@ -158,6 +158,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         .map(|pool_return| std::mem::take(&mut pool_return.continuation))
         .unwrap_or_default();
     let mut last_event_type = None;
+    let mut upstream_event_seen = false;
     // 官方 run_websocket_response_stream 按响应消费 metadata 事件；它们不属于握手头
     // 复用连接时恢复握手快照，避免上一轮模型信息及普通响应头随每次请求累积
     let opening_response_metadata = metadata.response_metadata.clone();
@@ -213,7 +214,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
                 .await;
                 let error = error.with_connection_observation(observation);
                 let error = if reused_connection {
-                    reused_stream_receive_error(error)
+                    reused_stream_receive_error(error, upstream_event_seen)
                 } else {
                     error
                 };
@@ -267,7 +268,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
                 .await;
                 let error = error.with_connection_observation(observation);
                 let error = if reused_connection {
-                    reused_stream_receive_error(error)
+                    reused_stream_receive_error(error, upstream_event_seen)
                 } else {
                     error
                 };
@@ -276,6 +277,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             }
             _ => continue,
         };
+        upstream_event_seen = true;
         trace.capture("upstream.event", raw.as_bytes());
         let reduced = match reduce_websocket_event(&raw, &mut metadata, &mut continuation) {
             Ok(reduced) => reduced,
@@ -404,7 +406,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
     .await;
     let error = error.with_connection_observation(observation);
     let error = if reused_connection {
-        reused_stream_receive_error(error)
+        reused_stream_receive_error(error, upstream_event_seen)
     } else {
         error
     };

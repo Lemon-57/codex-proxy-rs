@@ -1488,10 +1488,11 @@ impl ProviderCooldownPort for StaticCooldowns {
     fn record_capacity_failure<'a>(
         &'a self,
         _account_id: &'a ProviderAccountId,
+        _request_id: &'a str,
         _window: Duration,
         _in_flight: u32,
-    ) -> BoxFuture<'a, Result<u32, ProviderStoreError>> {
-        Box::pin(async { Ok(0) })
+    ) -> BoxFuture<'a, Result<Option<u32>, ProviderStoreError>> {
+        Box::pin(async { Ok(None) })
     }
 
     fn clear_after_success<'a>(
