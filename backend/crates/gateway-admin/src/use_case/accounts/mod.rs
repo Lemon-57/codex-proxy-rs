@@ -182,6 +182,16 @@ pub trait AccountsService: Send + Sync {
         account_id: &ProviderAccountId,
     ) -> Result<ProviderModelCatalogDocument, AdminError>;
 
+    /// 仅受保护管理端可调用，不更改账号启停或客户路由
+    async fn diagnose(
+        &self,
+        _account_id: ProviderAccountId,
+        _upstream_model: UpstreamModelId,
+        _body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<gateway_core::engine::probe::AccountProbeResult, AdminError> {
+        Err(AdminError::invalid("账号诊断接口不可用"))
+    }
+
     async fn test_connection(
         &self,
         account_id: ProviderAccountId,
@@ -1046,6 +1056,44 @@ impl AccountsService for DefaultAccountsService {
             .model_catalog_document(account_id)
             .await
             .map_err(|error| map_provider_error(error, "provider model catalog document"))
+    }
+
+    async fn diagnose(
+        &self,
+        account_id: ProviderAccountId,
+        upstream_model: UpstreamModelId,
+        mut body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<gateway_core::engine::probe::AccountProbeResult, AdminError> {
+        let (stored, _) = self.provider_for_account(&account_id).await?;
+        if stored.account.provider_kind.as_str() != "openai" {
+            return Err(AdminError::invalid("诊断仅支持 OpenAI 账号"));
+        }
+        body.insert(
+            "model".to_owned(),
+            serde_json::Value::String(upstream_model.as_str().to_owned()),
+        );
+        body.insert("store".to_owned(), serde_json::Value::Bool(false));
+        body.insert("stream".to_owned(), serde_json::Value::Bool(true));
+        if body.contains_key("previous_response_id") || body.contains_key("tools") {
+            return Err(AdminError::invalid("诊断不支持工具或会话续接"));
+        }
+        let payload = gateway_core::operation::ProtocolPayload::json_object("openai", body)
+            .map_err(|_| AdminError::invalid("诊断请求无效"))?;
+        let operation = gateway_core::operation::Operation::Generate(
+            gateway_core::operation::GenerateRequest::from_protocol_payload(payload),
+        );
+        self.probe
+            .probe(
+                AccountProbeRequest {
+                    account_id,
+                    provider_kind: stored.account.provider_kind,
+                    upstream_model,
+                    operation,
+                },
+                None,
+            )
+            .await
+            .map_err(|_| AdminError::invalid("账号诊断未能完成，上游请求不自动重放"))
     }
 
     async fn test_connection(

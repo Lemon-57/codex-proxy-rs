@@ -3488,6 +3488,7 @@ impl AccountProbe for SuccessfulAccountProbe {
     ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
         Box::pin(async {
             Ok(AccountProbeResult {
+                completed_text: true,
                 text: vec!["OK".to_owned()],
             })
         })
@@ -3798,4 +3799,41 @@ impl gateway_admin::ports::reset_credit_automation::ResetCreditAutomationStore
         }
         Ok(revision)
     }
+}
+
+#[tokio::test]
+async fn protected_diagnostic_preserves_disabled_account_and_rejects_tools() {
+    let provider = FakeProviderAdmin::new("openai", events());
+    let mut account = account_record("openai");
+    account.enabled = false;
+    let store = FakeAccountStore::with_account(account, events());
+    let services = accounts_service(provider, store.clone()).await;
+    let body = serde_json::json!({"input":[{"role":"user","content":"Reply 21"}],"reasoning":{"effort":"medium"}}).as_object().unwrap().clone();
+    let result = services
+        .accounts()
+        .diagnose(
+            ProviderAccountId::new("acct_test").unwrap(),
+            gateway_core::routing::UpstreamModelId::new("gpt-6.1-sol").unwrap(),
+            body,
+        )
+        .await
+        .unwrap();
+    assert!(result.completed_text);
+    assert!(!store.accounts.lock().unwrap()[0].enabled);
+    let invalid = serde_json::json!({"input":"hello","tools":[]})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(
+        services
+            .accounts()
+            .diagnose(
+                ProviderAccountId::new("acct_test").unwrap(),
+                gateway_core::routing::UpstreamModelId::new("gpt-6.1-sol").unwrap(),
+                invalid
+            )
+            .await
+            .is_err()
+    );
+    assert!(!store.accounts.lock().unwrap()[0].enabled);
 }

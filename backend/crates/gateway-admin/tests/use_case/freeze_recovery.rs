@@ -230,6 +230,7 @@ impl AccountProbe for SuccessfulProbe {
     ) -> futures::future::BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
         Box::pin(async {
             Ok(AccountProbeResult {
+                completed_text: true,
                 text: vec!["OK".to_owned()],
             })
         })

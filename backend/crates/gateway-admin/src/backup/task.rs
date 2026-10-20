@@ -706,6 +706,10 @@ impl BackupTask {
 fn classify_dump_error(error: BackupError) -> (&'static str, &'static str) {
     match error.code() {
         code::CANCELLED => (code::CANCELLED, "备份已取消"),
+        code::ANALYTICS_NOT_READY => (
+            code::ANALYTICS_NOT_READY,
+            "用量统计正在重建，请在统计就绪后重试备份",
+        ),
         code::STAGING_SPACE_EXHAUSTED => (code::STAGING_SPACE_EXHAUSTED, "暂存磁盘空间不足"),
         _ => (code::PG_DUMP_FAILED, "数据库导出失败"),
     }

@@ -318,6 +318,7 @@ where
             concurrency_wait_budget: ConcurrencyWaitBudget::default(),
             connection_budget: super::connection::ConnectionBudget::default(),
             connection_retries: 0,
+            connection_rotation: None,
             observation: ResponseObservation::new(timing_started_at),
             request_observation,
             budget_prior_attempts_usd: Decimal::ZERO,
@@ -424,6 +425,7 @@ struct CurrentAttempt {
     metadata: ProviderCallMetadata,
     trigger: AttemptTrigger,
     transport: AttemptTransport,
+    connection_rotation_reserved: bool,
     index: NonZeroU32,
     started_at: SystemTime,
     send_observed: bool,
@@ -458,6 +460,7 @@ struct PendingAttemptRetry {
     transport: AttemptTransport,
     delay: Duration,
     transport_recovery: bool,
+    reserve_connection_rotation: bool,
 }
 
 /// API 可逐事件消费的 Core 执行会话
@@ -471,6 +474,8 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     concurrency_wait_budget: ConcurrencyWaitBudget,
     connection_budget: super::connection::ConnectionBudget,
     connection_retries: u32,
+    /// 原账号恢复仍建连失败后尝试重选；选号不可用时消费该状态，恢复原账号剩余预算
+    connection_rotation: Option<PendingAttemptRetry>,
     observation: ResponseObservation,
     request_observation: Option<RequestObservationDispatch>,
     budget_prior_attempts_usd: Decimal,
@@ -999,6 +1004,9 @@ where
         let is_transport_recovery = pending_retry
             .as_ref()
             .is_some_and(|retry| retry.transport_recovery);
+        let connection_rotation_reserved = pending_retry
+            .as_ref()
+            .is_some_and(|retry| retry.reserve_connection_rotation);
         if !is_transport_recovery && self.routing_attempts >= self.plan.max_attempts().get() {
             return Err(EngineError::EmptyRoutingPlan);
         }
@@ -1060,7 +1068,9 @@ where
                     self.recovery_account
                         .take()
                         .or_else(|| self.account_selection.required_account().cloned()),
-                    AttemptTransport::Default,
+                    self.connection_rotation
+                        .as_ref()
+                        .map_or(AttemptTransport::Default, |recovery| recovery.transport),
                 ),
             }
         };
@@ -1123,7 +1133,11 @@ where
                 .with_request_location(self.plan.request_location().cloned())
                 .with_privacy(self.plan.privacy())
                 .with_concurrency_wait_budget(self.concurrency_wait_budget.clone())
-                .with_connection_budget(self.connection_budget.clone())
+                .with_connection_budget(if connection_rotation_reserved {
+                    self.connection_budget.clone().reserve_next_opening()
+                } else {
+                    self.connection_budget.clone()
+                })
                 .with_timing_started_at(self.observation.timing_started_at)
                 .with_request_policy(self.request_policy.clone())
                 .with_execution_effects(self.execution_effects.as_ref().map(Arc::clone))
@@ -1186,9 +1200,21 @@ where
                 Ok(stream) => stream,
                 Err(error) => {
                     attempt_trace.record_provider_failure(&error);
+                    let connection_fallback = self.connection_rotation.is_some()
+                        && !self.connection_budget.exhausted()
+                        && !error.retry_is_prohibited()
+                        && error.send_state() == UpstreamSendState::NotSent
+                        && matches!(
+                            error.kind(),
+                            ProviderErrorKind::NoEligibleAccount
+                                | ProviderErrorKind::AccountCapacityUnavailable
+                                | ProviderErrorKind::QuotaExhausted
+                                | ProviderErrorKind::ConcurrencyQueueFull
+                                | ProviderErrorKind::ConcurrencyQueueTimeout
+                        );
                     let continuation_retry = !error.retry_is_prohibited()
                         && self.prepare_unavailable_native_continuation_replay(&error);
-                    let candidate_retry = !error.retry_is_prohibited() && !continuation_retry
+                    let candidate_retry = !error.retry_is_prohibited() && !connection_fallback && !continuation_retry
                         && matches!(
                             error.kind(),
                             ProviderErrorKind::AccountCapacityUnavailable
@@ -1224,12 +1250,15 @@ where
                                 .get()
                                 .saturating_sub(self.routing_attempts),
                             remaining_deadline: Duration::ZERO,
-                            retry_allowed: continuation_retry || candidate_retry,
+                            retry_allowed: connection_fallback
+                                || continuation_retry
+                                || candidate_retry,
                         })
                         .await?;
                     attempt_trace.record("retry.decided", json!({
                         "phase": "prepare", "retryable": retryable,
                         "continuationRetry": continuation_retry, "candidateRetry": candidate_retry,
+                        "connectionFallback": connection_fallback,
                         "retryProhibited": error.retry_is_prohibited(),
                         "sendState": error.send_state().as_str(),
                         "requestSendState": self.current_send_state().as_str(),
@@ -1239,6 +1268,17 @@ where
                         "remainingRoutingAttempts": self.plan.max_attempts().get().saturating_sub(self.routing_attempts),
                     }));
                     if retryable {
+                        if connection_fallback {
+                            let recovery = self
+                                .connection_rotation
+                                .take()
+                                .expect("pending connection rotation");
+                            self.excluded_accounts.remove(&recovery.account);
+                            self.pending_retry = Some(recovery);
+                        } else if candidate_retry {
+                            // 原账号只属于原 Provider，跨候选后不能拿旧钉选作恢复兜底
+                            self.connection_rotation = None;
+                        }
                         return Ok(Some(PullOutcome::AttemptDiscarded));
                     }
                     if matches!(
@@ -1306,6 +1346,7 @@ where
         }
 
         let metadata = stream.metadata().clone();
+        self.connection_rotation = None;
         attempt_trace.record("account.selected", json!({
             "provider": metadata.provider().as_str(), "accountId": metadata.provider_account_id().as_str(),
             "transport": metadata.transport().as_str(),
@@ -1429,6 +1470,7 @@ where
             metadata,
             trigger,
             transport: attempt_transport,
+            connection_rotation_reserved,
             index: next_attempt,
             started_at: SystemTime::now(),
             send_observed: false,
@@ -1600,26 +1642,11 @@ where
                 error.pre_delivery_retry(),
                 Some(crate::error::PreDeliveryRetry::SameAccountConnectionRetry { .. })
             );
-        // 原账号一次建连恢复后仍失败时，不能把全部启动预算耗在同一故障出口
-        // 仅处理未发送、未交付、无精确续接及无强制账号的请求，固定代理绑定不变
-        let connection_rotation_requested = connection_retry_requested
-            && self.connection_retries > 0
-            && !execution_effect_observed
-            && self.account_selection.required_account().is_none()
-            && self.continuation_attempt == ContinuationAttempt::None
-            && !self.replay_barrier_reached
-            && !self.delivery_pending
-            && attempt_send_state == UpstreamSendState::NotSent
-            && !self.connection_budget.exhausted()
-            && self.routing_attempts < self.plan.max_attempts().get()
-            && self.account_rotations
-                < self.plan.account_selection_policy().max_account_rotations();
         // Provider 的有界同账号传输恢复是尽力重试策略，不要求把 Sent/Ambiguous
         // 改写成安全证明；外部副作用、取消、预算与下游提交仍由 Core 拦截
         let transport_recovery = match error.pre_delivery_retry() {
             Some(crate::error::PreDeliveryRetry::SameAccountConnectionRetry { transport })
                 if !execution_effect_observed
-                    && !connection_rotation_requested
                     && !self.connection_budget.exhausted()
                     && !self.replay_barrier_reached
                     && !self.delivery_pending
@@ -1657,6 +1684,18 @@ where
             }
             _ => None,
         };
+        let can_rotate_connection = connection_retry_requested
+            && self.account_selection.required_account().is_none()
+            && self.routing_attempts < self.plan.max_attempts().get()
+            && self.account_rotations
+                < self.plan.account_selection_policy().max_account_rotations();
+        // A 先恢复一次，再利用预留预算重选；重选继续走已有降级传输，避免 WS 抢占最后一次 opening
+        let connection_rotation = transport_recovery
+            .filter(|_| can_rotate_connection && current.connection_rotation_reserved);
+        let reserve_connection_rotation = can_rotate_connection
+            && !current.connection_rotation_reserved
+            && self.connection_budget.remaining_openings() >= 2;
+        let transport_recovery = transport_recovery.filter(|_| connection_rotation.is_none());
         let ordinary_retry = !self.connection_budget.exhausted()
             && !connection_retry_requested
             && !execution_effect_observed
@@ -1721,7 +1760,7 @@ where
             && transient_retry.is_none()
             && !is_return_error_retry(&error)
             && transport_recovery.is_none()
-            && (ordinary_retry || account_rotation_retry || connection_rotation_requested)
+            && (ordinary_retry || account_rotation_retry)
             && self.account_rotations
                 < self.plan.account_selection_policy().max_account_rotations();
         let retryable = !error.retry_is_prohibited()
@@ -1729,6 +1768,7 @@ where
                 || same_account_retry
                 || transient_retry.is_some()
                 || transport_recovery.is_some()
+                || connection_rotation.is_some()
                 || rotation_retry);
 
         let retryable = match self
@@ -1765,11 +1805,12 @@ where
             "retryable": retryable, "continuationRetry": continuation_retry,
             "sameAccountRetry": same_account_retry, "accountRotationRetry": account_rotation_retry,
             "ordinaryRetry": ordinary_retry, "transportRecovery": transport_recovery.is_some(),
+            "connectionRotation": connection_rotation.is_some(),
+            "reserveConnectionRotation": reserve_connection_rotation,
             "transientRetry": transient_retry.is_some(),
             "clientRetrySuppressed": suppress_transient_retry,
             "rotationRetry": rotation_retry, "accountRotations": self.account_rotations,
             "connectionRetry": connection_retry_requested,
-            "connectionRotation": connection_rotation_requested,
             "connectionRetries": self.connection_retries,
             "connectionBudgetRemainingMs": self.connection_budget.remaining().map(duration_ms),
             "executionEffectObserved": execution_effect_observed,
@@ -1811,6 +1852,7 @@ where
                     transport: current.transport,
                     delay,
                     transport_recovery: false,
+                    reserve_connection_rotation: false,
                 });
             } else if let Some((transport, delay)) = transport_recovery {
                 self.pending_retry = Some(PendingAttemptRetry {
@@ -1818,6 +1860,17 @@ where
                     transport,
                     delay,
                     transport_recovery: true,
+                    reserve_connection_rotation,
+                });
+            } else if let Some((transport, delay)) = connection_rotation {
+                let account = current.metadata.provider_account_id().clone();
+                self.excluded_accounts.insert(account.clone());
+                self.connection_rotation = Some(PendingAttemptRetry {
+                    account,
+                    transport,
+                    delay,
+                    transport_recovery: true,
+                    reserve_connection_rotation: false,
                 });
             } else if !continuation_retry {
                 self.excluded_accounts

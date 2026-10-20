@@ -414,3 +414,22 @@ async fn concurrency_details_require_admin_validate_paging_and_report_lease_time
         }
     }
 }
+
+#[tokio::test]
+async fn diagnostic_rejects_ordinary_admin_session_and_unauthenticated_request() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    for authenticated in [false, true] {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/admin/accounts/diagnostic")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-request-id", "req_diagnostic_identity");
+        if authenticated {
+            builder = builder.header(header::COOKIE, "cpr_session=valid-session");
+        }
+        let response=admin::router::<AdminTestState>().with_state(fixture.state())
+            .oneshot(builder.body(Body::from(r#"{"accountId":"acct_test","modelId":"gpt-6.1-sol","body":{"input":"21"}}"#)).unwrap()).await.unwrap();
+        assert!(response.status().is_client_error());
+    }
+}

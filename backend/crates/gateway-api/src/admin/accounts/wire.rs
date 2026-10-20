@@ -1238,3 +1238,29 @@ impl
         }
     }
 }
+
+/// 管理诊断的账号固定与有界输入，不接受账号启停字段
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountDiagnosticRequest {
+    pub account_id: String,
+    pub model_id: String,
+    pub body: serde_json::Map<String, serde_json::Value>,
+}
+impl AccountDiagnosticRequest {
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        require_account_id(&self.account_id, "accountId")?;
+        if self.model_id.is_empty()
+            || self.model_id.len() > 128
+            || self.model_id.chars().any(char::is_control)
+        {
+            return Err(WireValidationError::new("modelId"));
+        }
+        if serde_json::to_vec(&self.body).map_or(true, |value| value.len() > 128 * 1024)
+            || !self.body.contains_key("input")
+        {
+            return Err(WireValidationError::new("body"));
+        }
+        Ok(())
+    }
+}

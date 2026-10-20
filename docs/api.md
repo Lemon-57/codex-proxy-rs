@@ -1863,6 +1863,11 @@ Desktop 三段 SemVer 门禁，也不会自动回写最低版本设置。门禁�
 
 全部备份端点位于 `/api/admin/settings/backups/*`，使用管理接口响应信封，字段为 camelCase，响应带 `Cache-Control: no-store`
 
+归档为 `.sql.gz` 业务备份，包含账号、Key、设置、插件、已用额度和已发布用量汇总，不包含请求明细与诊断/审计日志。
+汇总范围和离线恢复限制见 [备份内容与限制](../deploy/README.md#备份内容与限制)；没有在线恢复端点
+
+统计重建或时间桶尚未发布完成时，任务以 `backup.analytics_not_ready` 失败；统计就绪后重新创建备份
+
 | 方法 | 路由 | 请求 | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/api/admin/settings/backups` | 无 | 读取存储配置（含明文 Secret）、验证状态与调度配置 |

@@ -13,6 +13,10 @@ where
         .merge(super::import_tasks::router::<S>())
         .route("/api/admin/accounts", get(list_accounts::<S>))
         .route(
+            "/api/admin/accounts/diagnostic",
+            post(diagnose_account::<S>),
+        )
+        .route(
             "/api/admin/accounts/concurrency",
             get(super::concurrency::list::<S>),
         )
@@ -683,5 +687,39 @@ where
     Ok(AdminResponse::new(
         StatusCode::OK,
         AdminEnvelope::ok(AccountResetCreditAutomationData::from((result, time))),
+    ))
+}
+
+/// 接口只接受已经通过 AdminAuth 的调用，账号始终保持原调度状态
+async fn diagnose_account<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountDiagnosticRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    if !matches!(&auth.context().principal, gateway_admin::model::auth::AdminPrincipal::Plugin { instance_id } if instance_id == "56483a1c-0a29-8744-9e91-06334612b8b8")
+    {
+        return Err(map_service_error(AdminServiceError::invalid(
+            "诊断入口仅允许已登记的巡检插件",
+        )));
+    }
+    request.validate().map_err(map_wire_error)?;
+    let account = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let model = UpstreamModelId::new(request.model_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("modelId")))?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .diagnose(account, model, request.body)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(
+            serde_json::json!({"text":result.text.concat(),"completed":result.completed_text}),
+        ),
     ))
 }
