@@ -67,7 +67,7 @@ Linux/glibc 部署可选择更积极地归还请求结束后的空闲内存，�
 services:
   app-runtime:
     environment:
-      GLIBC_TUNABLES: 'glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072'
+      GLIBC_TUNABLES: 'glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072:glibc.malloc.arena_max=4'
 ```
 
 Compose 从 `services.app-runtime` 取得参数；不开启优化时保留该段并将值设为 `''`。
@@ -80,7 +80,7 @@ docker compose -f deploy/compose.yaml config --quiet
 docker compose -f deploy/compose.yaml up -d --no-build --no-deps --force-recreate codex-proxy-rs
 ```
 
-此配置将 glibc 的 mmap 与 trim 阈值固定为 128 KiB，关闭对应的动态阈值调整。
+此配置将 glibc 的 mmap 与 trim 阈值固定为 128 KiB，关闭对应的动态阈值调整，并把 arena 数量限制为 4。工作站同版本、550 个虚拟账号和 300 次 WebSocket 请求的对照中，arena=4 的空闲进程 PSS 低于默认 arena 配置；实际生产应在自己的负载下复测。
 如已有 `GLIBC_TUNABLES`，用冒号合并这两个参数，避免重复同名项；同时检查是否另设了 `MALLOC_MMAP_THRESHOLD_` 或 `MALLOC_TRIM_THRESHOLD_`，统一在一处维护。
 参数含义见 [glibc 文档](https://sourceware.org/glibc/manual/latest/html_node/Memory-Allocation-Tunables.html)
 
@@ -88,7 +88,7 @@ docker compose -f deploy/compose.yaml up -d --no-build --no-deps --force-recreat
 `services` 是 Compose 桥接区，直接运行二进制不会读取这一段。Linux/glibc 二进制部署需由启动器在进程启动前设置同一环境变量，例如：
 
 ```bash
-GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072 ./codex-proxy-rs
+GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072:glibc.malloc.arena_max=4 ./codex-proxy-rs
 ```
 
 该变量由 glibc 在进程启动时读取，不支持管理端热更新。

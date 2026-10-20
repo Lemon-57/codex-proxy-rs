@@ -86,7 +86,7 @@ services:
   app-runtime:
     environment:
       # 默认空值；小内存机器可改为下列值，更积极回收空闲内存，但可能增加 CPU 开销。
-      # 'glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072'
+      # 'glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072:glibc.malloc.arena_max=4'
       # 由 Compose 在进程启动前传入，修改后需重建应用容器，详见 deploy/README.md#小内存优化。
       GLIBC_TUNABLES: ''
 
