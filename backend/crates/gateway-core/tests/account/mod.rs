@@ -2,6 +2,7 @@
 
 mod location;
 mod model_access;
+mod notifications;
 mod proxy;
 mod selection;
 mod selection_diagnostics;
@@ -307,6 +308,41 @@ fn disabled_account_should_not_be_schedulable() {
         account.status_projection(SystemTime::now(), None).status,
         AccountStatus::Disabled
     );
+}
+
+#[test]
+fn confirmed_invalid_credentials_remain_visible_while_scheduling_stays_paused() {
+    for state in [
+        CredentialState::Ready,
+        CredentialState::Unknown,
+        CredentialState::Expired,
+        CredentialState::Invalid,
+        CredentialState::Banned,
+    ] {
+        let account = account("acct_paused_state").with_account_facts(
+            false,
+            state,
+            QuotaState::unknown(),
+            None,
+            None,
+        );
+        let projection = account.status_projection(SystemTime::now(), None);
+        assert!(!account.enabled());
+        assert_eq!(
+            projection.status,
+            if state == CredentialState::Invalid {
+                AccountStatus::Error
+            } else {
+                AccountStatus::Disabled
+            }
+        );
+        if state == CredentialState::Invalid {
+            assert_eq!(
+                projection.error_reason,
+                Some(gateway_core::account::AccountErrorReason::CredentialInvalid)
+            );
+        }
+    }
 }
 
 #[test]

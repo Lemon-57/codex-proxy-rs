@@ -5,6 +5,67 @@ use gateway_core::account::AccountConcurrencyLimit;
 use gateway_store::postgres::RecoverProviderAccount;
 
 #[tokio::test]
+async fn committed_state_transitions_notify_without_replaying_identical_or_stale_observations() {
+    use futures::{FutureExt, StreamExt};
+    let Some(database) = TestDatabase::create("account_state_notifications").await else {
+        return;
+    };
+    let notifications = gateway_core::account::AccountStateNotifications::default();
+    let mut changes = notifications.subscribe();
+    let repository = PgProviderAccountRepository::new(database.pool.clone())
+        .with_state_notifications(notifications);
+    let mut seed = account("acct_state_notifications", "notification-user");
+    seed.credential_state = CredentialState::Ready;
+    let anchor = seed.credential_observed_at;
+    repository.insert_provider_account(seed).await.unwrap();
+    let change = |offset, state| AccountStateChange {
+        account_id: ProviderAccountId::new("acct_state_notifications").unwrap(),
+        expected_revision: CredentialRevision::new(1).unwrap(),
+        credential_state: state,
+        observed_at: (anchor + TimeDelta::seconds(offset)).into(),
+        error_reason: if state == CredentialState::Expired {
+            Some(AccountErrorReason::CredentialExpired)
+        } else {
+            None
+        },
+        message: None,
+    };
+    repository
+        .apply_state_change(change(1, CredentialState::Expired))
+        .await
+        .unwrap();
+    assert_eq!(changes.next().now_or_never(), Some(Some(())));
+    assert_eq!(
+        repository
+            .load_provider_account("acct_state_notifications")
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .credential_state,
+        CredentialState::Expired
+    );
+    repository
+        .apply_state_change(change(2, CredentialState::Expired))
+        .await
+        .unwrap();
+    assert!(changes.next().now_or_never().is_none());
+    assert!(
+        repository
+            .apply_state_change(change(1, CredentialState::Ready))
+            .await
+            .is_err()
+    );
+    assert!(changes.next().now_or_never().is_none());
+    repository
+        .apply_state_change(change(3, CredentialState::Ready))
+        .await
+        .unwrap();
+    assert_eq!(changes.next().now_or_never(), Some(Some(())));
+    database.close().await;
+}
+
+#[tokio::test]
 async fn cross_kind_observations_preserve_time_bounds_and_stale_observation_fences() {
     let Some(database) = TestDatabase::create("account_observation_time_bounds").await else {
         return;

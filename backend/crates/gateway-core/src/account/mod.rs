@@ -7,10 +7,12 @@ mod location;
 pub use location::{InvalidRequestLocation, RequestLocation};
 mod model;
 mod model_access;
+mod notifications;
 pub use model_access::{
     AccountModelAccess, AccountModelAccessMode, InvalidAccountModelAccess,
     MAX_ACCOUNT_ACCESS_MODELS,
 };
+pub use notifications::AccountStateNotifications;
 mod proxy;
 pub use proxy::{InvalidOutboundProxy, OutboundProxy};
 pub mod scope;

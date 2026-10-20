@@ -3,6 +3,77 @@
 use super::*;
 
 #[tokio::test]
+async fn paused_invalid_accounts_are_errors_in_detail_filters_pagination_and_global_counts() {
+    use gateway_core::account::AccountStatus;
+    let Some(database) = TestDatabase::create("paused_invalid_projection").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    for (id, state) in [
+        ("acct_invalid", CredentialState::Invalid),
+        ("acct_expired", CredentialState::Expired),
+        ("acct_paused", CredentialState::Ready),
+    ] {
+        let mut seed = account(id, id);
+        seed.enabled = false;
+        seed.credential_state = state;
+        repository.insert_provider_account(seed).await.unwrap();
+    }
+    let store = admin_account_store(&database.pool);
+    let query = AccountListQuery {
+        page: 1,
+        page_size: PageSize::new(1).unwrap(),
+        provider_kind: None,
+        group_filter: None,
+        search: None,
+        status: Some(AccountStatus::Error),
+        sort: None,
+    };
+    let errors = store
+        .list_accounts(query.clone(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(errors.total, 1);
+    assert_eq!(errors.summary.error, 1);
+    assert_eq!(errors.summary.disabled, 2);
+    assert_eq!(errors.items[0].account.id, "acct_invalid");
+    assert!(!errors.items[0].account.enabled);
+    assert_eq!(errors.items[0].projection.status, AccountStatus::Error);
+    let detail = store
+        .load_account("acct_invalid", Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.projection, errors.items[0].projection);
+    let empty = store
+        .list_accounts(
+            AccountListQuery {
+                page: 2,
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.total, 1);
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.summary, errors.summary);
+    let disabled = store
+        .list_accounts(
+            AccountListQuery {
+                status: Some(AccountStatus::Disabled),
+                ..query
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disabled.total, 2);
+    assert_eq!(disabled.summary, errors.summary);
+    database.close().await;
+}
+
+#[tokio::test]
 async fn account_existence_does_not_require_capacity_settings() {
     let Some(database) = TestDatabase::create("account_existence").await else {
         return;

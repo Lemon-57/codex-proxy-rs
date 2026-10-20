@@ -22,6 +22,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 struct MaintenanceTask {
     runtime: Arc<PluginRuntime>,
     snapshots: RuntimeSnapshotHandle,
+    account_changes: gateway_core::account::AccountStateNotifications,
 }
 
 impl PluginRuntime {
@@ -29,6 +30,14 @@ impl PluginRuntime {
     pub fn maintenance_worker(
         self: &Arc<Self>,
         snapshots: RuntimeSnapshotHandle,
+    ) -> Result<WorkerContribution, WorkerDefinitionError> {
+        self.maintenance_worker_with_account_changes(snapshots, Default::default())
+    }
+
+    pub fn maintenance_worker_with_account_changes(
+        self: &Arc<Self>,
+        snapshots: RuntimeSnapshotHandle,
+        account_changes: gateway_core::account::AccountStateNotifications,
     ) -> Result<WorkerContribution, WorkerDefinitionError> {
         Ok(WorkerContribution::Registration(
             WorkerRegistration::try_new(
@@ -44,6 +53,7 @@ impl PluginRuntime {
                     task: Box::new(MaintenanceTask {
                         runtime: self.clone(),
                         snapshots,
+                        account_changes,
                     }),
                 },
             )?,
@@ -55,6 +65,7 @@ impl DaemonTask for MaintenanceTask {
     fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
         Box::pin(async move {
             let mut publications = self.snapshots.subscribe_publications();
+            let mut account_changes = self.account_changes.subscribe();
             let mut active: Option<Arc<PreparedSet>> = None;
             let mut revision = None;
             let mut stop = CancellationToken::new();
@@ -96,6 +107,12 @@ impl DaemonTask for MaintenanceTask {
                     biased;
                     () = cancellation.cancelled() => break,
                     changed = publications.next() => if changed.is_none() { break; },
+                    changed = account_changes.next() => {
+                        if changed.is_none() { break; }
+                        for dirty in &notifications {
+                            dirty.notify_one();
+                        }
+                    },
                     result = tasks.join_next(), if !tasks.is_empty() => {
                         if result.is_some() {
                             stop.cancel();

@@ -159,7 +159,10 @@ pub async fn run() -> Result<(), BootstrapError> {
     plan.extend(admin.take_worker_contributions());
     plan.push(or_shutdown!(
         plugin_runtime,
-        plugin_runtime.maintenance_worker(core.snapshots())
+        plugin_runtime.maintenance_worker_with_account_changes(
+            core.snapshots(),
+            store.account_state_notifications()
+        )
     ));
     or_shutdown!(
         plugin_runtime,

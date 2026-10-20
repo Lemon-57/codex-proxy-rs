@@ -707,7 +707,8 @@ pub fn resolve_account_status(
     facts: &AccountStatusFacts,
     now: SystemTime,
 ) -> AccountStatusProjection {
-    if !facts.enabled {
+    // 已确认无效的授权必须可见，暂停事实仍由 enabled 独立保护调度
+    if !facts.enabled && facts.credential_state != CredentialState::Invalid {
         return status_projection(AccountStatus::Disabled);
     }
     let credential_error = facts.credential_state.error_reason().or_else(|| {

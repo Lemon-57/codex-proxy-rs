@@ -52,6 +52,7 @@ pub(crate) async fn load_admin_account_page(
         "with usage_values as (select * from unnest($10::text[],$11::bigint[],$12::timestamptz[]) as usage(provider_account_ref,total_tokens,last_used_at)), account_statuses as (
            select a.id, a.provider_kind,
                   case
+                    when a.credential_state = 'invalid' then 'error'
                     when not a.enabled then 'disabled'
                     when a.credential_state <> 'ready'
                       or a.access_token_expires_at <= $2 then 'error'

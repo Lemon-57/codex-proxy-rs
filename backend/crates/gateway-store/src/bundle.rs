@@ -7,6 +7,7 @@ use super::*;
 
 /// 已完成连接、迁移与 hydration 的 Store 能力集合
 pub struct StoreBundle {
+    account_state_notifications: gateway_core::account::AccountStateNotifications,
     diagnostics: Arc<dyn gateway_core::diagnostics::OperationalDiagnostics>,
     admin_ports: AdminStorePorts,
     core_ports: CoreStorePorts,
@@ -21,6 +22,10 @@ pub struct StoreBundle {
 }
 
 impl StoreBundle {
+    #[must_use]
+    pub fn account_state_notifications(&self) -> gateway_core::account::AccountStateNotifications {
+        self.account_state_notifications.clone()
+    }
     #[must_use]
     pub fn diagnostics(&self) -> Arc<dyn gateway_core::diagnostics::OperationalDiagnostics> {
         self.diagnostics.clone()
@@ -135,7 +140,11 @@ async fn connect(
         .await
         .map_err(|source| redis_unavailable("connect Redis manager", source))?;
 
-    let provider_accounts = Arc::new(postgres::PgProviderAccountRepository::new(pool.clone()));
+    let account_state_notifications = gateway_core::account::AccountStateNotifications::default();
+    let provider_accounts = Arc::new(
+        postgres::PgProviderAccountRepository::new(pool.clone())
+            .with_state_notifications(account_state_notifications.clone()),
+    );
     let cooldowns = Arc::new(redis::RedisCredentialCooldownRepository::new(
         redis_connection.clone(),
         REDIS_NAMESPACE,
@@ -318,6 +327,7 @@ async fn connect(
     };
     let analytics = postgres::PgRequestAnalyticsRepository::new(pool, observability_query_budget);
     Ok(StoreBundle {
+        account_state_notifications,
         analytics,
         diagnostics,
         admin_ports,

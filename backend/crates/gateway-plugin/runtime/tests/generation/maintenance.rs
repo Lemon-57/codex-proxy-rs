@@ -154,8 +154,12 @@ async fn start(
         core.snapshot_control(),
     );
     runtime.bind_resource_ports(&resources).unwrap();
-    let WorkerContribution::Registration(registration) =
-        runtime.maintenance_worker(core.snapshots()).unwrap()
+    let WorkerContribution::Registration(registration) = runtime
+        .maintenance_worker_with_account_changes(
+            core.snapshots(),
+            environment.store.account_state_notifications(),
+        )
+        .unwrap()
     else {
         panic!("maintenance registration")
     };
@@ -233,6 +237,42 @@ async fn unused_maintenance_response_does_not_stop_the_host_worker() {
     }
     stop.cancel();
     task.await.unwrap();
+    drop(resources);
+    environment.release_plugin_accounts(&runtime);
+    drop(core);
+    drop(runtime);
+    environment.close().await;
+}
+
+#[tokio::test]
+async fn committed_account_state_signal_wakes_maintenance_before_periodic_compensation() {
+    let Some(environment) = Environment::create().await else {
+        return;
+    };
+    let marker = environment.directory.path().join("account-state.jsonl");
+    environment
+        .install_plugin(json!({"maintenance_fixture":true,"maintenance_marker":marker}))
+        .await;
+    let (runtime, core, resources, stop, task) =
+        start(&environment, "account state notification").await;
+    wait_done(&marker, 0, "startup").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let count = std::fs::read_to_string(&marker)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["phase"] == "done")
+        .count();
+    environment.store.account_state_notifications().notify();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        wait_done(&marker, count, "account state change"),
+    )
+    .await
+    .unwrap();
+    stop.cancel();
+    task.await.unwrap();
+    runtime.shutdown().await;
     drop(resources);
     environment.release_plugin_accounts(&runtime);
     drop(core);

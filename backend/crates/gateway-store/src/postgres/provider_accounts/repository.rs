@@ -88,12 +88,25 @@ pub trait ProviderAccountAdminRepository: Send + Sync {
 #[derive(Clone)]
 pub struct PgProviderAccountRepository {
     pub(crate) pool: PgPool,
+    state_notifications: Option<gateway_core::account::AccountStateNotifications>,
 }
 
 impl PgProviderAccountRepository {
     #[must_use]
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            state_notifications: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_state_notifications(
+        mut self,
+        notifications: gateway_core::account::AccountStateNotifications,
+    ) -> Self {
+        self.state_notifications = Some(notifications);
+        self
     }
 }
 
@@ -295,14 +308,21 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
     ) -> StoreResult<bool> {
         update.validate()?;
         let result = sqlx::query(
-            "update provider_accounts
+            "with previous as (
+                 select id, credential_state, last_error_reason from provider_accounts
+                 where id = $1 and credential_revision = $2
+                   and (credential_observed_at is null or credential_observed_at <= $4)
+                 for update
+             )
+             update provider_accounts a
              set credential_state = $3,
                  credential_observed_at = $4,
                  last_error_reason = $5,
                  last_error_message = $6,
-                 updated_at = greatest(now(), updated_at, $4)
-             where id = $1 and credential_revision = $2
-               and (credential_observed_at is null or credential_observed_at <= $4)",
+                 updated_at = greatest(now(), a.updated_at, $4)
+             from previous p where a.id = p.id
+             returning p.credential_state is distinct from $3
+                    or p.last_error_reason is distinct from $5 as state_changed",
         )
         .bind(update.account_id)
         .bind(to_i64(update.expected_revision.get())?)
@@ -310,10 +330,18 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         .bind(update.credential_observed_at)
         .bind(update.error_reason.map(AccountErrorReason::as_str))
         .bind(update.message.as_deref())
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|source| postgres_unavailable("apply provider account state", source))?;
-        Ok(result.rows_affected() == 1)
+        if let Some(row) = &result
+            && row
+                .try_get::<bool, _>("state_changed")
+                .map_err(|source| postgres_unavailable("decode account state change", source))?
+            && let Some(notifications) = &self.state_notifications
+        {
+            notifications.notify();
+        }
+        Ok(result.is_some())
     }
 
     async fn set_provider_account_enabled(&self, id: &str, enabled: bool) -> StoreResult<bool> {
