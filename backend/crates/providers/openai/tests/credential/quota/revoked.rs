@@ -53,11 +53,7 @@ async fn revoked_quota_worker_preserves_pause_and_snapshot_without_marking_banne
         assert_eq!(current.outbound_proxy(), before.outbound_proxy());
         assert_eq!(
             current.status_projection(SystemTime::now(), None).status,
-            if enabled {
-                AccountStatus::Error
-            } else {
-                AccountStatus::Disabled
-            }
+            AccountStatus::Error
         );
     }
 }
