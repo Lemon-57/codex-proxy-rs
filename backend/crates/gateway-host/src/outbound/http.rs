@@ -40,10 +40,13 @@ pub struct HttpRequest {
     pub url: String,
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: Vec<u8>,
+    /// 调用方从有效配置派生的请求体上限；零只允许空正文
+    pub maximum_body_bytes: usize,
 }
 
 pub struct HttpResponse {
     pub status: u16,
+    pub version: http::Version,
     pub headers: Vec<(String, Vec<u8>)>,
     pub body: HttpBody,
 }
@@ -51,6 +54,7 @@ pub struct HttpResponse {
 pub struct HttpBody {
     response: hyper::body::Incoming,
     pending: Bytes,
+    trailers: Vec<(String, Vec<u8>)>,
     received: usize,
     deadline: Instant,
     _permit: OwnedSemaphorePermit,
@@ -64,7 +68,8 @@ pub struct HttpError {
     pub send_state: UpstreamSendState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HttpErrorKind {
     InvalidRequest,
     AddressDenied,
@@ -191,7 +196,7 @@ impl HttpClient {
         scope: Option<&str>,
         websocket_key: Option<&str>,
     ) -> Result<PendingResponse, HttpError> {
-        if request.body.len() > 16 * 1024 * 1024
+        if request.body.len() > request.maximum_body_bytes
             || request.headers.len() > 128
             || timeout.is_zero()
             || timeout > Duration::from_secs(120)
@@ -364,10 +369,12 @@ impl PendingResponse {
     pub(super) fn into_http(self) -> HttpResponse {
         HttpResponse {
             status: self.status,
+            version: self.response.version(),
             headers: self.headers,
             body: HttpBody {
                 response: self.response.into_body(),
                 pending: Bytes::new(),
+                trailers: Vec::new(),
                 received: 0,
                 deadline: self.deadline,
                 _permit: self.permit,
@@ -377,6 +384,11 @@ impl PendingResponse {
 }
 
 impl HttpBody {
+    /// 取出截至当前读取位置收到的尾部头，保留多值与原始字节
+    pub fn take_trailers(&mut self) -> Vec<(String, Vec<u8>)> {
+        std::mem::take(&mut self.trailers)
+    }
+
     pub async fn read(&mut self, maximum: usize) -> Result<Option<Bytes>, HttpError> {
         self.read_until(maximum, self.deadline).await
     }
@@ -412,7 +424,15 @@ impl HttpBody {
             self.pending = match tokio::time::timeout_at(deadline, self.response.frame()).await {
                 Ok(Some(Ok(frame))) => match frame.into_data() {
                     Ok(chunk) => chunk,
-                    Err(_) => continue,
+                    Err(frame) => {
+                        let trailers = frame
+                            .into_trailers()
+                            .map_err(|_| HttpError::sent("response frame"))?;
+                        self.trailers.extend(trailers.iter().map(|(name, value)| {
+                            (name.as_str().to_owned(), value.as_bytes().to_vec())
+                        }));
+                        continue;
+                    }
                 },
                 Ok(None) => return Ok(None),
                 Ok(Some(Err(_))) => return Err(HttpError::sent("response body")),

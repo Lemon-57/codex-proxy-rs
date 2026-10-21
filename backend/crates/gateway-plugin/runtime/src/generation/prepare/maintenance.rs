@@ -7,8 +7,9 @@ use gateway_core::{
     lifecycle::CancellationToken,
     runtime::RuntimeSnapshotHandle,
     task::{
-        DaemonRestartPolicy, DaemonTask, WorkerContribution, WorkerDefinitionError, WorkerId,
-        WorkerKind, WorkerRegistration, WorkerRunnable, WorkerTaskError,
+        DaemonRestartPolicy, DaemonTask, WorkerContribution, WorkerDaemonContext,
+        WorkerDefinitionError, WorkerId, WorkerKind, WorkerRegistration, WorkerRunnable,
+        WorkerTaskError,
     },
 };
 use gateway_plugin_sdk::Stage;
@@ -62,8 +63,9 @@ impl PluginRuntime {
 }
 
 impl DaemonTask for MaintenanceTask {
-    fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+    fn run(&self, context: WorkerDaemonContext) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
         Box::pin(async move {
+            let cancellation = context.cancellation();
             let mut publications = self.snapshots.subscribe_publications();
             let mut account_changes = self.account_changes.subscribe();
             let mut active: Option<Arc<PreparedSet>> = None;
@@ -102,6 +104,9 @@ impl DaemonTask for MaintenanceTask {
                     }
                 }
                 revision = snapshot.as_ref().map(|s| s.revision());
+                if snapshot.is_some() {
+                    context.succeeded();
+                }
                 // 发布变更优先于下一轮维护；不在快照发布锁中等待插件或数据库
                 tokio::select! {
                     biased;

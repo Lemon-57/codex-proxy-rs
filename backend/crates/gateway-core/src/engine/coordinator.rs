@@ -1135,6 +1135,7 @@ where
                 .with_pricing(self.plan.pricing())
                 .with_request_location(self.plan.request_location().cloned())
                 .with_privacy(self.plan.privacy())
+                .with_request_body_limit(self.plan.request_body_limit())
                 .with_concurrency_wait_budget(self.concurrency_wait_budget.clone())
                 .with_connection_budget(if connection_rotation_reserved {
                     self.connection_budget.clone().reserve_next_opening()
@@ -1593,6 +1594,12 @@ where
             .attempt(self.attempts)
             .record_provider_failure(&error);
         let mut atomic_client_events = error.take_atomic_client_events();
+        // 失败随附的观测也属于当前 attempt，换号记录不能等到最终交付才读取
+        for event in &atomic_client_events {
+            if let Some(observation) = event.response_observation() {
+                self.observe_response(observation.clone());
+            }
+        }
         let current = self.current.take().ok_or(EngineError::NoActiveAttempt)?;
         if self.request_observation.is_some() {
             let websocket_attempt = websocket_observation_attempt(&current);
