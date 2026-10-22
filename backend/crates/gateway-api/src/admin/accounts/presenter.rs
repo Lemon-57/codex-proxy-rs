@@ -91,6 +91,9 @@ pub(super) fn account_view(
         capabilities: capabilities.into(),
         id: account.id.clone(),
         name: account.name,
+        supplier: account.supplier,
+        manual_expires_at: account.manual_expires_at.map(|value| time.rfc3339(&value)),
+        manual_expires_at_display: account.manual_expires_at.map(|value| time.datetime(&value)),
         notes: account.notes,
         provider: account.provider_kind.to_string(),
         groups: account

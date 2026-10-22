@@ -469,6 +469,34 @@ fn single_update_should_reject_oversized_notes_and_control_characters() {
     }
 }
 
+#[test]
+fn single_update_validates_manual_details_independently_of_authorization_notes() {
+    use gateway_api::admin::accounts::UpdateAccountRequest;
+    use serde_json::json;
+    let baseline = json!({
+        "accountId": "acct_manual", "enabled": false, "concurrencyLimit": null,
+        "weight": 1, "groupIds": [], "notes": "unchanged authorization data",
+        "supplier": "示例供应商", "manualExpiresAt": "2026-12-31T23:59:00+08:00"
+    });
+    for expiration in [json!(null), json!(""), baseline["manualExpiresAt"].clone()] {
+        let mut value = baseline.clone();
+        value["manualExpiresAt"] = expiration;
+        let request: UpdateAccountRequest = serde_json::from_value(value).unwrap();
+        request.validate().unwrap();
+    }
+    for (field, invalid) in [
+        ("supplier", json!("备".repeat(101))),
+        ("supplier", json!("备注\u{0000}")),
+        ("manualExpiresAt", json!("2026-02-30T00:00:00Z")),
+        ("manualExpiresAt", json!("2026-12-31T23:59:00")),
+    ] {
+        let mut value = baseline.clone();
+        value[field] = invalid;
+        let request: UpdateAccountRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.validate().unwrap_err().field(), field);
+    }
+}
+
 mod response {
     use gateway_api::admin::accounts::AccountUsageView;
     use gateway_api::admin::presenter::format_decimal_currency;

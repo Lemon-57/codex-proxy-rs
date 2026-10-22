@@ -227,7 +227,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
             .collect::<Vec<_>>();
         let rows = sqlx::query(
             "select coalesce(proxy.enabled, true) as outbound_proxy_enabled, coalesce(proxy.max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, proxy.auto_location, proxy.detected_location_json, proxy.location_country, proxy.location_region, proxy.location_city, proxy.location_timezone, membership.account_group_id,
-                    account.id, account.provider_kind, account.name, account.notes, account.email,
+                    account.id, account.provider_kind, account.name, account.notes, account.supplier, account.manual_expires_at, account.email,
                     account.upstream_user_id, account.upstream_account_id, account.plan_type,
                     account.authentication_kind, account.credential_revision, account.outbound_proxy_id, account.outbound_proxy_url,
                     account.has_refresh_token, account.access_token_expires_at,

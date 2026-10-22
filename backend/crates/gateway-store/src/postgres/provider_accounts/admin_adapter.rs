@@ -610,6 +610,12 @@ impl AccountStore for PgAdminAccountStore {
         if command.outbound_proxy.is_some() {
             changed_fields.push("outbound_proxy".to_owned());
         }
+        if command.supplier.is_some() {
+            changed_fields.push("supplier".to_owned());
+        }
+        if command.manual_expires_at.is_some() {
+            changed_fields.push("manual_expires_at".to_owned());
+        }
         if command.notes.is_some() {
             changed_fields.push("notes".to_owned());
         }
@@ -618,6 +624,8 @@ impl AccountStore for PgAdminAccountStore {
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 account_ids: vec![command.account_id.clone()],
                 notes: command.notes,
+                supplier: command.supplier,
+                manual_expires_at: command.manual_expires_at,
                 enabled: Some(command.enabled),
                 concurrency_limit: Some(command.concurrency_limit),
                 weight: Some(command.weight),
@@ -778,6 +786,8 @@ impl AccountStore for PgAdminAccountStore {
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
+                supplier: None,
+                manual_expires_at: None,
                 account_ids: command.account_ids,
                 notes: None,
                 enabled: command.enabled,

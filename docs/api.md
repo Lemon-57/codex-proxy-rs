@@ -767,6 +767,13 @@ OpenAI 点数随现有额度刷新和正常请求的额度信息同步，不与�
 字符，允许换行和制表符，保存时去除首尾空白，空字符串清空备注。备注独立于上游身份，导入时未显式提供备注、
 重新授权、凭据刷新及批量调度更新均保留已有备注
 
+`supplier` 和 `manualExpiresAt` 为人工维护的供应商和到期时间，与授权备注 `notes`、令牌有效期独立保存，
+仅用于记录，不改变启停和调度。列表和详情返回这两项及后端生成的 `manualExpiresAtDisplay`，未填写为 `null`。
+`/api/admin/accounts/update` 省略或传 `null` 保留原值，空字符串清空对应字段。`supplier` 最多 100 个 Unicode 字符，
+不接受控制字符，保存时去除首尾空白；`manualExpiresAt` 接受带时区的 RFC 3339 时间。导入、重新授权和批量调度更新保留人工信息
+
+列表查询支持 `supplier`，在分页前按供应商名称进行忽略大小写的包含匹配，与状态、分组及账号搜索共同生效，空值表示不过滤
+
 账号视图和 Dashboard 账号概览中的 `planType` 保留原始套餐值；`planTypeDisplay` 使用 Provider 提供的最终名称，
 前端直接展示。OpenAI 的 `prolite`、`pro`、`promax` 分别显示为 `ProLite`、`Pro`、`ProMax`；
 其余已知套餐使用官方名称，未知 OpenAI 套餐保留原值。

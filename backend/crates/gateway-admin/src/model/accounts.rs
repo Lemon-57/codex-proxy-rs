@@ -69,6 +69,7 @@ pub struct AccountSort {
 /// 账号列表的存储查询条件
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountListQuery {
+    pub supplier: Option<String>,
     pub page: u32,
     pub page_size: PageSize,
     pub provider_kind: Option<ProviderKind>,
@@ -105,6 +106,8 @@ pub enum AccountGroupFilter {
 /// 账号公共存储投影；Provider 专属字段不进入此结构
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
+    pub supplier: Option<String>,
+    pub manual_expires_at: Option<DateTime<Utc>>,
     pub id: String,
     pub provider_kind: ProviderKind,
     pub groups: Vec<AccountGroupRef>,
@@ -220,6 +223,8 @@ pub struct AccountCapacity {
 /// 账号可编辑事实的一次性替换命令
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAccount {
+    pub supplier: Option<String>,
+    pub manual_expires_at: Option<Option<DateTime<Utc>>>,
     pub account_id: String,
     /// 缺省保留备注；空字符串清空备注
     pub notes: Option<String>,

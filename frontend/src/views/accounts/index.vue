@@ -47,6 +47,7 @@ const {
   loadAccounts,
   refreshAccountsSilently,
   searchQuery,
+  supplierQuery,
   providerQuery,
   statusQuery,
   groupQuery,
@@ -184,6 +185,8 @@ const {
   showEditModal,
   editingAccount,
   notes: editingNotes,
+  supplier: editingSupplier,
+  manualExpiresAt: editingManualExpiresAt,
   schedulingEnabled,
   concurrencyLimit: editingConcurrencyLimit,
   weight: editingWeight,
@@ -217,6 +220,7 @@ const {
       <template #header>
         <AccountFilters
           v-model:search="searchQuery"
+          v-model:supplier="supplierQuery"
           v-model:status="statusQuery"
           v-model:provider="providerQuery"
           v-model:group="groupQuery"
@@ -329,6 +333,10 @@ const {
               </div>
             </template>
 
+            <template #supplier="{ row }">
+              <span class="block truncate" :title="row.supplier || undefined">{{ row.supplier }}</span>
+            </template>
+
             <template #lastUsedAt="{ row }">
               <LastUsedAtCell :value="row.usage.lastUsedAt" :display="row.usage.lastUsedAtDisplay" :full-display="row.usage.lastUsedAtFullDisplay" />
             </template>
@@ -433,6 +441,8 @@ const {
       v-model:api-key="editingApiKey"
       v-model:oauth-transport="editingOAuthTransport"
       v-model:notes="editingNotes"
+      v-model:supplier="editingSupplier"
+      v-model:manual-expires-at="editingManualExpiresAt"
       v-model:enabled="schedulingEnabled"
       v-model:concurrency-limit="editingConcurrencyLimit"
       v-model:weight="editingWeight"

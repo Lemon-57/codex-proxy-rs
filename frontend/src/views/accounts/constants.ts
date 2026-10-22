@@ -37,6 +37,8 @@ export const accountColumns = defineTableColumns<Account>([
   { key: 'planType', label: '订阅', kind: 'status', sortable: true },
   { key: 'usage', label: '用量', kind: 'custom', size: '2xl', sortable: true },
   { key: 'groups', label: '账号分组', kind: 'status' },
+  { key: 'supplier', label: '供应商', kind: 'custom', size: 'lg' },
+  { key: 'manualExpiresAtDisplay', label: '到期时间', kind: 'datetime', emptyText: '' },
   {
     key: 'lastUsedAt',
     label: '最后使用',

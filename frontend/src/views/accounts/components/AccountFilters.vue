@@ -27,6 +27,7 @@ const emit = defineEmits<{
 }>()
 
 const search = defineModel<string>('search', { required: true })
+const supplier = defineModel<string>('supplier', { required: true })
 const status = defineModel<string>('status', { required: true })
 const provider = defineModel<string>('provider', { required: true })
 const group = defineModel<string>('group', { required: true })
@@ -58,6 +59,15 @@ const groupOptions = computed(() => [
           <Search class="size-4.5 text-cp-text-tertiary" />
         </template>
       </ZInput>
+
+      <ZInput
+        v-model="supplier"
+        placeholder="筛选供应商"
+        aria-label="按供应商筛选"
+        clearable
+        :maxlength="100"
+        class="col-span-2 min-w-0 sm:col-span-3 xl:w-44 xl:flex-none"
+      />
 
       <ZSelect
         v-model="status"

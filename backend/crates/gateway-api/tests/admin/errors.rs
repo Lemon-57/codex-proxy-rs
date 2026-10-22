@@ -511,6 +511,8 @@ mod provider {
                 total_slots: None,
             },
             account: AccountRecord {
+                supplier: None,
+                manual_expires_at: None,
                 outbound_proxy_id: None,
                 outbound_proxy_enabled: true,
                 notes: None,

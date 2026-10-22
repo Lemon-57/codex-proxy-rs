@@ -173,6 +173,8 @@ fn account_page_item(
 
     AccountPageItem {
         account: AccountRecord {
+            supplier: None,
+            manual_expires_at: None,
             outbound_proxy_id: None,
             outbound_proxy_enabled: true,
             id: "acct_cooldown".to_owned(),

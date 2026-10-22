@@ -27,6 +27,10 @@ pub(crate) async fn load_admin_account_page(
         .search
         .as_deref()
         .map(crate::postgres::literal_prefix_pattern);
+    let supplier_pattern = query
+        .supplier
+        .as_deref()
+        .map(|value| format!("%{}", crate::postgres::literal_prefix_pattern(value)));
     let status = query.status.map(|status| status.as_str().to_owned());
     let (group_mode, group_id) = match query.group_filter.as_ref() {
         None => (0_i16, None),
@@ -85,6 +89,7 @@ pub(crate) async fn load_admin_account_page(
                    lower(coalesce(a.email, '')) like $4 escape '\\' or
                    lower(coalesce(a.upstream_account_id, '')) like $4 escape '\\' or
                    lower(coalesce(a.upstream_user_id, '')) like $4 escape '\\')
+              and ($13::text is null or lower(coalesce(a.supplier, '')) like $13 escape '\\')
               and ($5::text is null or status.admin_status = $5)
               and ($6::smallint = 0 or
                    ($6 = 1 and exists (
@@ -107,7 +112,7 @@ pub(crate) async fn load_admin_account_page(
              from runtime_settings
             where id = 1
          )
-         select coalesce(p.enabled, true) as outbound_proxy_enabled, coalesce(p.max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, p.auto_location, p.detected_location_json, p.location_country, p.location_region, p.location_city, p.location_timezone, a.outbound_proxy_id, a.outbound_proxy_url, a.id, a.provider_kind, a.name, a.notes, a.email, a.upstream_user_id,
+         select coalesce(p.enabled, true) as outbound_proxy_enabled, coalesce(p.max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, p.auto_location, p.detected_location_json, p.location_country, p.location_region, p.location_city, p.location_timezone, a.outbound_proxy_id, a.outbound_proxy_url, a.id, a.provider_kind, a.name, a.notes, a.supplier, a.manual_expires_at, a.email, a.upstream_user_id,
                 a.upstream_account_id, a.plan_type, a.authentication_kind,
                 a.credential_revision, a.has_refresh_token, a.access_token_expires_at,
                 a.next_refresh_at, a.enabled, a.concurrency_limit, a.weight, a.model_access_json,
@@ -167,6 +172,7 @@ pub(crate) async fn load_admin_account_page(
                     .bind(usage_ids)
                     .bind(usage_tokens)
                     .bind(usage_latest)
+                    .bind(supplier_pattern)
                     .fetch_all(&mut *snapshot.tx)
                     .await
                     .map_err(|source| postgres_unavailable("load admin account page", source))?;

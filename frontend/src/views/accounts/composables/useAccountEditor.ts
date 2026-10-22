@@ -17,6 +17,8 @@ export function useAccountEditor(options: {
   // 保存后列表可能因筛选移除该账号，编辑窗口的退场仍需保留原账号内容。
   const editingAccount = shallowRef<Account | null>(null)
   const notes = shallowRef('')
+  const supplier = shallowRef('')
+  const manualExpiresAt = shallowRef<string | null>(null)
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
@@ -68,6 +70,8 @@ export function useAccountEditor(options: {
     configurationRequest.invalidate()
     editingAccount.value = account
     notes.value = account.notes ?? ''
+    supplier.value = account.supplier ?? ''
+    manualExpiresAt.value = account.manualExpiresAt
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = account.enabled
@@ -119,6 +123,8 @@ export function useAccountEditor(options: {
       const settings = {
         accountId,
         notes: notes.value,
+        supplier: supplier.value,
+        manualExpiresAt: manualExpiresAt.value || '',
         outboundProxyId: proxyMode.value === 'preserve' ? undefined : proxyMode.value === 'direct' ? '' : proxyId.value.trim(),
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
@@ -164,6 +170,8 @@ export function useAccountEditor(options: {
     showEditModal,
     editingAccount,
     notes,
+    supplier,
+    manualExpiresAt,
     schedulingEnabled,
     concurrencyLimit,
     weight,

@@ -3,6 +3,108 @@
 use super::*;
 
 #[tokio::test]
+async fn supplier_filter_applies_before_pagination_and_treats_wildcards_literally() {
+    let Some(database) = TestDatabase::create("supplier_filter").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let store = admin_account_store(&database.pool);
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "supplier-edit".to_owned(),
+    };
+    for (id, supplier) in [
+        ("acct_s1", "North 100%_A"),
+        ("acct_s2", "North partner"),
+        ("acct_s3", "Other"),
+    ] {
+        repository
+            .insert_provider_account(account(id, id))
+            .await
+            .unwrap();
+        store
+            .update_account(
+                UpdateAccount {
+                    account_id: id.to_owned(),
+                    supplier: Some(supplier.to_owned()),
+                    manual_expires_at: None,
+                    notes: None,
+                    enabled: false,
+                    concurrency_limit: None,
+                    weight: gateway_core::account::AccountWeight::DEFAULT,
+                    group_ids: vec![],
+                    outbound_proxy: None,
+                    model_access: None,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+    }
+    let query = AccountListQuery {
+        supplier: Some("north".to_owned()),
+        page: 1,
+        page_size: PageSize::new(1).unwrap(),
+        provider_kind: None,
+        group_filter: None,
+        search: None,
+        status: Some(AccountStatus::Disabled),
+        sort: Some(AccountSort {
+            field: AccountSortField::Email,
+            direction: SortDirection::Asc,
+        }),
+    };
+    let first = store
+        .list_accounts(query.clone(), Default::default())
+        .await
+        .unwrap();
+    let second = store
+        .list_accounts(
+            AccountListQuery {
+                page: 2,
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!((first.total, second.total), (2, 2));
+    assert_eq!(
+        (
+            first.items[0].account.id.as_str(),
+            second.items[0].account.id.as_str()
+        ),
+        ("acct_s1", "acct_s2")
+    );
+    let literal = store
+        .list_accounts(
+            AccountListQuery {
+                supplier: Some("100%_A".to_owned()),
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(literal.total, 1);
+    assert_eq!(literal.items[0].account.id, "acct_s1");
+    let empty = store
+        .list_accounts(
+            AccountListQuery {
+                supplier: Some("absent".to_owned()),
+                ..query
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.total, 0);
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.summary.total, 3);
+    database.close().await;
+}
+
+#[tokio::test]
 async fn paused_invalid_accounts_are_errors_in_detail_filters_pagination_and_global_counts() {
     use gateway_core::account::AccountStatus;
     let Some(database) = TestDatabase::create("paused_invalid_projection").await else {
@@ -21,6 +123,7 @@ async fn paused_invalid_accounts_are_errors_in_detail_filters_pagination_and_glo
     }
     let store = admin_account_store(&database.pool);
     let query = AccountListQuery {
+        supplier: None,
         page: 1,
         page_size: PageSize::new(1).unwrap(),
         provider_kind: None,
@@ -122,6 +225,7 @@ async fn account_capacity_should_resolve_limits_for_list_and_detail() {
             let page = store
                 .list_accounts(
                     AccountListQuery {
+                        supplier: None,
                         page: 1,
                         page_size: PageSize::new(20).unwrap(),
                         provider_kind: None,
@@ -177,6 +281,7 @@ async fn provider_filter_applies_before_pagination_even_on_an_empty_page() {
         repository.insert_provider_account(record).await.unwrap();
     }
     let query = AccountListQuery {
+        supplier: None,
         page: 2,
         page_size: PageSize::new(1).unwrap(),
         provider_kind: Some(ProviderKind::new("openai").unwrap()),

@@ -209,6 +209,8 @@ fn validate_authorization_flow(
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateAccountRequest {
+    pub supplier: Option<String>,
+    pub manual_expires_at: Option<String>,
     pub connection: Option<AccountConnectionUpdateRequest>,
     pub outbound_proxy_id: Option<String>,
     pub outbound_proxy_url: Option<super::wire::AccountProxyUpdate>,
@@ -223,12 +225,36 @@ pub struct UpdateAccountRequest {
 }
 
 impl UpdateAccountRequest {
+    fn parse_manual_expiration(
+        &self,
+    ) -> Result<Option<Option<DateTime<Utc>>>, WireValidationError> {
+        self.manual_expires_at
+            .as_deref()
+            .map(|value| {
+                if value.is_empty() {
+                    return Ok(None);
+                }
+                DateTime::parse_from_rfc3339(value)
+                    .map(|value| Some(value.to_utc()))
+                    .map_err(|_| WireValidationError::new("manualExpiresAt"))
+            })
+            .transpose()
+    }
+
     pub fn validate(&self) -> Result<(), WireValidationError> {
         require_account_id(&self.account_id, "accountId")?;
         if let Some(connection) = &self.connection {
             connection.validate()?;
         }
         validate_account_notes(self.notes.as_deref())?;
+        if self
+            .supplier
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > 100 || value.chars().any(char::is_control))
+        {
+            return Err(WireValidationError::new("supplier"));
+        }
+        self.parse_manual_expiration()?;
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
         validate_wire_group_ids(&self.group_ids)?;
@@ -239,10 +265,13 @@ impl UpdateAccountRequest {
         self,
     ) -> Result<(UpdateAccount, Option<ProviderDocument>), WireValidationError> {
         self.validate()?;
+        let manual_expires_at = self.parse_manual_expiration()?;
         let connection = self
             .connection
             .map(AccountConnectionUpdateRequest::into_document);
         let settings = UpdateAccount {
+            supplier: self.supplier,
+            manual_expires_at,
             outbound_proxy: super::wire::proxy_selection(
                 self.outbound_proxy_id,
                 self.outbound_proxy_url,

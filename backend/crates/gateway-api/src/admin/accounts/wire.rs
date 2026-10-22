@@ -48,6 +48,7 @@ pub(super) fn proxy_selection(
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListQuery {
+    pub supplier: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub provider: Option<String>,
@@ -171,6 +172,16 @@ impl ListQuery {
                     .map_err(|_| WireValidationError::new("groupId"))?,
             )),
         };
+        let supplier = self
+            .supplier
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if supplier
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > 100 || value.chars().any(char::is_control))
+        {
+            return Err(WireValidationError::new("supplier"));
+        }
         let search = self
             .search
             .map(|value| value.trim().to_owned())
@@ -197,6 +208,7 @@ impl ListQuery {
             _ => return Err(WireValidationError::new("sort")),
         };
         Ok(AccountListQuery {
+            supplier,
             page,
             page_size: PageSize::new(
                 u16::try_from(page_size).map_err(|_| WireValidationError::new("pageSize"))?,
@@ -266,6 +278,9 @@ pub struct AccountSummaryView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountView {
+    pub supplier: Option<String>,
+    pub manual_expires_at: Option<String>,
+    pub manual_expires_at_display: Option<String>,
     pub capabilities: AccountCapabilitiesView,
     pub outbound_proxy_id: Option<String>,
     pub outbound_proxy_endpoint: Option<String>,

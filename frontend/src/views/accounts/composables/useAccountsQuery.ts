@@ -7,6 +7,7 @@ import { usePagedQuery } from '@/composables/usePagedQuery'
 
 export function useAccountsQuery() {
   const searchQuery = shallowRef('')
+  const supplierQuery = shallowRef('')
   const providerQuery = shallowRef('')
   const statusQuery = shallowRef('')
   const groupQuery = shallowRef('')
@@ -27,6 +28,7 @@ export function useAccountsQuery() {
         page,
         pageSize,
         search: searchQuery.value,
+        supplier: supplierQuery.value.trim() || undefined,
         provider: providerQuery.value || undefined,
         status: statusQuery.value || undefined,
         groupId: groupQuery.value || undefined,
@@ -68,7 +70,7 @@ export function useAccountsQuery() {
     return query.items.value.some(account => account.id === updated.id)
   }
 
-  watch(searchQuery, (_value, _previous, onCleanup) => {
+  watch([searchQuery, supplierQuery], (_value, _previous, onCleanup) => {
     const timer = setTimeout(() => {
       void query.reloadFromStart()
     }, 250)
@@ -92,6 +94,7 @@ export function useAccountsQuery() {
     loadAccounts: query.execute,
     refreshAccountsSilently: () => query.execute({ silent: true }),
     searchQuery,
+    supplierQuery,
     providerQuery,
     statusQuery,
     groupQuery,
