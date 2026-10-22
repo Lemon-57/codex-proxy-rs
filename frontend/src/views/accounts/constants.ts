@@ -59,7 +59,7 @@ export const accountColumns = defineTableColumns<Account>([
 
 export const subscriptionOptions = [
   { label: '全部订阅', value: '' },
-  ...[['free', 'Free'], ['plus', 'Plus'], ['team', 'Team'], ['business', 'Business'], ['pro', 'Pro'], ['prolite', 'ProLite'], ['promax', 'ProMax'], ['go', 'Go'], ['enterprise', 'Enterprise'], ['education', 'Education'], ['api', 'API'], ['unknown', '未知套餐']].map(([value, label]) => ({ value: value!, label: label! })),
+  ...[['free', 'Free'], ['plus', 'Plus'], ['team', 'Team'], ['business', 'Business'], ['pro', 'Pro'], ['prolite', 'ProLite'], ['promax', 'ProMax'], ['go', 'Go'], ['enterprise', 'Enterprise'], ['edu', 'Edu'], ['edu_plus', 'Edu Plus'], ['edu_pro', 'Edu Pro'], ['ent26', 'Ent26'], ['self_serve_business_prolite', 'Self Serve Business ProLite'], ['self_serve_business_usage_based', 'Self Serve Business Usage Based'], ['enterprise_cbp_automation', 'Enterprise Cbp Automation'], ['enterprise_cbp_usage_based', 'Enterprise Cbp Usage Based'], ['api', 'API'], ['unknown', '未知套餐']].map(([value, label]) => ({ value: value!, label: label! })),
 ]
 
 export const statusLabels: Record<AccountStatus, string> = {

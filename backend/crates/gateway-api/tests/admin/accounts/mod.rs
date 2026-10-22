@@ -125,6 +125,7 @@ mod query {
             "pageSize": 20,
             "provider": "xai",
             "search": "  operator  ",
+            "planType": "  TEAM  ",
             "status": "normal",
             "sortBy": "lastUsedAt",
             "sortDirection": "desc"
@@ -138,6 +139,7 @@ mod query {
             Some(ref provider) if provider.as_str() == "xai"
         ));
         assert_eq!(query.search.as_deref(), Some("operator"));
+        assert_eq!(query.plan_type.as_deref(), Some("team"));
         assert_eq!(query.status, Some(AccountStatus::Normal));
         assert_eq!(
             query.sort.expect("sort").field,

@@ -73,6 +73,7 @@ const groupOptions = computed(() => [
       <ZSelect
         v-model="planType"
         :options="subscriptionOptions"
+        filterable
         aria-label="按订阅类型筛选"
         class="w-full min-w-0 xl:w-40 xl:shrink-0"
       />

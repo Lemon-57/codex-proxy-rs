@@ -102,6 +102,43 @@ async fn supplier_filter_applies_before_pagination_and_treats_wildcards_literall
     assert_eq!(empty.total, 0);
     assert!(empty.items.is_empty());
     assert_eq!(empty.summary.total, 3);
+    let matching_plan = store
+        .list_accounts(
+            AccountListQuery {
+                plan_type: Some("pro".to_owned()),
+                supplier: Some("north".to_owned()),
+                page: 1,
+                page_size: PageSize::new(1).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: Some(AccountStatus::Disabled),
+                sort: None,
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(matching_plan.total, 2);
+    assert_eq!(matching_plan.items.len(), 1);
+    let absent_plan = store
+        .list_accounts(
+            AccountListQuery {
+                plan_type: Some("plus".to_owned()),
+                supplier: None,
+                page: 1,
+                page_size: PageSize::new(1).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: None,
+                sort: None,
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(absent_plan.total, 0);
     database.close().await;
 }
 
