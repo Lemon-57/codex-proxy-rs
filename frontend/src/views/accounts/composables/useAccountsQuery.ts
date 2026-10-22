@@ -8,6 +8,7 @@ import { usePagedQuery } from '@/composables/usePagedQuery'
 export function useAccountsQuery() {
   const searchQuery = shallowRef('')
   const supplierQuery = shallowRef('')
+  const planTypeQuery = shallowRef('')
   const providerQuery = shallowRef('')
   const statusQuery = shallowRef('')
   const groupQuery = shallowRef('')
@@ -29,6 +30,7 @@ export function useAccountsQuery() {
         pageSize,
         search: searchQuery.value,
         supplier: supplierQuery.value.trim() || undefined,
+        planType: planTypeQuery.value || undefined,
         provider: providerQuery.value || undefined,
         status: statusQuery.value || undefined,
         groupId: groupQuery.value || undefined,
@@ -77,7 +79,7 @@ export function useAccountsQuery() {
     onCleanup(() => clearTimeout(timer))
   })
 
-  watch([providerQuery, statusQuery, groupQuery], () => {
+  watch([providerQuery, statusQuery, groupQuery, planTypeQuery], () => {
     void query.reloadFromStart()
   })
 
@@ -95,6 +97,7 @@ export function useAccountsQuery() {
     refreshAccountsSilently: () => query.execute({ silent: true }),
     searchQuery,
     supplierQuery,
+    planTypeQuery,
     providerQuery,
     statusQuery,
     groupQuery,

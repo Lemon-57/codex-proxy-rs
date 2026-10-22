@@ -48,6 +48,7 @@ const {
   refreshAccountsSilently,
   searchQuery,
   supplierQuery,
+  planTypeQuery,
   providerQuery,
   statusQuery,
   groupQuery,
@@ -221,6 +222,7 @@ const {
         <AccountFilters
           v-model:search="searchQuery"
           v-model:supplier="supplierQuery"
+          v-model:plan-type="planTypeQuery"
           v-model:status="statusQuery"
           v-model:provider="providerQuery"
           v-model:group="groupQuery"

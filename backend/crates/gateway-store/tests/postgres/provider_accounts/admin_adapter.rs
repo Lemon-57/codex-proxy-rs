@@ -42,6 +42,7 @@ async fn supplier_filter_applies_before_pagination_and_treats_wildcards_literall
             .unwrap();
     }
     let query = AccountListQuery {
+        plan_type: None,
         supplier: Some("north".to_owned()),
         page: 1,
         page_size: PageSize::new(1).unwrap(),
@@ -123,6 +124,7 @@ async fn paused_invalid_accounts_are_errors_in_detail_filters_pagination_and_glo
     }
     let store = admin_account_store(&database.pool);
     let query = AccountListQuery {
+        plan_type: None,
         supplier: None,
         page: 1,
         page_size: PageSize::new(1).unwrap(),
@@ -225,6 +227,7 @@ async fn account_capacity_should_resolve_limits_for_list_and_detail() {
             let page = store
                 .list_accounts(
                     AccountListQuery {
+                        plan_type: None,
                         supplier: None,
                         page: 1,
                         page_size: PageSize::new(20).unwrap(),
@@ -281,6 +284,7 @@ async fn provider_filter_applies_before_pagination_even_on_an_empty_page() {
         repository.insert_provider_account(record).await.unwrap();
     }
     let query = AccountListQuery {
+        plan_type: None,
         supplier: None,
         page: 2,
         page_size: PageSize::new(1).unwrap(),

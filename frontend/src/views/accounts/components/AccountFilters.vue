@@ -5,7 +5,7 @@ import { ZButton, ZInput, ZSelect } from '@codex-proxy/ui'
 import { Download, ListTodo, Pencil, Search, Trash2, Upload } from '@lucide/vue'
 import { computed } from 'vue'
 import ProviderFilter from '@/components/ProviderFilter.vue'
-import { accountStatusFilterOptions } from '../constants'
+import { accountStatusFilterOptions, subscriptionOptions } from '../constants'
 
 const props = defineProps<{
   hasImportTasks: boolean
@@ -28,6 +28,7 @@ const emit = defineEmits<{
 
 const search = defineModel<string>('search', { required: true })
 const supplier = defineModel<string>('supplier', { required: true })
+const planType = defineModel<string>('planType', { required: true })
 const status = defineModel<string>('status', { required: true })
 const provider = defineModel<string>('provider', { required: true })
 const group = defineModel<string>('group', { required: true })
@@ -67,6 +68,13 @@ const groupOptions = computed(() => [
         clearable
         :maxlength="100"
         class="col-span-2 min-w-0 sm:col-span-3 xl:w-44 xl:flex-none"
+      />
+
+      <ZSelect
+        v-model="planType"
+        :options="subscriptionOptions"
+        aria-label="按订阅类型筛选"
+        class="w-full min-w-0 xl:w-40 xl:shrink-0"
       />
 
       <ZSelect

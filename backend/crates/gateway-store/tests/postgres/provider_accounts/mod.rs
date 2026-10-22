@@ -753,6 +753,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let usage_page = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
                 supplier: None,
                 page: 1,
                 page_size: PageSize::new(2).expect("page size"),
@@ -797,6 +798,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let last_used_page = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
                 supplier: None,
                 page: 1,
                 page_size: PageSize::new(2).expect("page size"),
@@ -825,6 +827,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let filtered = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
                 supplier: None,
                 page: 1,
                 page_size: PageSize::new(10).expect("page size"),
@@ -846,6 +849,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let rate_limited = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
                 supplier: None,
                 page: 1,
                 page_size: PageSize::new(10).expect("page size"),
@@ -873,6 +877,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let no_contains_compatibility = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
                 supplier: None,
                 page: 1,
                 page_size: PageSize::new(10).expect("page size"),
@@ -891,6 +896,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let error_accounts = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
                 supplier: None,
                 page: 1,
                 page_size: PageSize::new(10).expect("page size"),

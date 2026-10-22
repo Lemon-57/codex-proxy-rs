@@ -48,6 +48,7 @@ pub(super) fn proxy_selection(
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListQuery {
+    pub plan_type: Option<String>,
     pub supplier: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
@@ -172,6 +173,18 @@ impl ListQuery {
                     .map_err(|_| WireValidationError::new("groupId"))?,
             )),
         };
+        let plan_type = self
+            .plan_type
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        if plan_type.as_deref().is_some_and(|value| {
+            value.len() > 100
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        }) {
+            return Err(WireValidationError::new("planType"));
+        }
         let supplier = self
             .supplier
             .map(|value| value.trim().to_owned())
@@ -208,6 +221,7 @@ impl ListQuery {
             _ => return Err(WireValidationError::new("sort")),
         };
         Ok(AccountListQuery {
+            plan_type,
             supplier,
             page,
             page_size: PageSize::new(

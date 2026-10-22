@@ -772,6 +772,8 @@ OpenAI 点数随现有额度刷新和正常请求的额度信息同步，不与�
 `/api/admin/accounts/update` 省略或传 `null` 保留原值，空字符串清空对应字段。`supplier` 最多 100 个 Unicode 字符，
 不接受控制字符，保存时去除首尾空白；`manualExpiresAt` 接受带时区的 RFC 3339 时间。导入、重新授权和批量调度更新保留人工信息
 
+列表查询支持 `planType` 按订阅原始类型精确匹配，忽略大小写；`api` 对应 API Key 账号，`unknown` 对应未提供套餐的账号，空值表示不过滤，筛选在分页前执行，可与其他条件组合
+
 列表查询支持 `supplier`，在分页前按供应商名称进行忽略大小写的包含匹配，与状态、分组及账号搜索共同生效，空值表示不过滤
 
 账号视图和 Dashboard 账号概览中的 `planType` 保留原始套餐值；`planTypeDisplay` 使用 Provider 提供的最终名称，

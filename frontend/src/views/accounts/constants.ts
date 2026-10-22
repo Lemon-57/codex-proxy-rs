@@ -57,6 +57,11 @@ export const accountColumns = defineTableColumns<Account>([
   { key: 'actions', label: '操作', kind: 'actions', size: 'lg', hideable: false },
 ])
 
+export const subscriptionOptions = [
+  { label: '全部订阅', value: '' },
+  ...[['free', 'Free'], ['plus', 'Plus'], ['team', 'Team'], ['business', 'Business'], ['pro', 'Pro'], ['prolite', 'ProLite'], ['promax', 'ProMax'], ['go', 'Go'], ['enterprise', 'Enterprise'], ['education', 'Education'], ['api', 'API'], ['unknown', '未知套餐']].map(([value, label]) => ({ value: value!, label: label! })),
+]
+
 export const statusLabels: Record<AccountStatus, string> = {
   normal: '正常',
   quota_exhausted: '配额耗尽',

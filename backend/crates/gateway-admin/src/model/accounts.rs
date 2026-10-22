@@ -69,6 +69,7 @@ pub struct AccountSort {
 /// 账号列表的存储查询条件
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountListQuery {
+    pub plan_type: Option<String>,
     pub supplier: Option<String>,
     pub page: u32,
     pub page_size: PageSize,

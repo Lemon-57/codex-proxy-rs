@@ -31,6 +31,7 @@ pub(crate) async fn load_admin_account_page(
         .supplier
         .as_deref()
         .map(|value| format!("%{}", crate::postgres::literal_prefix_pattern(value)));
+    let plan_type = query.plan_type.clone();
     let status = query.status.map(|status| status.as_str().to_owned());
     let (group_mode, group_id) = match query.group_filter.as_ref() {
         None => (0_i16, None),
@@ -89,6 +90,9 @@ pub(crate) async fn load_admin_account_page(
                    lower(coalesce(a.email, '')) like $4 escape '\\' or
                    lower(coalesce(a.upstream_account_id, '')) like $4 escape '\\' or
                    lower(coalesce(a.upstream_user_id, '')) like $4 escape '\\')
+              and ($14::text is null or
+                   (case when a.authentication_kind = 'api_key' then 'api'
+                    else coalesce(nullif(lower(trim(a.plan_type)), ''), 'unknown') end) = $14)
               and ($13::text is null or lower(coalesce(a.supplier, '')) like $13 escape '\\')
               and ($5::text is null or status.admin_status = $5)
               and ($6::smallint = 0 or
@@ -173,6 +177,7 @@ pub(crate) async fn load_admin_account_page(
                     .bind(usage_tokens)
                     .bind(usage_latest)
                     .bind(supplier_pattern)
+                    .bind(plan_type)
                     .fetch_all(&mut *snapshot.tx)
                     .await
                     .map_err(|source| postgres_unavailable("load admin account page", source))?;
