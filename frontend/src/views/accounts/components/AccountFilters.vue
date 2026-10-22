@@ -16,6 +16,7 @@ const props = defineProps<{
   exportDisabledReason: string
   groups: AccountGroupRef[]
   groupsLoading: boolean
+  supplierOptions: Array<{ label: string, value: string }>
 }>()
 
 const emit = defineEmits<{
@@ -61,12 +62,11 @@ const groupOptions = computed(() => [
         </template>
       </ZInput>
 
-      <ZInput
+      <ZSelect
         v-model="supplier"
-        placeholder="筛选供应商"
+        :options="supplierOptions"
         aria-label="按供应商筛选"
-        clearable
-        :maxlength="100"
+        filterable
         class="col-span-2 min-w-0 sm:col-span-3 xl:w-44 xl:flex-none"
       />
 

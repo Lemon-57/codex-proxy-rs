@@ -48,6 +48,8 @@ const {
   refreshAccountsSilently,
   searchQuery,
   supplierQuery,
+  supplierOptions,
+  loadSupplierOptions,
   planTypeQuery,
   providerQuery,
   statusQuery,
@@ -61,6 +63,10 @@ const {
   handleSortChange,
 } = useAccountsQuery()
 
+async function reloadAccountsAndSuppliers() {
+  await Promise.all([loadAccounts(), loadSupplierOptions()])
+}
+
 const {
   groups,
   loading: groupsLoading,
@@ -68,7 +74,7 @@ const {
 } = useAccountGroupCatalog()
 
 const importTasks = useAccountImportTasks({
-  reload: () => Promise.all([loadAccounts(), loadGroups()]),
+  reload: () => Promise.all([reloadAccountsAndSuppliers(), loadGroups()]),
 })
 const {
   open: showImportTasks,
@@ -121,7 +127,7 @@ const {
   onImportTaskCreated: importTasks.created,
   accounts,
   selectedIds,
-  reload: () => Promise.all([loadAccounts(), loadGroups()]),
+  reload: () => Promise.all([reloadAccountsAndSuppliers(), loadGroups()]),
   replaceAccount,
 })
 
@@ -174,7 +180,7 @@ const {
 } = useAccountBatchEditor({
   accounts,
   selectedIds,
-  reloadAccounts: loadAccounts,
+  reloadAccounts: reloadAccountsAndSuppliers,
   reloadGroups: loadGroups,
 })
 
@@ -200,7 +206,7 @@ const {
   save: saveAccountEdit,
   clearCredentials,
 } = useAccountEditor({
-  reloadAccounts: loadAccounts,
+  reloadAccounts: reloadAccountsAndSuppliers,
   reloadGroups: loadGroups,
 })
 </script>
@@ -228,6 +234,7 @@ const {
           v-model:group="groupQuery"
           :groups="groups"
           :groups-loading="groupsLoading"
+          :supplier-options="supplierOptions"
           :selected-count="selectedIds.size"
           :batch-deleting="batchDeleting"
           :exporting-accounts="exportingAccounts"
@@ -419,7 +426,7 @@ const {
       @refresh="importTasks.refresh"
       @stop="importTasks.stop"
       @after-leave="importTasks.refresh(true)"
-      @view-accounts="showImportTasks = false; loadAccounts()"
+      @view-accounts="showImportTasks = false; reloadAccountsAndSuppliers()"
     />
 
     <AccountCreateModal

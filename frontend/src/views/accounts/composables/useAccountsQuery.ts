@@ -8,6 +8,9 @@ import { usePagedQuery } from '@/composables/usePagedQuery'
 export function useAccountsQuery() {
   const searchQuery = shallowRef('')
   const supplierQuery = shallowRef('')
+  const supplierOptions = shallowRef<Array<{ label: string, value: string }>>([
+    { label: '全部供应商', value: '' },
+  ])
   const planTypeQuery = shallowRef('')
   const providerQuery = shallowRef('')
   const statusQuery = shallowRef('')
@@ -61,6 +64,28 @@ export function useAccountsQuery() {
     void query.reloadFromStart()
   }
 
+  async function loadSupplierOptions() {
+    try {
+      const firstPage = await getAccounts({ page: 1, pageSize: 200 })
+      const pages = await Promise.all(
+        Array.from({ length: Math.max(0, firstPage.page.totalPages - 1) }, (_, index) => getAccounts({ page: index + 2, pageSize: 200 })),
+      )
+      const values = new Set(
+        [firstPage, ...pages]
+          .flatMap(result => result.items)
+          .map(account => account.supplier?.trim())
+          .filter((supplier): supplier is string => Boolean(supplier)),
+      )
+      supplierOptions.value = [
+        { label: '全部供应商', value: '' },
+        ...Array.from(values).sort((left, right) => left.localeCompare(right, 'zh-CN')).map(value => ({ label: value, value })),
+      ]
+    }
+    catch {
+      // 供应商目录加载失败不影响账号列表和已有文本查询能力。
+    }
+  }
+
   async function replaceAccount(updated: Account) {
     // 先取消旧查询并应用接口返回的账号，避免旧响应覆盖最新行数据。
     query.invalidate()
@@ -85,6 +110,7 @@ export function useAccountsQuery() {
 
   onMounted(() => {
     void query.execute()
+    void loadSupplierOptions()
   })
 
   return {
@@ -97,6 +123,8 @@ export function useAccountsQuery() {
     refreshAccountsSilently: () => query.execute({ silent: true }),
     searchQuery,
     supplierQuery,
+    supplierOptions,
+    loadSupplierOptions,
     planTypeQuery,
     providerQuery,
     statusQuery,
