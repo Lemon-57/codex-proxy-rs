@@ -49,7 +49,7 @@ pub(crate) fn outcome_name(outcome: &domain::RequestOutcome) -> &str {
     outcome.as_str()
 }
 
-pub(crate) fn request_metrics_view(metrics: &domain::RequestMetrics) -> RequestMetricsView {
+fn request_summary_metrics_view(metrics: &domain::RequestSummaryMetrics) -> RequestMetricsView {
     RequestMetricsView {
         request_count: metrics.request_count,
         success_count: metrics.success_count,
@@ -735,34 +735,34 @@ pub(crate) fn trend_summary_view(
     match kind {
         TrendKind::Usage => vec![
             TrendSummaryView {
-                label: "输入".to_owned(),
+                metric: TrendMetric::InputTokens,
                 value: format_compact_number(summary.input_tokens),
                 ratio: None,
             },
             TrendSummaryView {
-                label: "输出".to_owned(),
+                metric: TrendMetric::OutputTokens,
                 value: format_compact_number(summary.output_tokens),
                 ratio: None,
             },
             TrendSummaryView {
-                label: "缓存".to_owned(),
+                metric: TrendMetric::CachedInputTokens,
                 value: format_compact_number(summary.cached_input_tokens),
                 ratio: None,
             },
         ],
         TrendKind::Latency => vec![
             TrendSummaryView {
-                label: "首字 P95".to_owned(),
+                metric: TrendMetric::FirstTokenP95Ms,
                 value: display_duration_f64(summary.peak_first_token_p95_ms),
                 ratio: None,
             },
             TrendSummaryView {
-                label: "总耗时 P95".to_owned(),
+                metric: TrendMetric::LatencyP95Ms,
                 value: display_duration_f64(summary.peak_latency_p95_ms),
                 ratio: None,
             },
             TrendSummaryView {
-                label: "速率 P50".to_owned(),
+                metric: TrendMetric::OutputThroughputP50,
                 value: summary
                     .minimum_output_throughput_p50
                     .map_or_else(|| "—".to_owned(), |value| format!("{value} tok/s")),
@@ -771,19 +771,19 @@ pub(crate) fn trend_summary_view(
         ],
         TrendKind::Errors => vec![
             TrendSummaryView {
-                label: "错误数".to_owned(),
+                metric: TrendMetric::Errors,
                 value: format_compact_number(summary.service_failure_count),
                 ratio: None,
             },
             TrendSummaryView {
-                label: "成功率".to_owned(),
+                metric: TrendMetric::SuccessRate,
                 value: "—".to_owned(),
                 ratio: summary
                     .success_rate
                     .map(|value| format!("{:.1}%", value * 100.0)),
             },
             TrendSummaryView {
-                label: "总请求".to_owned(),
+                metric: TrendMetric::Requests,
                 value: format_compact_number(summary.request_count),
                 ratio: None,
             },
@@ -875,7 +875,7 @@ pub(crate) fn wire_profile_view(
             .attributes
             .into_iter()
             .map(|attribute| DashboardWireAttributeView {
-                label: attribute.label,
+                key: attribute.key,
                 value: attribute.value,
             })
             .collect(),
@@ -1050,7 +1050,7 @@ pub(crate) fn usage_summary_view(
     summary: domain::UsageSummary,
     time: crate::time::TimePresenter,
 ) -> UsageSummaryView {
-    let overview = summary.overview;
+    let overview = summary.observation;
     UsageSummaryView {
         analytics: analytics_view(overview.analytics, time),
         total_requests: format_compact_number(overview.requests.request_count),
@@ -1060,7 +1060,7 @@ pub(crate) fn usage_summary_view(
         cache_write_input_tokens: format_compact_number(overview.requests.cache_write_input_tokens),
         total_tokens: format_compact_number(overview.requests.total_tokens),
         average_latency_ms: display_duration(summary.average_latency_ms),
-        logical_requests: request_metrics_view(&overview.requests),
+        logical_requests: request_summary_metrics_view(&overview.requests),
         attempts: attempt_metrics_view(&overview.attempts),
     }
 }

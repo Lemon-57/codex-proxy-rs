@@ -70,15 +70,11 @@ pub(super) async fn invoke(
         .session
         .decode_response(Stage::WebSocket, reply.result)
         .map_err(|_| MiddlewareError::InvalidState)?;
-    let invalid = || {
-        ports.session.invalid_response(Stage::WebSocket);
-        MiddlewareError::InvalidState
-    };
     match output {
         Some(message) => invocation
             .decode(message, reply.payload)
             .map(Some)
-            .map_err(|_| invalid()),
+            .map_err(|_| MiddlewareError::InvalidState),
         None => Ok(None),
     }
 }

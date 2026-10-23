@@ -1,10 +1,11 @@
 import type { Ref } from 'vue'
 import type { Account, AccountModelAccess } from '@/api'
-
-import { ZNotification } from '@codex-proxy/ui'
 import { ref, shallowRef, watch } from 'vue'
+
 import { batchUpdateAccounts } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
+import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
 import { accountModelAccessError } from '../utils/modelAccess'
 import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
 
@@ -68,7 +69,7 @@ export function useAccountBatchEditor(options: {
     }
     const scheduling = parseAccountSchedulingForm(editedFields.value.has('concurrencyLimit') ? concurrencyLimit.value : '', editedFields.value.has('weight') ? weight.value : '1')
     if (proxyMode.value === 'proxy' && !proxyId.value.trim()) {
-      ZNotification.warning({ message: '请选择已通过测试的代理' })
+      ZNotification.warning({ message: t('accounts.batchEdit.proxyRequired') })
       return
     }
     if (!scheduling.valid) {
@@ -89,7 +90,7 @@ export function useAccountBatchEditor(options: {
       })
       showBatchEditModal.value = false
       options.selectedIds.value = new Set()
-      ZNotification.success({ message: `已更新 ${accountIds.length} 个账号` })
+      ZNotification.success({ message: t('accounts.batchEdit.saved', { count: accountIds.length }) })
       void Promise.allSettled([options.reloadAccounts(), options.reloadGroups()])
     }, { onError: () => void options.reloadAccounts() })
   }
@@ -98,7 +99,7 @@ export function useAccountBatchEditor(options: {
     return [...options.selectedIds.value].map((accountId) => {
       const account = selectedAccountsById.get(accountId)
       if (!account)
-        throw new Error(`账号 ${accountId} 的页面数据已失效，请重新选择`)
+        throw new Error(t('accounts.batchEdit.staleAccount', { accountId }))
       return account
     })
   }

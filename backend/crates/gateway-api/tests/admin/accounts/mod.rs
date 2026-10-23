@@ -183,7 +183,13 @@ mod query {
 
     #[test]
     fn account_query_should_reject_unknown_fields() {
-        assert!(serde_json::from_value::<ListQuery>(json!({"id": "cred_1"})).is_err());
+        let mut query = json!({"page": 1, "pageSize": 20});
+        serde_json::from_value::<ListQuery>(query.clone())
+            .unwrap()
+            .validate()
+            .expect("valid account query");
+        query["unknownField"] = json!(true);
+        assert!(serde_json::from_value::<ListQuery>(query).is_err());
     }
 }
 
@@ -500,13 +506,13 @@ fn single_update_validates_manual_details_independently_of_authorization_notes()
 }
 
 mod response {
-    use gateway_api::admin::accounts::AccountUsageView;
+    use gateway_api::admin::accounts::{AccountUsageView, AccountUsageWindowKind};
     use gateway_api::admin::presenter::format_decimal_currency;
 
     #[test]
     fn account_usage_view_should_keep_unobserved_numbers_null() {
         let view = AccountUsageView {
-            window_label_display: "周/月额度窗口".to_owned(),
+            window_kind: AccountUsageWindowKind::Quota,
             request_count: None,
             request_count_display: "-".to_owned(),
             input_tokens: None,
@@ -540,7 +546,7 @@ mod response {
             models: Vec::new(),
         };
         let value = serde_json::to_value(view).expect("serialize account usage");
-        assert_eq!(value["windowLabelDisplay"], "周/月额度窗口");
+        assert_eq!(value["windowKind"], "quota");
         assert!(value["inputTokens"].is_null());
         assert!(value["totalTokens"].is_null());
         assert!(value["reasoningOutputTokens"].is_null());

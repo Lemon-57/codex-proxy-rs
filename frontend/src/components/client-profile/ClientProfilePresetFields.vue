@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { ClientProfilePreset, ClientProfilePreview, ClientProfileSelection, CustomClientProfileSelection, PresetClientProfileSelection } from '@/api/modules/settings/profiles'
+
 import { ZFormItem, ZInput, ZSelect, ZTextarea } from '@codex-proxy/ui'
 import { computed, shallowRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 const props = withDefaults(defineProps<{
   presets: ClientProfilePreset[]
@@ -13,6 +15,9 @@ const props = withDefaults(defineProps<{
 }>(), {
   maxVersionLag: 10,
 })
+
+const { t } = useI18n({ useScope: 'global' })
+
 const model = defineModel<ClientProfileSelection | null>({ required: true })
 const presetDraft = shallowRef<PresetClientProfileSelection>()
 const customDraft = shallowRef<CustomClientProfileSelection>()
@@ -78,7 +83,7 @@ const versionLag = computed({
 const versionLagError = computed(() => {
   const value = preset.value?.versionLag
   return value != null && (!Number.isInteger(value) || value < 1 || value > props.maxVersionLag)
-    ? `请输入 1～${props.maxVersionLag} 的正整数`
+    ? t('settings.clientProfile.enterIntegerFromTo', { version: props.maxVersionLag })
     : ''
 })
 const terminal = computed({
@@ -115,28 +120,28 @@ const userAgent = computed({
 <template>
   <div class="grid gap-4">
     <div class="grid gap-4" :class="preset?.client === 'cli' && !custom ? 'sm:grid-cols-3' : 'sm:grid-cols-2'">
-      <ZFormItem label="客户端预设">
-        <ZSelect v-model="selectedPreset" class="w-full" :options="presetOptions" :placeholder="custom ? '使用自定义用户代理' : undefined" :disabled="disabled || custom || !presets.length" />
+      <ZFormItem :label="t('settings.clientProfile.clientDefault')">
+        <ZSelect v-model="selectedPreset" class="w-full" :options="presetOptions" :placeholder="custom ? t('settings.clientProfile.useCustomUserAgent') : undefined" :disabled="disabled || custom || !presets.length" />
       </ZFormItem>
-      <ZFormItem v-if="preset?.client === 'cli' && !custom" label="CLI 入口">
+      <ZFormItem v-if="preset?.client === 'cli' && !custom" :label="t('settings.clientProfile.cliEntry')">
         <ZSelect
           v-model="cliEntry"
           class="w-full"
           :options="[
-            { label: 'Core · 默认身份', value: 'core' },
-            { label: 'TUI · 交互式终端', value: 'tui' },
-            { label: 'Exec · 非交互执行', value: 'exec' },
+            { label: t('settings.clientProfile.coreDefaultIdentity'), value: 'core' },
+            { label: t('settings.clientProfile.tuiInteractiveTerminal'), value: 'tui' },
+            { label: t('settings.clientProfile.execNonInteractiveExecution'), value: 'exec' },
           ]"
           :disabled="disabled"
         />
       </ZFormItem>
-      <ZFormItem label="版本策略">
+      <ZFormItem :label="t('settings.clientProfile.versionStrategy')">
         <ZSelect
           v-model="versionMode"
           class="w-full"
           :options="[
-            { label: '跟随最新版本', value: 'latest', disabled: !presets.length },
-            { label: '自定义版本', value: 'custom', disabled: !custom && (previewing || !preview) },
+            { label: t('settings.clientProfile.followLatestVersion'), value: 'latest', disabled: !presets.length },
+            { label: t('settings.clientProfile.customVersion'), value: 'custom', disabled: !custom && (previewing || !preview) },
           ]"
           :disabled="disabled"
         />
@@ -146,37 +151,37 @@ const userAgent = computed({
       {{ currentPreset.reason }}
     </p>
     <div v-if="!custom" class="grid gap-4 sm:grid-cols-2">
-      <ZFormItem label="版本滞后" :error="versionLagError">
+      <ZFormItem :label="t('settings.clientProfile.versionLag')" :error="versionLagError">
         <ZInput
           v-model="versionLag"
-          aria-label="版本滞后"
+          :aria-label="t('settings.clientProfile.versionLag')"
           type="number"
           inputmode="numeric"
           min="1"
           :max="maxVersionLag"
           step="1"
-          :placeholder="`滞后 1～${maxVersionLag} 个版本，留空不滞后`"
+          :placeholder="t('settings.clientProfile.versionLagHelp', { version: maxVersionLag })"
           :disabled="disabled"
         />
       </ZFormItem>
       <div class="grid gap-4" :class="{ 'sm:grid-cols-2': preset?.client === 'desktop' }">
-        <ZFormItem label="终端标识">
+        <ZFormItem :label="t('settings.clientProfile.terminalIdentification')">
           <ZInput
             v-model="terminal"
             :disabled="disabled"
-            aria-label="终端标识"
-            placeholder="留空使用 unknown"
+            :aria-label="t('settings.clientProfile.terminalIdentification')"
+            :placeholder="t('settings.clientProfile.leaveBlankToUseUnknown')"
             maxlength="128"
             spellcheck="false"
             autocomplete="off"
             class="font-mono"
           />
         </ZFormItem>
-        <ZFormItem v-if="preset?.client === 'desktop'" label="系统版本">
+        <ZFormItem v-if="preset?.client === 'desktop'" :label="t('settings.clientProfile.systemVersion')">
           <ZInput
             v-model="osVersion"
             :disabled="disabled"
-            aria-label="系统版本"
+            :aria-label="t('settings.clientProfile.systemVersion')"
             :placeholder="currentPreset?.defaults.osVersion ?? undefined"
             maxlength="128"
             spellcheck="false"
@@ -191,8 +196,8 @@ const userAgent = computed({
         v-model="userAgent"
         :rows="3"
         :disabled="disabled || (!model?.mode && previewing)"
-        aria-label="用户代理"
-        placeholder="填写完整用户代理"
+        :aria-label="t('settings.clientProfile.userAgent')"
+        :placeholder="t('settings.clientProfile.userAgentPlaceholder')"
         spellcheck="false"
         autocomplete="off"
         class="font-mono"

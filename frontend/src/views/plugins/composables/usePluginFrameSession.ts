@@ -10,6 +10,7 @@ import {
 } from '@/api'
 import { API_BASE_URL } from '@/api/constants'
 import { ApiError } from '@/api/request'
+import { t } from '@/i18n'
 import { errorMessage, generateRequestId } from '@/utils/operation'
 import {
   assemblePluginManagementPage,
@@ -142,7 +143,7 @@ export function usePluginFrameSession(options: {
         // 一个资源加载失败时，同时停止仍在运行的其他资源请求。
         controller.abort()
         if (error instanceof ApiError && error.status === 409) {
-          loadError.value = '插件页面版本已变更，正在刷新'
+          loadError.value = t('plugins.frame.versionChanged')
           options.onStale()
         }
         else {
@@ -167,7 +168,7 @@ export function usePluginFrameSession(options: {
       pushLayout()
       return
     }
-    loadError.value = '插件页面尝试离开已隔离的管理文档，已停止加载'
+    loadError.value = t('plugins.frame.navigationBlocked')
     disposeSession()
   }
 
@@ -223,19 +224,19 @@ export function usePluginFrameSession(options: {
     const contentType = payload.contentType
     const body = payload.body
     if (typeof query !== 'string' || query.startsWith('?') || query.includes('#') || hasControlCharacter(query))
-      throw new Error('查询参数无效')
+      throw new Error(t('plugins.frame.invalidQueryParameter'))
     if (new TextEncoder().encode(query).byteLength > MAXIMUM_MANAGEMENT_QUERY_BYTES)
-      throw new Error('查询参数超过 8 KiB')
+      throw new Error(t('plugins.frame.queryParametersExceedKib'))
     if (!(body instanceof ArrayBuffer) || body.byteLength > MAXIMUM_MANAGEMENT_BODY_BYTES)
-      throw new Error('请求正文无效或超过 1 MiB')
+      throw new Error(t('plugins.frame.invalidBody'))
     if ((route.method === 'GET' || route.method === 'HEAD') && body.byteLength > 0)
-      throw new Error(`${route.method} 路由不接受请求正文`)
+      throw new Error(t('plugins.frame.routesDoNotAcceptRequestBody', { method: route.method }))
     if (contentType !== undefined && typeof contentType !== 'string')
-      throw new Error('Content-Type 无效')
+      throw new Error(t('plugins.frame.contentTypeIsInvalid'))
     if (typeof contentType === 'string' && !route.requestContentTypes.includes(contentType))
-      throw new Error('Content-Type 未在插件路由中注册')
+      throw new Error(t('plugins.frame.unregisteredContentType'))
     if (body.byteLength > 0 && typeof contentType !== 'string')
-      throw new Error('包含正文的请求必须声明 Content-Type')
+      throw new Error(t('plugins.frame.contentTypeRequired'))
     return {
       query,
       contentType: typeof contentType === 'string' ? contentType : undefined,
@@ -249,10 +250,10 @@ export function usePluginFrameSession(options: {
     message: BridgeMessage,
   ) {
     if (!isRecord(message.payload))
-      throw new Error('请求参数无效')
+      throw new Error(t('plugins.frame.invalidRequestParameters'))
     const route = routeForMessage(current.view, message.payload)
     if (!route)
-      throw new Error('请求未在当前插件版本中注册')
+      throw new Error(t('plugins.frame.unregisteredRequest'))
     const payload = validateRoutePayload(route, message.payload)
     const response = await callPluginManagementRoute(current.view.target, {
       method: route.method,
@@ -275,13 +276,13 @@ export function usePluginFrameSession(options: {
     message: BridgeMessage,
   ) {
     if (!isRecord(message.payload))
-      throw new Error('回调票据参数无效')
+      throw new Error(t('plugins.frame.invalidCallbackTicket'))
     const path = typeof message.payload.path === 'string' ? message.payload.path : ''
     const ttlSeconds = message.payload.ttlSeconds
     if (!current.view.callbacks.some(callback => callback.path === path))
-      throw new Error('回调路径未在当前插件版本中注册')
+      throw new Error(t('plugins.frame.unregisteredCallback'))
     if (!Number.isSafeInteger(ttlSeconds) || Number(ttlSeconds) < 1 || Number(ttlSeconds) > 600)
-      throw new Error('回调票据有效期必须为 1 到 600 秒')
+      throw new Error(t('plugins.frame.invalidTicketLifetime'))
     const ticket = await createPluginManagementCallbackTicket(current.view.target, {
       path,
       ttlSeconds: Number(ttlSeconds),
@@ -319,7 +320,7 @@ export function usePluginFrameSession(options: {
 
   function validateModelRequestPayload(payload: unknown) {
     if (!isRecord(payload))
-      throw new Error('模型请求参数无效')
+      throw new Error(t('plugins.frame.invalidModelRequest'))
     const clientKeyId = payload.clientKeyId
     const body = payload.body
     if (
@@ -329,19 +330,19 @@ export function usePluginFrameSession(options: {
       || clientKeyId.length > 128
       || hasControlCharacter(clientKeyId)
     ) {
-      throw new Error('clientKeyId 无效')
+      throw new Error(t('plugins.frame.clientkeyidIsInvalid'))
     }
     if (typeof body !== 'string' || new TextEncoder().encode(body).byteLength > MAXIMUM_MODEL_BODY_BYTES)
-      throw new Error('Responses 请求正文无效或超过 8 MiB')
+      throw new Error(t('plugins.frame.invalidModelBody'))
     let parsed: unknown
     try {
       parsed = JSON.parse(body)
     }
     catch {
-      throw new Error('Responses 请求正文不是有效 JSON')
+      throw new Error(t('plugins.frame.invalidModelJson'))
     }
     if (!isRecord(parsed))
-      throw new Error('Responses 请求正文必须是 JSON 对象')
+      throw new Error(t('plugins.frame.modelObjectRequired'))
     return { clientKeyId, body }
   }
 
@@ -410,17 +411,17 @@ export function usePluginFrameSession(options: {
   function armModelIdleTimeout(current: FrameSession, request: ModelRequest) {
     clearTimeout(request.idleTimer)
     request.idleTimer = setTimeout(() => {
-      terminateModelRequest(current, request, '页面 30 秒未继续读取模型响应')
+      terminateModelRequest(current, request, t('plugins.frame.pageDidNotContinueToReadModel'))
     }, MODEL_RESPONSE_IDLE_MS)
   }
 
   async function handleModelRequest(current: FrameSession, source: Window, message: BridgeMessage) {
     if (current.modelRequests.size >= MAXIMUM_MODEL_IN_FLIGHT) {
-      postModelMessage(current, source, 'models-error', message.id, undefined, '模型请求已达并发上限')
+      postModelMessage(current, source, 'models-error', message.id, undefined, t('plugins.frame.modelConcurrencyLimit'))
       return
     }
     if (current.requestIds.has(message.id) || current.modelRequests.has(message.id)) {
-      postModelMessage(current, source, 'models-error', message.id, undefined, '模型请求序号重复')
+      postModelMessage(current, source, 'models-error', message.id, undefined, t('plugins.frame.duplicateModelRequest'))
       return
     }
 
@@ -443,7 +444,7 @@ export function usePluginFrameSession(options: {
     }
     current.modelRequests.set(message.id, request)
     request.totalTimer = setTimeout(() => {
-      terminateModelRequest(current, request, '模型请求超过 10 分钟')
+      terminateModelRequest(current, request, t('plugins.frame.modelTimeout'))
     }, MODEL_REQUEST_DEADLINE_MS)
 
     try {
@@ -456,7 +457,7 @@ export function usePluginFrameSession(options: {
       if (current.modelRequests.get(request.id) !== request)
         return
       if (!supportedModelResponse(response))
-        throw new Error('模型接口返回了不受支持的内容类型')
+        throw new Error(t('plugins.frame.unsupportedModelContentType'))
 
       const hasBody = response.body !== null
       if (response.body)
@@ -478,7 +479,7 @@ export function usePluginFrameSession(options: {
     }
     catch (error) {
       if (current.modelRequests.get(request.id) === request)
-        terminateModelRequest(current, request, errorMessage(error, '模型请求失败'))
+        terminateModelRequest(current, request, errorMessage(error, t('plugins.frame.modelRequestFailed')))
     }
   }
 
@@ -488,16 +489,16 @@ export function usePluginFrameSession(options: {
       return
     const pullId = isRecord(message.payload) ? message.payload.pullId : undefined
     if (!Number.isSafeInteger(pullId) || Number(pullId) < 1) {
-      terminateModelRequest(current, request, '模型响应拉取序号无效')
+      terminateModelRequest(current, request, t('plugins.frame.invalidPullId'))
       return
     }
     if (request.reading) {
       if (request.activePullId !== pullId)
-        terminateModelRequest(current, request, '模型响应拉取发生重入')
+        terminateModelRequest(current, request, t('plugins.frame.concurrentPull'))
       return
     }
     if (pullId !== request.nextPullId) {
-      terminateModelRequest(current, request, '模型响应拉取序号已失效')
+      terminateModelRequest(current, request, t('plugins.frame.stalePullId'))
       return
     }
     clearTimeout(request.idleTimer)
@@ -537,7 +538,7 @@ export function usePluginFrameSession(options: {
     }
     catch (error) {
       if (current.modelRequests.get(message.id) === request)
-        terminateModelRequest(current, request, errorMessage(error, '模型响应读取失败'))
+        terminateModelRequest(current, request, errorMessage(error, t('plugins.frame.modelResponseReadFailed')))
     }
     finally {
       request.reading = false
@@ -582,11 +583,11 @@ export function usePluginFrameSession(options: {
     if (!['request', 'callback-ticket'].includes(event.data.type))
       return
     if (current.requestIds.has(event.data.id) || current.modelRequests.has(event.data.id)) {
-      postResult(current, frame, event.data.id, false, undefined, '插件管理请求序号重复')
+      postResult(current, frame, event.data.id, false, undefined, t('plugins.frame.duplicateManagementRequest'))
       return
     }
     if (current.inFlight >= MAXIMUM_MANAGEMENT_IN_FLIGHT) {
-      postResult(current, frame, event.data.id, false, undefined, '插件管理请求已达并发上限')
+      postResult(current, frame, event.data.id, false, undefined, t('plugins.frame.managementConcurrencyLimit'))
       return
     }
     current.inFlight += 1
@@ -600,7 +601,7 @@ export function usePluginFrameSession(options: {
       if (session.value !== current || current.controller.signal.aborted)
         return
       if (error instanceof ApiError && error.status === 409) {
-        loadError.value = '插件页面版本已变更，正在刷新'
+        loadError.value = t('plugins.frame.versionChanged')
         options.onStale()
         disposeSession()
         return

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { ZScrollbar } from '@codex-proxy/ui'
+
 import { storeToRefs } from 'pinia'
 import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import { RouterView, useRoute } from 'vue-router'
-import AppAboutModal from '@/components/AppAboutModal.vue'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { useUiStore } from '@/stores/modules/ui'
 
@@ -12,15 +13,15 @@ import AppSidebar from './components/AppSidebar.vue'
 import FloatingSidebarToggle from './components/FloatingSidebarToggle.vue'
 import SystemUpdateModal from './components/system-update-modal/index.vue'
 
+const { t } = useI18n({ useScope: 'global' })
+
 const uiStore = useUiStore()
 const systemUpdateStore = useSystemUpdateStore()
 const { sidebarCollapsed } = storeToRefs(uiStore)
-const { version } = storeToRefs(systemUpdateStore)
 const { toggleSidebar } = uiStore
 const route = useRoute()
 const pageScrollbarRef = ref<InstanceType<typeof ZScrollbar> | null>(null)
 const mobileSidebarOpen = shallowRef(false)
-const aboutOpen = shallowRef(false)
 const systemUpdateOpen = shallowRef(false)
 
 function openMobileSidebar() {
@@ -55,7 +56,7 @@ watch(
     <AppSidebar
       :collapsed="sidebarCollapsed"
       @toggle="toggleSidebar"
-      @open-about="aboutOpen = true"
+
       @open-system-update="systemUpdateOpen = true"
     />
     <FloatingSidebarToggle v-if="!mobileSidebarOpen" @open="openMobileSidebar" />
@@ -75,7 +76,7 @@ watch(
           <button
             type="button"
             class="absolute inset-0 border-0 bg-black/32 backdrop-blur-[1px] cursor-default"
-            aria-label="关闭侧边栏"
+            :aria-label="t('navigation.sidebar.close')"
             @click="closeMobileSidebar"
           />
           <div class="mobile-sidebar-panel absolute inset-y-0 left-0 flex">
@@ -83,7 +84,7 @@ watch(
               mobile
               @close="closeMobileSidebar"
               @navigate="closeMobileSidebar"
-              @open-about="aboutOpen = true"
+
               @open-system-update="systemUpdateOpen = true"
             />
           </div>
@@ -91,7 +92,6 @@ watch(
       </Transition>
     </Teleport>
 
-    <AppAboutModal v-model="aboutOpen" :version="version" />
     <SystemUpdateModal v-model="systemUpdateOpen" />
   </div>
 </template>

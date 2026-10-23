@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { CodexDesktopWindowsDownloads } from '@/api'
-import { ZButton, ZDialog, ZSegmented } from '@codex-proxy/ui'
 
+import { ZButton, ZDialog, ZSegmented } from '@codex-proxy/ui'
 import { MonitorUp, PackageOpen, TerminalSquare } from '@lucide/vue'
+
 import { shallowRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import ClientCliInstallPanel from './ClientCliInstallPanel.vue'
 import ClientDesktopInstallPanel from './ClientDesktopInstallPanel.vue'
@@ -28,6 +30,8 @@ const emit = defineEmits<{
   retry: []
 }>()
 
+const { t } = useI18n({ useScope: 'global' })
+
 type ClientSection = 'desktop' | 'cli'
 
 const open = defineModel<boolean>({ default: false })
@@ -41,8 +45,8 @@ const sectionOptions = [
 <template>
   <ZDialog
     v-model="open"
-    title="Codex 客户端升级"
-    description="先选择客户端，再查看对应的安装与升级方式"
+    :title="t('settings.clientVersion.codexClientUpgrade')"
+    :description="t('settings.clientVersion.guideDescription')"
     type="info"
     width="48rem"
   >
@@ -53,7 +57,7 @@ const sectionOptions = [
     <div class="grid gap-4">
       <ZSegmented
         v-model="activeSection"
-        aria-label="客户端类型"
+        :aria-label="t('settings.clientProfile.clientType')"
         :options="sectionOptions"
         size="large"
         class="w-full"
@@ -72,7 +76,7 @@ const sectionOptions = [
 
     <template #footer>
       <ZButton type="primary" @click="open = false">
-        关闭
+        {{ t('common.actions.close') }}
       </ZButton>
     </template>
   </ZDialog>

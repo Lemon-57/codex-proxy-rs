@@ -1,5 +1,7 @@
 //! 在 transport 边界采集的上游响应诊断信息
 
+pub(crate) mod evidence;
+
 use super::client::CodexClientVisibleUpstreamResponse;
 use super::protocol::responses::ResponsesSseFailure;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -471,7 +473,11 @@ fn classify_upstream_failure(
     if status == Some(StatusCode::FORBIDDEN) && is_cloudflare_challenge(&body) {
         return CodexFailureCategory::CloudflareChallenge;
     }
-    if status == Some(StatusCode::NOT_FOUND) && body.trim().is_empty() {
+    // 流内错误只传结构化字段，不能把未传入的 body 当成 HTTP 空响应
+    if matches!(source, UpstreamFailureSource::HttpResponse)
+        && status == Some(StatusCode::NOT_FOUND)
+        && body.trim().is_empty()
+    {
         return CodexFailureCategory::CloudflarePathBlocked;
     }
     let structured_failure_signals = [code.as_str(), error_type.as_str()];

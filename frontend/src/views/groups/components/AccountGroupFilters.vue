@@ -2,16 +2,22 @@
 import { ZButton, ZInput, ZSelect } from '@codex-proxy/ui'
 
 import { Plus, Search, Trash2 } from '@lucide/vue'
+
+import { useI18n } from 'vue-i18n'
 import { accountGroupStatusOptions } from '../constants'
 
 defineProps<{
   batchDeleting: boolean
   selectedCount: number
 }>()
+
 const emit = defineEmits<{
   create: []
   deleteSelected: []
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
+
 const search = defineModel<string>('search', { required: true })
 const status = defineModel<string>('status', { required: true })
 </script>
@@ -21,8 +27,8 @@ const status = defineModel<string>('status', { required: true })
     <ZInput
       v-model="search"
       class="sm:w-80"
-      aria-label="搜索账号分组"
-      placeholder="搜索分组名称"
+      :aria-label="t('groups.filters.searchAccountGroup')"
+      :placeholder="t('groups.filters.searchGroupName')"
     >
       <template #prefix>
         <Search class="size-4.5 text-cp-text-tertiary" />
@@ -31,7 +37,7 @@ const status = defineModel<string>('status', { required: true })
     <ZSelect
       v-model="status"
       :options="accountGroupStatusOptions"
-      aria-label="按分组状态筛选"
+      :aria-label="t('groups.filters.filterByGroupStatus')"
       class="w-40"
     />
     <div class="flex shrink-0 items-center justify-end gap-2 sm:ml-auto">
@@ -44,13 +50,13 @@ const status = defineModel<string>('status', { required: true })
         <template #icon>
           <Trash2 class="size-4" />
         </template>
-        删除选中 ({{ selectedCount }})
+        {{ t('groups.filters.deleteSelected', { count: selectedCount }) }}
       </ZButton>
       <ZButton type="primary" @click="emit('create')">
         <template #icon>
           <Plus class="size-4" />
         </template>
-        创建分组
+        {{ t('groups.filters.createGroup') }}
       </ZButton>
     </div>
   </div>

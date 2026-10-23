@@ -3,6 +3,8 @@ import { ZIconButton } from '@codex-proxy/ui'
 
 import { Copy } from '@lucide/vue'
 
+import { useI18n } from 'vue-i18n'
+
 defineProps<{
   prefix: string
   revealing: boolean
@@ -11,6 +13,8 @@ defineProps<{
 const emit = defineEmits<{
   copy: []
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
 </script>
 
 <template>
@@ -20,7 +24,7 @@ const emit = defineEmits<{
     </code>
     <ZIconButton
       size="small"
-      aria-label="复制完整密钥"
+      :aria-label="t('keys.fields.copyFullKey')"
       :loading="revealing"
       :disabled="revealing"
       @click="emit('copy')"

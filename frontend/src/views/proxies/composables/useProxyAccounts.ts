@@ -1,8 +1,9 @@
-import { ZNotification } from '@codex-proxy/ui'
 import { computed, shallowRef, watch } from 'vue'
 import { getProxyAccounts, removeProxyAccount } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { usePagedQuery } from '@/composables/usePagedQuery'
+import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
 
 export function useProxyAccounts(options: {
   isOpen: () => boolean
@@ -43,7 +44,7 @@ export function useProxyAccounts(options: {
     return await removeAction.run(async () => {
       await removeProxyAccount({ proxyId, accountId })
       options.onRemoved()
-      ZNotification.success({ message: '账号已移出当前代理，改为直连' })
+      ZNotification.success({ message: t('proxies.accounts.removed') })
       if (options.isOpen() && options.proxyId() === proxyId) {
         query.invalidate()
         query.items.value = query.items.value.filter(account => account.id !== accountId)

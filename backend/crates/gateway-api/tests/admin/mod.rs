@@ -41,7 +41,7 @@ use gateway_admin::{
             DashboardObservation, DashboardQuery, DecimalAmount, DiagnosticDimension,
             DiagnosticsObservation, Granularity, OpsError, OpsErrorPage, OpsErrorQuery,
             RequestMetricPoint, TimeRange, UsageDetail, UsageFilter, UsageListRecord,
-            UsageOverview, UsagePage, UsageQuery,
+            UsageOverview, UsagePage, UsageQuery, UsageSummaryObservation,
         },
         provider_credentials::{
             AuthorizationCommit, AuthorizationStarted, CompleteAuthorization, CredentialDetails,
@@ -1547,12 +1547,17 @@ impl ObservabilityStore for UnusedStore {
         &self,
         range: TimeRange,
         filter: UsageFilter,
-    ) -> AdminStoreResult<UsageOverview> {
+    ) -> AdminStoreResult<UsageSummaryObservation> {
         let mut data = self.observations.lock().expect("observations");
         data.summaries.push((range, filter));
         data.summary
             .clone()
-            .map(|summary| UsageOverview { range, ..summary })
+            .map(|summary| UsageSummaryObservation {
+                range,
+                analytics: summary.analytics,
+                requests: (&summary.requests).into(),
+                attempts: summary.attempts,
+            })
             .ok_or_else(|| unavailable("usage summary"))
     }
 

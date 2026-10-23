@@ -23,9 +23,9 @@ use gateway_core::policy::ClientApiKeyId;
 use gateway_core::routing::{AccountRoutingSnapshot, ConfigRevision, PublicModelId};
 use gateway_core::upstream::UpstreamSendState;
 use gateway_store::postgres::{
-    AttemptMetrics, ModelRequestAttemptStart, ModelRequestRepository, NewModelRequest,
-    ObservabilityPageSize, ObservabilityRange, OpsErrorFilter, OpsErrorQuery, PgExecutionStore,
-    UsageRecordFilter, UsageRecordQuery,
+    ModelRequestAttemptStart, ModelRequestRepository, NewModelRequest, ObservabilityPageSize,
+    ObservabilityRange, OpsErrorFilter, OpsErrorQuery, PgExecutionStore, UsageRecordFilter,
+    UsageRecordQuery,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -1997,8 +1997,13 @@ async fn zero_attempt_failure_does_not_enter_successful_usage_or_cost_aggregates
     let repository = observability_repository(&database.pool);
     super::drain_analytics(&database.pool).await;
     let before = repository
-        .usage_summary(zero_attempt_range(&request), UsageRecordFilter::default())
+        .usage_insights_observation(
+            zero_attempt_range(&request),
+            UsageRecordFilter::default(),
+            gateway_admin::model::observability::Granularity::Hour,
+        )
         .await
+        .map(|snapshot| snapshot.overview)
         .expect("baseline usage");
     assert_eq!(before.requests.total_tokens, 120);
     assert!(!before.attempts.costs.is_empty());
@@ -2011,8 +2016,13 @@ async fn zero_attempt_failure_does_not_enter_successful_usage_or_cost_aggregates
         .expect("finalize failure");
     super::drain_analytics(&database.pool).await;
     let after = repository
-        .usage_summary(zero_attempt_range(&request), UsageRecordFilter::default())
+        .usage_insights_observation(
+            zero_attempt_range(&request),
+            UsageRecordFilter::default(),
+            gateway_admin::model::observability::Granularity::Hour,
+        )
         .await
+        .map(|snapshot| snapshot.overview)
         .expect("usage after failure");
     assert_eq!(
         after.requests.request_count,
@@ -2031,14 +2041,16 @@ async fn zero_attempt_failure_does_not_enter_successful_usage_or_cost_aggregates
     assert_eq!(after.requests.latency_count, before.requests.latency_count);
     assert_eq!(after.attempts, before.attempts);
     let successes = repository
-        .usage_summary(
+        .usage_insights_observation(
             zero_attempt_range(&request),
             UsageRecordFilter {
                 outcome: Some("succeeded".to_owned()),
                 ..Default::default()
             },
+            gateway_admin::model::observability::Granularity::Hour,
         )
         .await
+        .map(|snapshot| snapshot.overview)
         .expect("successful aggregation unchanged");
     assert_eq!(successes.range, before.range);
     assert_eq!(successes.requests, before.requests);
@@ -2061,14 +2073,22 @@ async fn zero_attempt_failure_does_not_enter_successful_usage_or_cost_aggregates
         ..Default::default()
     };
     let failed = repository
-        .usage_summary(zero_attempt_range(&request), filter.clone())
+        .usage_insights_observation(
+            zero_attempt_range(&request),
+            filter.clone(),
+            gateway_admin::model::observability::Granularity::Hour,
+        )
         .await
+        .map(|snapshot| snapshot.overview)
         .expect("failed request metrics");
     assert_eq!(failed.requests.request_count, 1);
     assert_eq!(failed.requests.failure_count, 1);
     assert_eq!(failed.requests.total_tokens, 0);
     assert_eq!(failed.requests.latency_count, 0);
-    assert_eq!(failed.attempts, AttemptMetrics::default());
+    assert_eq!(
+        failed.attempts,
+        admin_observability::AttemptMetrics::default()
+    );
     let page = repository
         .list_usage_records(UsageRecordQuery {
             status: Default::default(),

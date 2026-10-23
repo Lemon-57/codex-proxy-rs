@@ -1,6 +1,7 @@
 //! OpenAI 凭据合同测试入口，以及凭据编码、持久化与选号约束测试
 
 mod capacity;
+mod cooldown_reads;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;

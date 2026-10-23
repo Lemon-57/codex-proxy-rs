@@ -2,8 +2,8 @@ import type { SystemRestartPlan, SystemUpdateChannel, SystemUpdatePolicy, System
 import { until, useEventSource, useTimeoutPoll } from '@vueuse/core'
 import { delay } from 'es-toolkit'
 import { defineStore } from 'pinia'
-
 import { computed, ref, shallowRef, watch } from 'vue'
+
 import {
   getSystemUpdateDetail,
   getSystemUpdateStatus,
@@ -13,6 +13,7 @@ import {
 } from '@/api'
 import { API_BASE_URL } from '@/api/constants'
 import { ApiError } from '@/api/request'
+import { t } from '@/i18n'
 import { errorMessage } from '@/utils/operation'
 
 const maxUpdateLogs = 200
@@ -150,7 +151,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
 
   watch(updateEventError, (error) => {
     if (error)
-      updateStreamError.value = '更新日志连接中断'
+      updateStreamError.value = t('systemUpdate.logs.disconnected')
   })
 
   watch(updateEventMessage, (message) => {
@@ -165,7 +166,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
         void refreshUpdateStatus()
     }
     catch {
-      updateStreamError.value = '更新日志解析失败'
+      updateStreamError.value = t('systemUpdate.logs.parseFailed')
     }
   })
 
@@ -180,7 +181,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
     updateStreamError.value = ''
     openUpdateEventSource()
     if (!updateEventSource.value) {
-      updateStreamError.value = '当前浏览器不支持实时更新日志'
+      updateStreamError.value = t('systemUpdate.logs.unsupported')
       return false
     }
 
@@ -191,7 +192,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
     }
     const connected = updateEventStatus.value === 'OPEN'
     if (!connected)
-      updateStreamError.value = '更新日志连接超时'
+      updateStreamError.value = t('systemUpdate.logs.timeout')
     return connected
   }
 
@@ -206,7 +207,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
     updateStatus.value = status
     if (unconfirmedPreviousId !== undefined && operation.operationId === unconfirmedPreviousId) {
       unconfirmedPreviousId = undefined
-      updateError.value = '尚未确认更新任务，请检查状态后重试'
+      updateError.value = t('systemUpdate.errors.unconfirmed')
       setPhase({ kind: 'ready' })
       statusPoll.pause()
       disconnectUpdateEvents()
@@ -227,7 +228,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
     statusPoll.pause()
     disconnectUpdateEvents()
     if (operation.status === 'failed' && activeOperationId && operation.operationId === activeOperationId) {
-      updateError.value = operation.error || operation.message || '更新失败'
+      updateError.value = operation.error || operation.message || t('systemUpdate.errors.updateFailed')
     }
     if (!['loading', 'checking', 'changing_channel'].includes(phaseKind.value))
       settlePhase()
@@ -260,7 +261,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
           return
         }
         // 传输失败不能证明任务失败，保留忙碌态，恢复连接后重新核对持久化结果。
-        updateStreamError.value = '暂时无法确认更新状态，正在重试'
+        updateStreamError.value = t('systemUpdate.status.retrying')
         setPhase({ kind: 'updating' })
         if (!statusPoll.isActive.value)
           statusPoll.resume()
@@ -407,7 +408,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
     catch (error: unknown) {
       if (error instanceof ApiError && (error.status === 0 || error.status >= 500 || error.status === 408)) {
         unconfirmedPreviousId = previousId
-        updateStreamError.value = '正在确认更新是否已开始'
+        updateStreamError.value = t('systemUpdate.status.confirmingStart')
         return null
       }
       updateError.value = errorMessage(error)
@@ -448,7 +449,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
       }
     }
 
-    updateError.value = `服务未在预期时间内启动 v${expectedVersion}`
+    updateError.value = t('systemUpdate.errors.startTimeout', { version: expectedVersion })
     setPhase({ kind: 'failed' })
   }
 
@@ -457,7 +458,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
       return
 
     if (!restartTargetVersion.value) {
-      const error = new Error('缺少待生效的目标版本')
+      const error = new Error(t('systemUpdate.errors.activationTargetMissing'))
       updateError.value = error.message
       setPhase({ kind: 'failed' })
       throw error

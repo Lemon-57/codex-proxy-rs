@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     PluginUpstreamAdapter,
-    event::{DecodedEvent, EventDecodeError, EventDecoder},
+    event::{DecodedEvent, EventDecoder},
     failure::{fault_error, invalid, rpc_error},
 };
 use crate::{
@@ -94,27 +94,15 @@ impl Execution {
             biased;
             () = cancellation.cancelled() => return Err(ProviderError::new(ProviderErrorKind::Cancelled, active.managed.send_state.get())),
             result = active.stream.next() => result.map_err(|error| rpc_error(error, active.managed.send_state.get()))?,
-        }.ok_or_else(|| {
-            self.adapter.session.invalid_response(Stage::Upstream);
-            invalid(active.managed.send_state.get())
-        })?;
-        let mut decoded = self
-            .decoder
-            .decode(
-                &chunk,
-                &self.adapter.declaration.protocol,
-                self.adapter.declaration.transport.as_str(),
-                self.invocation.account.as_ref(),
-                active.managed.send_state.get(),
-                self.invocation.context.timing_started_at(),
-            )
-            .map_err(|error| match error {
-                EventDecodeError::Invalid(error) => {
-                    self.adapter.session.invalid_response(Stage::Upstream);
-                    error
-                }
-                EventDecodeError::Upstream(error) => error,
-            })?;
+        }.ok_or_else(|| invalid(active.managed.send_state.get()))?;
+        let mut decoded = self.decoder.decode(
+            &chunk,
+            &self.adapter.declaration.protocol,
+            self.adapter.declaration.transport.as_str(),
+            self.invocation.account.as_ref(),
+            active.managed.send_state.get(),
+            self.invocation.context.timing_started_at(),
+        )?;
         if self.decoder.completed {
             // 先确认 RPC 正常终结，再发布唯一 Completed；否则 Core 不会继续 poll 尾部错误
             let terminal = async {
@@ -124,7 +112,6 @@ impl Execution {
                     result = active.stream.next() => result.map_err(|error| rpc_error(error, active.managed.send_state.get()))?,
                 };
                 if tail.is_some() {
-                    self.adapter.session.invalid_response(Stage::Upstream);
                     return Err(invalid(active.managed.send_state.get()));
                 }
                 self.decoder.finish(active.managed.send_state.get())?;

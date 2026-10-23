@@ -715,6 +715,17 @@ impl Environment {
         database
             .query_pairs_mut()
             .append_pair("options", &format!("-csearch_path={schema}"));
+        // 每个夹具独占 UUID schema，先并行建表，避免完整 DDL 争用数据库级迁移锁
+        // 原 Store 初始化仍会加锁核验同一套迁移记录，保留生产启动屏障
+        let migration_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(database.as_str())
+            .await
+            .unwrap();
+        let mut migrator = sqlx::migrate!("../../../migrations");
+        migrator.set_locking(false);
+        migrator.run(&migration_pool).await.unwrap();
+        migration_pool.close().await;
         let connection = |mut url: url::Url| {
             let password = url.password().expect("test password").to_owned();
             url.set_password(None).unwrap();

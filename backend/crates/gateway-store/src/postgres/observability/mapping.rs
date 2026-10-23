@@ -17,6 +17,9 @@ pub(crate) fn store_range(
 
 pub(crate) fn store_usage_filter(filter: admin_observability::UsageFilter) -> UsageRecordFilter {
     UsageRecordFilter {
+        model_contains: filter.model_contains,
+        client_api_key_name: filter.client_api_key_name,
+        provider_account_name: filter.provider_account_name,
         client_api_key_ref: filter.client_api_key_ref,
         request_id: filter.request_id,
         provider_account_ref: filter.provider_account_ref,

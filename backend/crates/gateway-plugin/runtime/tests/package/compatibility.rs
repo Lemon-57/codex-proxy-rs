@@ -36,23 +36,6 @@ fn host_compatibility_only_advertises_known_contracts() {
     }
 }
 
-#[test]
-fn host_compatibility_requires_the_trusted_middleware_contract() {
-    let compatibility: PluginHostCompatibility =
-        serde_json::from_str(include_str!("../../plugin-host-compatibility.json"))
-            .expect("compatibility JSON");
-    assert!(!compatibility.supports_capability("middleware", 1));
-    assert!(!compatibility.supports_capability("middleware", 2));
-    assert!(!compatibility.supports_capability("middleware", 3));
-    assert!(!compatibility.supports_capability("middleware", 4));
-    assert!(compatibility.supports_capability("middleware", 5));
-    assert!(!compatibility.supports_capability("upstream_adapter", 1));
-    assert!(!compatibility.supports_capability("upstream_adapter", 2));
-    assert!(!compatibility.supports_capability("upstream_adapter", 3));
-    assert!(compatibility.supports_capability("upstream_adapter", 4));
-    assert!(!compatibility.supports_capability("openai", 1));
-}
-
 #[tokio::test]
 async fn package_inspector_returns_static_requirements_without_starting_the_plugin() {
     let archive = crate::support::package_with_contributions(

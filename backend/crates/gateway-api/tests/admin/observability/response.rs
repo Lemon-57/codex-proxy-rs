@@ -4,6 +4,100 @@ use chrono::Utc;
 use serde_json::json;
 
 #[tokio::test]
+async fn usage_summary_keeps_request_attempt_cost_and_average_latency_wire_fields() {
+    use crate::admin::{AdminTestFixture, AdminTestState};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use chrono::Duration;
+    use gateway_admin::model::observability::{
+        AttemptMetrics, CostCoverage, CurrencyCost, RequestMetrics, TimeRange, UsageOverview,
+    };
+    use gateway_api::admin::observability;
+    use tower::ServiceExt as _;
+
+    for (sum, count, display) in [(404, 3, "134 ms"), (0, 1, "0 ms"), (0, 0, "—")] {
+        let fixture = AdminTestFixture::new().await;
+        fixture.auth.insert_session("valid-session");
+        let now = Utc::now();
+        fixture.observations.lock().unwrap().summary = Some(UsageOverview {
+            analytics: gateway_admin::model::observability::AnalyticsMetadata {
+                generated_at: now,
+                ..Default::default()
+            },
+            range: TimeRange::new(now - Duration::hours(1), now).unwrap(),
+            requests: RequestMetrics {
+                request_count: 5,
+                success_count: 4,
+                cancelled_count: 1,
+                caller_error_count: 1,
+                input_tokens: 400,
+                output_tokens: 80,
+                cached_input_tokens: 30,
+                cache_write_input_tokens: 7,
+                reasoning_output_tokens: 9,
+                total_tokens: 480,
+                latency_sum_ms: sum,
+                latency_count: count,
+                ..Default::default()
+            },
+            attempts: AttemptMetrics {
+                attempt_count: 6,
+                success_count: 4,
+                failure_count: 1,
+                cancelled_count: 1,
+                rate_limited_count: 1,
+                cost_coverage: CostCoverage {
+                    provider_reported_count: 3,
+                    unavailable_count: 1,
+                    ..Default::default()
+                },
+                costs: vec![CurrencyCost {
+                    currency: "USD".into(),
+                    amount: "1.25".parse().unwrap(),
+                }],
+                ..Default::default()
+            },
+            providers: Vec::new(),
+        });
+        let response = observability::router::<AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/usage/records/summary?provider=openai")
+                    .header(header::COOKIE, "cpr_session=valid-session")
+                    .header("x-request-id", "req_usage_summary_projection")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert_eq!(
+            value["data"],
+            json!({
+                "analytics": value["data"]["analytics"],
+                "totalRequests": "5", "inputTokens": "400", "outputTokens": "80",
+                "cachedInputTokens": "30", "cacheWriteInputTokens": "7", "totalTokens": "480",
+                "averageLatencyMs": display,
+                "logicalRequests": {"requestCount":5,"successCount":4,"failureCount":0,"cancelledCount":1,"incompleteCount":0,"callerErrorCount":1,"inputTokens":400,"outputTokens":80,"cachedInputTokens":30,"cacheWriteInputTokens":7,"reasoningOutputTokens":9,"totalTokens":480},
+                "attempts": {"attemptCount":6,"successCount":4,"failureCount":1,"cancelledCount":1,"incompleteCount":0,"rateLimitedCount":1,"authFailureCount":0,"provider5xxCount":0,"costCoverage":{"known":3,"partial":0,"unknown":1,"notBillable":0},"costs":[{"currency":"USD","estimatedAmount":"1.25"}]}
+            })
+        );
+        let observations = fixture.observations.lock().unwrap();
+        assert_eq!(observations.summaries.len(), 1);
+        assert_eq!(
+            observations.summaries[0].1.provider_kind.as_deref(),
+            Some("openai")
+        );
+    }
+}
+
+#[tokio::test]
 async fn dashboard_summary_should_include_quota_exhaustion_in_unavailable_headline_count() {
     use axum::{
         body::{Body, to_bytes},
@@ -725,7 +819,7 @@ pub(super) fn usage_record_with_account(
 }
 
 #[tokio::test]
-async fn usage_route_should_forward_a_bounded_unknown_outcome_filter() {
+async fn usage_route_should_forward_name_and_model_contains_filters() {
     use axum::{
         body::Body,
         http::{Request, StatusCode, header},
@@ -741,7 +835,7 @@ async fn usage_route_should_forward_a_bounded_unknown_outcome_filter() {
         .with_state(fixture.state())
         .oneshot(
             Request::builder()
-                .uri("/api/admin/usage/records?outcome=provider_future_state")
+                .uri("/api/admin/usage/records?model=%20coding%20&clientApiKeyName=%20Key%20%25%20&accountName=%20Account%20Name%20")
                 .header(header::COOKIE, "cpr_session=valid-session")
                 .header("x-request-id", "req_usage_other_outcome")
                 .body(Body::empty())
@@ -751,6 +845,16 @@ async fn usage_route_should_forward_a_bounded_unknown_outcome_filter() {
         .expect("usage response");
 
     assert_eq!(response.status(), StatusCode::OK);
+    let observations = fixture.observations.lock().unwrap();
+    let filter = &observations.records.last().expect("usage query").filter;
+    assert_eq!(filter.client_api_key_name.as_deref(), Some("Key %"));
+    assert_eq!(filter.model_contains.as_deref(), Some("coding"));
+    assert_eq!(
+        filter.provider_account_name.as_deref(),
+        Some("Account Name")
+    );
+    assert!(filter.client_api_key_ref.is_none());
+    assert!(filter.provider_account_ref.is_none());
 }
 
 #[tokio::test]
@@ -1357,6 +1461,72 @@ async fn usage_status_query_accepts_three_modes_and_rejects_unknown_values() {
                     .status,
                 status_value
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn dashboard_summary_should_identify_metrics_without_localized_labels() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use chrono::Duration;
+    use gateway_admin::model::observability::{DashboardObservation, TimeRange};
+    use gateway_api::admin::observability;
+    use tower::ServiceExt as _;
+
+    use crate::admin::{AdminTestFixture, AdminTestState};
+
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let now = Utc::now();
+    *fixture.dashboard_observation.lock().unwrap() = Some(DashboardObservation {
+        yesterday: Default::default(),
+        analytics: Default::default(),
+        runtime_slots: None,
+        range: TimeRange::new(now - Duration::hours(1), now).unwrap(),
+        totals: Default::default(),
+        provider_accounts: Default::default(),
+        trend: Vec::new(),
+        account_usage: Vec::new(),
+        recent_requests: Vec::new(),
+    });
+
+    for (kind, metrics) in [
+        (
+            "usage",
+            ["inputTokens", "outputTokens", "cachedInputTokens"],
+        ),
+        (
+            "latency",
+            ["firstTokenP95Ms", "latencyP95Ms", "outputThroughputP50"],
+        ),
+        ("errors", ["errors", "successRate", "requests"]),
+    ] {
+        let response = observability::router::<AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/admin/dashboard/summary?kind={kind}"))
+                    .header(header::COOKIE, "cpr_session=valid-session")
+                    .header(header::ACCEPT_LANGUAGE, "en")
+                    .header("x-request-id", format!("req_trend_metrics_{kind}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status, StatusCode::OK, "{kind}: {value}");
+        let summary = value["data"]["trend"]["summary"].as_array().unwrap();
+        assert_eq!(summary.len(), metrics.len());
+        for (item, metric) in summary.iter().zip(metrics) {
+            assert_eq!(item["metric"], metric);
+            assert!(item.get("label").is_none());
+            assert!(item["value"].is_string());
         }
     }
 }

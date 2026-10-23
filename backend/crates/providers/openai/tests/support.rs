@@ -52,6 +52,7 @@ type CredentialLoadHook = dyn for<'a> Fn(
 #[derive(Default)]
 pub(crate) struct MemoryAccountStore {
     accounts: Mutex<BTreeMap<ProviderAccountId, StoredAccount>>,
+    account_reads: AtomicUsize,
     quota_reads: AtomicUsize,
     fail_provider_listing: AtomicBool,
     pending_account_reads: bool,
@@ -182,6 +183,10 @@ impl MemoryAccountStore {
         self.quota_reads.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn account_reads(&self) -> usize {
+        self.account_reads.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn has_quota(&self, id: &str) -> bool {
         let Some(id) = ProviderAccountId::new(id).ok() else {
             return false;
@@ -244,6 +249,7 @@ impl ProviderAccountStore for MemoryAccountStore {
         &self,
         account: &ProviderAccountId,
     ) -> Result<Option<ProviderAccount>, StoreError> {
+        self.account_reads.fetch_add(1, Ordering::SeqCst);
         if self.pending_account_reads {
             futures::future::pending::<()>().await;
         }
@@ -1143,6 +1149,9 @@ pub(crate) fn account_policy() -> gateway_core::account::AccountSelectionPolicy 
     .with_openai_account_affinity(gateway_core::account::AccountAffinity::Strict)
 }
 
+type CooldownReadHook =
+    dyn Fn(ProviderAccountId) -> BoxFuture<'static, Result<(), ProviderStoreError>> + Send + Sync;
+
 /// 内存 `ProviderCooldownPort`：实现 `read`/`put_if_later` 与容量失败计数
 /// 证据（openai selector 429 冷却与容量熔断路径用），scope 变体测试不涉及，
 /// 返回占位
@@ -1151,12 +1160,18 @@ pub(crate) struct MemoryCooldownPort {
     pub(crate) cooldowns: Arc<Mutex<BTreeMap<ProviderAccountId, ProviderCooldown>>>,
     capacity_failures: Arc<Mutex<BTreeMap<ProviderAccountId, (u32, u32)>>>,
     capacity_requests: Arc<Mutex<BTreeSet<(ProviderAccountId, String)>>>,
+    before_read: Option<Arc<CooldownReadHook>>,
 }
 
 impl MemoryCooldownPort {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn with_read_hook(mut self, hook: Arc<CooldownReadHook>) -> Self {
+        self.before_read = Some(hook);
+        self
     }
 
     /// 测试断言用：窗口内累计失败次数与在途峰值
@@ -1194,6 +1209,9 @@ impl ProviderCooldownPort for MemoryCooldownPort {
         account_id: &'a ProviderAccountId,
     ) -> BoxFuture<'a, Result<Option<ProviderCooldown>, ProviderStoreError>> {
         Box::pin(async move {
+            if let Some(hook) = &self.before_read {
+                hook(account_id.clone()).await?;
+            }
             Ok(self
                 .cooldowns
                 .lock()

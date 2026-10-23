@@ -94,13 +94,13 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
       return body.slice(0)
     if (ArrayBuffer.isView(body))
       return new Uint8Array(body.buffer, body.byteOffset, body.byteLength).slice().buffer
-    throw new TypeError('请求正文只支持 string、ArrayBuffer 或 TypedArray')
+    throw new TypeError('Request body must be a string, ArrayBuffer, or TypedArray')
   }
 
   function nextRequestId() {
     sequence += 1
     if (!Number.isSafeInteger(sequence))
-      throw new Error('插件页面请求序号已耗尽')
+      throw new Error('Plugin page request IDs exhausted')
     return sequence
   }
 
@@ -118,14 +118,14 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
 
   function invoke(kind: string, payload: unknown, transfer: Transferable[] = []): Promise<unknown> {
     if (disposed)
-      return Promise.reject(new Error('插件页面已关闭'))
+      return Promise.reject(new Error('Plugin page is closed'))
     if (pending.size >= maximumInFlight)
-      return Promise.reject(new Error('插件管理请求已达并发上限'))
+      return Promise.reject(new Error('Plugin management concurrency limit reached'))
     const id = nextRequestId()
     return new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
         pending.delete(id)
-        reject(new Error('插件管理请求超时'))
+        reject(new Error('Plugin management request timed out'))
       }, kind === 'request' ? initial.managementTimeoutMs : initial.apiTimeoutMs)
       pending.set(id, { resolve, reject, timer })
       post(kind, id, payload, transfer)
@@ -164,27 +164,27 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
 
   async function request(input: ManagementRequest) {
     if (!input || typeof input !== 'object')
-      throw new TypeError('插件管理请求无效')
+      throw new TypeError('Invalid plugin management request')
     const method = String(input.method || '').toUpperCase()
     const path = String(input.path || '')
     const query = input.query == null ? '' : String(input.query)
     const contentType = input.contentType == null ? undefined : String(input.contentType)
     if (new TextEncoder().encode(query).byteLength > maximumQueryBytes || query.includes('#') || query.startsWith('?'))
-      throw new TypeError('插件管理查询参数无效')
+      throw new TypeError('Invalid plugin management query parameters')
     const body = await bodyBytes(input.body)
     if (body.byteLength > maximumBodyBytes)
-      throw new TypeError('插件管理请求正文超过 1 MiB')
+      throw new TypeError('Plugin management request body exceeds 1 MiB')
     return invoke('request', { method, path, query, contentType, body }, [body])
   }
 
   function callbackTicket(input: { path: string, ttlSeconds: number }) {
     if (!input || typeof input !== 'object')
-      return Promise.reject(new TypeError('插件回调票据请求无效'))
+      return Promise.reject(new TypeError('Invalid plugin callback ticket request'))
     return invoke('callback-ticket', { path: String(input.path || ''), ttlSeconds: Number(input.ttlSeconds) })
   }
 
   function abortError(reason: unknown) {
-    return reason instanceof Error ? reason : new DOMException('模型请求已取消', 'AbortError')
+    return reason instanceof Error ? reason : new DOMException('Model request canceled', 'AbortError')
   }
 
   function clearModelOperation(operation: ModelOperation) {
@@ -235,10 +235,10 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
 
   function validateResponseHeaders(value: unknown) {
     if (!Array.isArray(value))
-      throw new Error('模型响应头无效')
+      throw new Error('Model response header is invalid')
     for (const entry of value) {
       if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || typeof entry[1] !== 'string')
-        throw new Error('模型响应头无效')
+        throw new Error('Model response header is invalid')
     }
     // 与宿主共享浏览器的 Headers 校验，不再按插件身份过滤字段。
     return new Headers(value as [string, string][])
@@ -249,13 +249,13 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
     if (!operation)
       return
     if (message.type === 'models-error') {
-      const text = typeof message.error === 'string' && message.error ? message.error : '模型请求失败'
+      const text = typeof message.error === 'string' && message.error ? message.error : 'Model request failed'
       failModelOperation(operation, new Error(text), false)
       return
     }
     if (message.type === 'models-response') {
       if (operation.controller || operation.responseStarted || !message.payload || typeof message.payload !== 'object') {
-        failModelOperation(operation, new Error('模型响应协议无效'), true)
+        failModelOperation(operation, new Error('Invalid model response protocol'), true)
         return
       }
       try {
@@ -263,7 +263,7 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
         const statusText = message.payload.statusText ?? ''
         const hasBody = message.payload.hasBody
         if (typeof status !== 'number' || !Number.isSafeInteger(status) || status < 200 || status > 599 || typeof statusText !== 'string' || statusText.length > 256 || hasControlCharacter(statusText) || typeof hasBody !== 'boolean')
-          throw new Error('模型响应状态无效')
+          throw new Error('Model response status is invalid')
         const headers = validateResponseHeaders(message.payload.headers)
         operation.responseStarted = true
         if (!hasBody) {
@@ -300,19 +300,19 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
         operation.resolve(new Response(stream, { status, statusText, headers }))
       }
       catch (error) {
-        failModelOperation(operation, error instanceof Error ? error : new Error('模型响应协议无效'), true)
+        failModelOperation(operation, error instanceof Error ? error : new Error('Invalid model response protocol'), true)
       }
       return
     }
     if (!operation.controller || !operation.responseStarted) {
-      failModelOperation(operation, new Error('模型响应协议无效'), true)
+      failModelOperation(operation, new Error('Invalid model response protocol'), true)
       return
     }
     if (message.type === 'models-chunk') {
       const pullId = message.payload?.pullId
       const body = message.payload?.body
       if (!operation.pullPromise || !Number.isSafeInteger(pullId) || pullId !== operation.pullId || !(body instanceof ArrayBuffer) || body.byteLength === 0 || body.byteLength > maximumModelChunkBytes) {
-        failModelOperation(operation, new Error('模型响应分块无效'), true)
+        failModelOperation(operation, new Error('Invalid model response chunk'), true)
         return
       }
       try {
@@ -320,14 +320,14 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
         settleModelPull(operation)
       }
       catch (error) {
-        failModelOperation(operation, error instanceof Error ? error : new Error('模型响应读取失败'), true)
+        failModelOperation(operation, error instanceof Error ? error : new Error('Model response read failed'), true)
       }
       return
     }
     if (message.type === 'models-complete') {
       const pullId = message.payload?.pullId
       if (!operation.pullPromise || !Number.isSafeInteger(pullId) || pullId !== operation.pullId) {
-        failModelOperation(operation, new Error('模型响应结束标记无效'), true)
+        failModelOperation(operation, new Error('Model response end tag is invalid'), true)
         return
       }
       try {
@@ -340,26 +340,26 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
 
   function modelResponses(input: ModelRequest): Promise<Response> {
     if (disposed)
-      return Promise.reject(new Error('插件页面已关闭'))
+      return Promise.reject(new Error('Plugin page is closed'))
     if (!input || typeof input !== 'object' || !input.body || typeof input.body !== 'object' || Array.isArray(input.body))
-      return Promise.reject(new TypeError('Responses 请求正文必须是 JSON 对象'))
+      return Promise.reject(new TypeError('Responses request body must be a JSON object'))
     if (typeof input.clientKeyId !== 'string' || !input.clientKeyId || input.clientKeyId !== input.clientKeyId.trim() || input.clientKeyId.length > 128 || hasControlCharacter(input.clientKeyId))
-      return Promise.reject(new TypeError('clientKeyId 无效'))
+      return Promise.reject(new TypeError('clientKeyId is invalid'))
     if (input.signal !== undefined && !(input.signal instanceof AbortSignal))
-      return Promise.reject(new TypeError('signal 必须是 AbortSignal'))
+      return Promise.reject(new TypeError('signal must be AbortSignal'))
     if (input.signal?.aborted)
       return Promise.reject(abortError(input.signal.reason))
     if (modelOperations.size >= maximumModelInFlight)
-      return Promise.reject(new Error('模型请求已达并发上限'))
+      return Promise.reject(new Error('Model request concurrency limit reached'))
     let body
     try {
       body = JSON.stringify(input.body)
     }
     catch {
-      return Promise.reject(new TypeError('Responses 请求正文必须可序列化为 JSON'))
+      return Promise.reject(new TypeError('Responses request body must be JSON serializable'))
     }
     if (typeof body !== 'string' || new TextEncoder().encode(body).byteLength > maximumModelBodyBytes)
-      return Promise.reject(new TypeError('Responses 请求正文超过 8 MiB'))
+      return Promise.reject(new TypeError('Responses request body exceeds 8 MiB'))
     const id = nextRequestId()
     return new Promise((resolve, reject) => {
       const operation: ModelOperation = {
@@ -378,7 +378,7 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
         pullId: undefined,
       }
       operation.abort = () => failModelOperation(operation, abortError(input.signal?.reason), true)
-      operation.timer = window.setTimeout(() => failModelOperation(operation, new Error('模型请求超过 10 分钟'), true), modelRequestDeadlineMs)
+      operation.timer = window.setTimeout(() => failModelOperation(operation, new Error('Model request exceeded 10 minutes'), true), modelRequestDeadlineMs)
       modelOperations.set(id, operation)
       input.signal?.addEventListener('abort', operation.abort, { once: true })
       post('models-request', id, { clientKeyId: input.clientKeyId, body })
@@ -436,14 +436,14 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
     clearTimeout(operation.timer)
     if (message.ok)
       operation.resolve(message.payload)
-    else operation.reject(new Error(typeof message.error === 'string' ? message.error : '插件管理请求失败'))
+    else operation.reject(new Error(typeof message.error === 'string' ? message.error : 'Plugin management request failed'))
   })
 
   window.addEventListener('pagehide', () => {
     disposed = true
     resizeObserver?.disconnect()
     cancelAnimationFrame(resizeFrame)
-    const error = new Error('插件页面已关闭')
+    const error = new Error('Plugin page is closed')
     for (const operation of pending.values()) {
       clearTimeout(operation.timer)
       operation.reject(error)
@@ -464,7 +464,7 @@ export default function installPluginBridge(initial: PluginBridgeInitial) {
     resourceUrl(path: string) {
       const key = String(path)
       if (!Object.hasOwn(initial.resourceUrls, key))
-        throw new Error('资源未注册或不可作为页面子资源')
+        throw new Error('Resource is unregistered or cannot be loaded as a page subresource')
       const value = initial.resourceUrls[key]
       return value
     },

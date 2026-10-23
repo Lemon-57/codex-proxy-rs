@@ -267,17 +267,17 @@ impl ObservabilityService for DefaultObservabilityService {
         range: TimeRange,
         filter: UsageFilter,
     ) -> Result<UsageSummary, AdminError> {
-        let overview = self
+        let observation = self
             .store
             .usage_summary(range, filter)
             .await
             .map_err(|error| map_store_error(error, "usage summary"))?;
         let average_latency_ms = average(
-            overview.requests.latency_sum_ms,
-            overview.requests.latency_count,
+            observation.requests.latency_sum_ms,
+            observation.requests.latency_count,
         );
         Ok(UsageSummary {
-            overview,
+            observation,
             average_latency_ms,
         })
     }

@@ -1,6 +1,6 @@
-import { vLoading } from '@codex-proxy/ui'
 import { createApp } from 'vue'
 import App from './App.vue'
+import { i18n } from './i18n'
 
 import { authPlugin } from './plugins/auth'
 import { router } from './router'
@@ -14,8 +14,8 @@ import './styles/index.css'
 
 const app = createApp(App)
 
-app.directive('loading', vLoading)
 app.use(pinia)
+app.use(i18n)
 
 useThemeStore(pinia).initializeTheme()
 

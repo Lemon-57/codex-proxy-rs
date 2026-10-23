@@ -1,7 +1,8 @@
 import { isAxiosError } from 'axios'
 import { delay } from 'es-toolkit'
+import { t } from '@/i18n'
 
-export function errorMessage(error: unknown, fallback = '请求失败') {
+export function errorMessage(error: unknown, fallback = t('common.errors.request')) {
   if (isAxiosError(error))
     return fallback
   const message = error instanceof Error

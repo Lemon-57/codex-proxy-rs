@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { ClientDownloadPackage, CodexDesktopWindowsDownloads } from '@/api'
-import { ZButton, ZEmpty, ZIconButton, ZSkeleton } from '@codex-proxy/ui'
 
+import { ZButton, ZEmpty, ZIconButton, ZSkeleton } from '@codex-proxy/ui'
 import { ArrowDownToLine, PackageOpen, RefreshCw } from '@lucide/vue'
 
 import { computed } from 'vue'
+
+import { useI18n } from 'vue-i18n'
 
 import ClientInstallCommandList from './ClientInstallCommandList.vue'
 
@@ -28,19 +30,21 @@ const emit = defineEmits<{
   retry: []
 }>()
 
+const { t } = useI18n({ useScope: 'global' })
+
 const downloadDescription = computed(() => {
   const packages = props.downloads?.packages
   if (packages?.length && packages.every(packageItem => packageItem.source === 'official_openai'))
-    return 'OpenAI 官方安装包，请选择与设备一致的架构'
-  return 'Microsoft Store 离线安装包，请选择与设备一致的架构'
+    return t('settings.clientVersion.openAiPackageHelp')
+  return t('settings.clientVersion.storePackageHelp')
 })
 
-const localInstallCommand = [
+const localInstallCommand = computed(() => ([
   {
-    label: '下载后使用 PowerShell 安装 / 升级',
-    command: 'Add-AppxPackage -Path .\\<下载的安装包>.msix',
+    label: t('settings.clientVersion.msixInstallHelp'),
+    command: 'Add-AppxPackage -Path .\\downloaded-package.msix',
   },
-]
+]))
 
 function packageTitle(packageItem: ClientDownloadPackage): string {
   return packageItem.architecture === 'arm64' ? 'Windows ARM64' : 'Windows x64'
@@ -48,7 +52,7 @@ function packageTitle(packageItem: ClientDownloadPackage): string {
 
 function formatFileSize(value: number | null): string {
   if (!value)
-    return '大小未知'
+    return t('settings.clientVersion.sizeUnknown')
   const units = ['B', 'KB', 'MB', 'GB']
   let size = value
   let unit = 0
@@ -70,13 +74,13 @@ function formatFileSize(value: number | null): string {
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
             <h4 id="windows-offline-download-title" class="m-0 text-cp-lg leading-none font-heavy text-cp-text">
-              Windows 离线安装
+              {{ t('settings.clientVersion.windowsOfflineInstallation') }}
             </h4>
             <span
               v-if="downloads?.cached"
               class="rounded-full bg-cp-bg-container px-2 py-1 text-cp-xs leading-none font-heavy text-cp-text-quaternary"
             >
-              已缓存
+              {{ t('settings.clientVersion.cached') }}
             </span>
           </div>
           <p class="mt-1.5 mb-0 text-cp-sm leading-[1.45] font-semibold text-cp-text-secondary">
@@ -85,7 +89,7 @@ function formatFileSize(value: number | null): string {
         </div>
       </div>
       <ZIconButton
-        :aria-label="loading ? '正在刷新离线下载链接' : '刷新离线下载链接'" variant="solid"
+        :aria-label="loading ? t('settings.clientVersion.refreshingDownloads') : t('settings.clientVersion.refreshOfflineDownloadLinks')" variant="solid"
         :disabled="loading"
         :aria-busy="loading || undefined"
         @click="emit('refresh')"
@@ -101,7 +105,7 @@ function formatFileSize(value: number | null): string {
       {{ downloads.warning }}
     </p>
 
-    <div v-if="loading && !downloads" class="grid gap-3 sm:grid-cols-2" aria-label="正在加载离线安装包">
+    <div v-if="loading && !downloads" class="grid gap-3 sm:grid-cols-2" :aria-label="t('settings.clientVersion.loadingPackages')">
       <div v-for="index in 2" :key="index" class="grid gap-3 rounded-cp bg-cp-bg-container p-4 shadow-cp-tertiary">
         <ZSkeleton class="h-4 w-28" />
         <ZSkeleton class="h-3 w-44" shape="text" />
@@ -111,14 +115,14 @@ function formatFileSize(value: number | null): string {
 
     <ZEmpty
       v-else-if="error && !downloads"
-      title="离线安装包加载失败"
+      :title="t('settings.clientVersion.packagesFailed')"
       :description="error"
       :icon="PackageOpen"
       size="small"
     >
       <template #action>
         <ZButton size="small" :loading="loading" @click="emit('retry')">
-          重试
+          {{ t('common.actions.retry') }}
         </ZButton>
       </template>
     </ZEmpty>
@@ -139,11 +143,11 @@ function formatFileSize(value: number | null): string {
             </span>
           </div>
           <p class="mt-2 mb-0 truncate font-mono text-cp-sm font-semibold text-cp-text" :title="packageItem.fileName">
-            {{ packageItem.version ? `v${packageItem.version}` : '稳定通道' }}
+            {{ packageItem.version ? `v${packageItem.version}` : t('settings.clientVersion.stableChannel') }}
             · {{ formatFileSize(packageItem.sizeBytes) }}
           </p>
           <p v-if="packageItem.expiresAt" class="mt-1.5 mb-0 text-cp-xs font-semibold text-cp-text-quaternary">
-            链接失效：{{ packageItem.expiresAtDisplay ?? '—' }}
+            {{ t('settings.clientVersion.linkExpired', { value: packageItem.expiresAtDisplay ?? '—' }) }}
           </p>
         </div>
 
@@ -151,10 +155,10 @@ function formatFileSize(value: number | null): string {
           :href="packageItem.downloadUrl"
           target="_blank"
           rel="noopener noreferrer"
-          :aria-label="`下载 ${packageTitle(packageItem)} MSIX`"
+          :aria-label="t('settings.clientVersion.downloadMsix', { value: packageTitle(packageItem) })"
           class="inline-flex h-cp-control items-center justify-center gap-2 rounded-cp-sm bg-(--cp-button-primary-bg) px-4 text-cp font-bold text-(--cp-button-primary-color) shadow-cp-tertiary transition-[background-color,transform] hover:bg-(--cp-button-primary-hover-bg) motion-safe:active:translate-y-px"
         >
-          下载 MSIX
+          {{ t('settings.clientVersion.downloadPackage') }}
           <ArrowDownToLine class="size-4" />
         </a>
       </article>

@@ -6,8 +6,8 @@ import type {
   PluginSourceCredential,
   PluginUpdateSourceBinding,
 } from '@/api'
-
 import { storeToRefs } from 'pinia'
+
 import { computed, onMounted, onScopeDispose, shallowRef, watch } from 'vue'
 import {
   getPluginArtifacts,
@@ -15,6 +15,7 @@ import {
   getPluginSourceCredentials,
   getPluginUpdateSources,
 } from '@/api'
+import { t } from '@/i18n'
 import { usePluginViewsStore } from '@/stores/modules/plugin-views'
 import { notifyPluginError } from '../utils/actions'
 import { currentPluginInstance, groupInstalledPlugins } from '../utils/catalog'
@@ -68,11 +69,11 @@ export function usePluginManagement() {
       sources.value = sourceItems
       credentials.value = credentialItems
       if (!extensionResult.ok && !suppressErrors)
-        notifyPluginError('插件扩展页加载失败', extensionResult.error)
+        notifyPluginError(t('plugins.management.pageLoadFailed'), extensionResult.error)
     }
     catch (error) {
       if (refreshController === controller && !suppressErrors)
-        notifyPluginError('插件数据加载失败', error)
+        notifyPluginError(t('plugins.management.pluginDataLoadingFailed'), error)
     }
     finally {
       if (refreshController === controller) {

@@ -3,13 +3,13 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{Stream, StreamExt, future::BoxFuture};
+use futures::{Stream, StreamExt, TryStreamExt, channel::oneshot, future::BoxFuture};
 use thiserror::Error;
 
 use crate::account::{
@@ -485,6 +485,9 @@ fn provider_middleware_next(
     operation: Operation,
     transport: ClientTransport,
     terminal: ProviderMiddlewareTerminal,
+    prepared: oneshot::Sender<ProviderCallMetadata>,
+    activate: oneshot::Receiver<()>,
+    observation: Arc<Mutex<MiddlewareSendObservation>>,
 ) -> MiddlewareNext {
     crate::middleware::compose(Vec::new(), move |request| {
         Box::pin(async move {
@@ -501,11 +504,17 @@ fn provider_middleware_next(
                 .await
                 .map_err(MiddlewareError::Provider)?;
             let metadata = stream.metadata().clone();
+            prepared
+                .send(metadata.clone())
+                .map_err(|_| MiddlewareError::InvalidState)?;
+            // Core 先校验 metadata 并登记 attempt，首次轮询外层冷流后才放行 next
+            activate.await.map_err(|_| MiddlewareError::InvalidState)?;
             let protocol = stream.middleware_protocol(&fallback_protocol);
             let body = ProviderMiddlewareBody {
                 stream,
                 pending: VecDeque::new(),
                 transport,
+                observation,
             };
             Ok(
                 MiddlewareResponse::new(protocol, 200, Vec::new(), Box::new(body))
@@ -550,6 +559,40 @@ struct ProviderMiddlewareBody {
     stream: ProviderStream,
     pending: VecDeque<(ProviderEvent, bool)>,
     transport: ClientTransport,
+    observation: Arc<Mutex<MiddlewareSendObservation>>,
+}
+
+struct MiddlewareSendObservation {
+    observed: UpstreamSendState,
+    reading: bool,
+}
+
+impl MiddlewareSendObservation {
+    fn state(&self) -> UpstreamSendState {
+        if self.reading && self.observed == UpstreamSendState::NotSent {
+            UpstreamSendState::Ambiguous
+        } else {
+            self.observed
+        }
+    }
+
+    fn complete(&mut self, observed: UpstreamSendState) {
+        self.reading = false;
+        self.observed = match (self.observed, observed) {
+            (UpstreamSendState::Sent, _) | (_, UpstreamSendState::Sent) => UpstreamSendState::Sent,
+            (UpstreamSendState::Ambiguous, _) | (_, UpstreamSendState::Ambiguous) => {
+                UpstreamSendState::Ambiguous
+            }
+            _ => UpstreamSendState::NotSent,
+        };
+    }
+}
+
+fn middleware_send_state(observation: &Mutex<MiddlewareSendObservation>) -> UpstreamSendState {
+    observation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .state()
 }
 
 impl MiddlewareBody for ProviderMiddlewareBody {
@@ -561,7 +604,21 @@ impl MiddlewareBody for ProviderMiddlewareBody {
                         .map(Some)
                         .map_err(MiddlewareError::Provider);
                 }
-                let Some(event) = self.stream.next().await else {
+                self.observation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .reading = true;
+                let event = self.stream.next().await;
+                let observed = match &event {
+                    Some(Ok(_)) => UpstreamSendState::Sent,
+                    Some(Err(error)) => error.send_state(),
+                    None => UpstreamSendState::Ambiguous,
+                };
+                self.observation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .complete(observed);
+                let Some(event) = event else {
                     return Ok(None);
                 };
                 let event = event.map_err(MiddlewareError::Provider)?;
@@ -689,30 +746,71 @@ pub async fn execute_attempt_middleware(
             .middleware_body()
             .map_err(|_| middleware_protocol_error(UpstreamSendState::NotSent))?,
     );
-    let response = plan
-        .handle(
-            context,
-            request,
-            provider_middleware_next(operation, transport, terminal),
-        )
-        .await
-        .map_err(middleware_prepare_error)?;
-    let (protocol, status_code, headers, body, envelope) = response.into_parts();
-    if status_code != 200 || !headers.is_empty() {
-        return Err(middleware_protocol_error(UpstreamSendState::NotSent));
-    }
-    crate::validation::validate_text(&protocol, 64, true, None)
-        .map_err(|_| middleware_protocol_error(UpstreamSendState::NotSent))?;
-    let metadata = envelope
-        .ok_or_else(|| middleware_protocol_error(UpstreamSendState::NotSent))?
-        .into_provider_metadata();
-    let events = futures::stream::try_unfold((body, protocol), |(mut body, protocol)| async move {
-        let Some(frame) = body.next_frame().await.map_err(middleware_body_error)? else {
-            return Ok(None);
-        };
-        let event = middleware_frame_to_provider_event(frame, &protocol)?;
-        Ok(Some((event, (body, protocol))))
-    });
+    let (prepared, metadata) = oneshot::channel();
+    let (activate, activation) = oneshot::channel();
+    let observation = Arc::new(Mutex::new(MiddlewareSendObservation {
+        observed: UpstreamSendState::NotSent,
+        reading: false,
+    }));
+    let response = plan.handle(
+        context,
+        request,
+        provider_middleware_next(
+            operation,
+            transport,
+            terminal,
+            prepared,
+            activation,
+            observation.clone(),
+        ),
+    );
+    let (metadata, response) = match futures::future::select(metadata, response).await {
+        futures::future::Either::Left((Ok(metadata), response)) => (metadata, response),
+        futures::future::Either::Left((Err(_), response)) => {
+            return Err(unprepared_middleware_response(response.await));
+        }
+        futures::future::Either::Right((response, _)) => {
+            return Err(unprepared_middleware_response(response));
+        }
+    };
+    let expected_metadata = metadata.clone();
+    // 不创建后台任务，未激活的 handler、stream 与账号 lease 随返回的冷流一起回收
+    let events = futures::stream::once(async move {
+        activate
+            .send(())
+            .map_err(|_| middleware_protocol_error(middleware_send_state(&observation)))?;
+        let response = response
+            .await
+            .map_err(|error| middleware_error(error, middleware_send_state(&observation)))?;
+        let (protocol, status_code, headers, body, envelope) = response.into_parts();
+        if status_code != 200
+            || !headers.is_empty()
+            || envelope
+                .map(|envelope| envelope.into_provider_metadata())
+                .as_ref()
+                != Some(&expected_metadata)
+        {
+            return Err(middleware_protocol_error(middleware_send_state(
+                &observation,
+            )));
+        }
+        crate::validation::validate_text(&protocol, 64, true, None)
+            .map_err(|_| middleware_protocol_error(middleware_send_state(&observation)))?;
+        Ok(futures::stream::try_unfold(
+            (body, protocol, observation),
+            |(mut body, protocol, observation)| async move {
+                let Some(frame) = body.next_frame().await.map_err(|error| {
+                    middleware_error(error, middleware_send_state(&observation))
+                })?
+                else {
+                    return Ok(None);
+                };
+                let event = middleware_frame_to_provider_event(frame, &protocol)?;
+                Ok(Some((event, (body, protocol, observation))))
+            },
+        ))
+    })
+    .try_flatten();
     Ok(ProviderStream::new(metadata, events, ()))
 }
 
@@ -786,37 +884,26 @@ fn middleware_frame_to_provider_event(
     Ok(event)
 }
 
-fn middleware_prepare_error(error: MiddlewareError) -> ProviderError {
-    match error {
-        MiddlewareError::Provider(error) => error,
-        MiddlewareError::Rejected | MiddlewareError::Remote { rejected: true, .. } => {
-            ProviderError::new(
-                ProviderErrorKind::RequestPolicyDenied,
-                UpstreamSendState::NotSent,
-            )
-        }
-        MiddlewareError::Fault
-        | MiddlewareError::Remote { .. }
-        | MiddlewareError::InvalidState
-        | MiddlewareError::Gateway(_)
-        | MiddlewareError::Engine(_) => middleware_protocol_error(UpstreamSendState::NotSent),
+fn unprepared_middleware_response(
+    response: Result<MiddlewareResponse, MiddlewareError>,
+) -> ProviderError {
+    match response {
+        Err(error) => middleware_error(error, UpstreamSendState::NotSent),
+        Ok(_) => middleware_protocol_error(UpstreamSendState::NotSent),
     }
 }
 
-fn middleware_body_error(error: MiddlewareError) -> ProviderError {
+fn middleware_error(error: MiddlewareError, send_state: UpstreamSendState) -> ProviderError {
     match error {
         MiddlewareError::Provider(error) => error,
         MiddlewareError::Rejected | MiddlewareError::Remote { rejected: true, .. } => {
-            ProviderError::new(
-                ProviderErrorKind::RequestPolicyDenied,
-                UpstreamSendState::Ambiguous,
-            )
+            ProviderError::new(ProviderErrorKind::RequestPolicyDenied, send_state)
         }
         MiddlewareError::Fault
         | MiddlewareError::Remote { .. }
         | MiddlewareError::InvalidState
         | MiddlewareError::Gateway(_)
-        | MiddlewareError::Engine(_) => middleware_protocol_error(UpstreamSendState::Ambiguous),
+        | MiddlewareError::Engine(_) => middleware_protocol_error(send_state),
     }
 }
 

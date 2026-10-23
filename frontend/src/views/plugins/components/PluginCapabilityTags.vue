@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import type { PluginArtifactMetadata } from '@/api'
+
 import { ZPopover, ZTag } from '@codex-proxy/ui'
 import { computed, shallowRef, useId } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { pluginCapabilityLabel } from '../utils/model'
 
 const props = withDefaults(defineProps<{
   metadata: PluginArtifactMetadata
   primary?: boolean
 }>(), { primary: false })
+
+const { t } = useI18n({ useScope: 'global' })
 
 const open = shallowRef(false)
 const contentId = useId()
@@ -26,7 +30,7 @@ const hidden = computed(() => entries.value.slice(2))
         <button
           type="button"
           class="cursor-pointer rounded-cp border-0 bg-transparent p-0 outline-none focus-visible:ring-2 focus-visible:ring-cp-control-outline"
-          :aria-label="`另有 ${hidden.length} 项声明能力`"
+          :aria-label="t('plugins.capabilities.moreCapabilities', { count: hidden.length })"
           :aria-expanded="open"
           :aria-describedby="open ? contentId : undefined"
         >
@@ -41,6 +45,6 @@ const hidden = computed(() => entries.value.slice(2))
         </ZTag>
       </div>
     </ZPopover>
-    <span v-if="!entries.length" class="text-cp-text-quaternary">无</span>
+    <span v-if="!entries.length" class="text-cp-text-quaternary">{{ t('common.values.none') }}</span>
   </div>
 </template>

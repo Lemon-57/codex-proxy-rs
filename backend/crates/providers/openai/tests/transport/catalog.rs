@@ -229,13 +229,17 @@ fn missing_capability_fields_should_remain_unknown() {
 }
 
 #[test]
-fn legacy_data_shape_should_fail_the_entire_snapshot() {
-    let result = parse_codex_model_catalog(
-        br#"{"data":[{"slug":"gpt-5.4","display_name":"GPT-5.4"}]}"#,
-        None,
-    );
-
-    assert!(matches!(result, Err(CodexModelCatalogError::InvalidWire)));
+fn model_array_is_required_and_must_have_array_shape() {
+    for body in [
+        br#"{}"#.as_slice(),
+        br#"{"models":null}"#,
+        br#"{"models":{}}"#,
+    ] {
+        assert!(matches!(
+            parse_codex_model_catalog(body, None),
+            Err(CodexModelCatalogError::InvalidWire)
+        ));
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
-import { ZNotification } from '@codex-proxy/ui'
 import { ApiError } from '@/api/request'
+import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage } from '@/utils/operation'
 
 export interface PluginRefreshContext {

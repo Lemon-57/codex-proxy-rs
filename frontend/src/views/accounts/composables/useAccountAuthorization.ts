@@ -1,6 +1,7 @@
 import type { AccountImportSettings, AccountOAuthStartResponse } from '@/api'
 import { computed, onScopeDispose, shallowRef } from 'vue'
 import { completeAccountOAuth, startAccountOAuth } from '@/api'
+import { t } from '@/i18n'
 import { errorMessage } from '@/utils/operation'
 
 type Status = 'idle' | 'starting' | 'waiting' | 'paused' | 'expired' | 'completing'
@@ -66,7 +67,7 @@ export function useAccountAuthorization(onComplete: () => Promise<void>) {
         return
       const expiresAt = Date.parse(result.expiresAt)
       if (!Number.isFinite(expiresAt))
-        throw new Error('授权有效期无效，请重新生成链接')
+        throw new Error(t('accounts.onboarding.invalidExpiry'))
       context = { provider: request.start.provider, settings: request.settings }
       flow.value = result
       status.value = expired() ? 'expired' : 'waiting'
@@ -78,7 +79,7 @@ export function useAccountAuthorization(onComplete: () => Promise<void>) {
     }
     catch (cause) {
       if (!current.signal.aborted) {
-        error.value = errorMessage(cause, '生成授权链接失败')
+        error.value = errorMessage(cause, t('accounts.onboarding.linkFailed'))
         status.value = 'idle'
       }
     }
@@ -90,7 +91,7 @@ export function useAccountAuthorization(onComplete: () => Promise<void>) {
     if (!current || !currentFlow || !context || busy.value)
       return
     if (!callback.value.trim()) {
-      error.value = '请粘贴回调地址或授权码'
+      error.value = t('accounts.onboarding.callbackRequired')
       return
     }
     status.value = 'completing'
@@ -109,7 +110,7 @@ export function useAccountAuthorization(onComplete: () => Promise<void>) {
     catch (cause) {
       if (!current.signal.aborted) {
         status.value = expired() ? 'expired' : 'paused'
-        error.value = errorMessage(cause, '完成授权失败，可重试提交')
+        error.value = errorMessage(cause, t('accounts.onboarding.authorizationFailed'))
       }
     }
   }

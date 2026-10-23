@@ -1,13 +1,14 @@
 import type { BackupSettingsView, UpdateBackupStoragePayload } from '@/api'
-
-import { ZNotification } from '@codex-proxy/ui'
 import { computed, ref, shallowRef } from 'vue'
+
 import {
   getBackupSettings,
   testBackupStorage,
   updateBackupSchedule,
   updateBackupStorage,
 } from '@/api'
+import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
 
 /** 存储与计划配置共用的加载/保存/测试 composable。 */
 export function useBackupSettings() {
@@ -102,7 +103,7 @@ export function useBackupSettings() {
       // 仅存储版本变化时同步服务端暂停状态，普通保存不覆盖计划草稿。
       if (storageChanged)
         schedule.value.scheduleEnabled = data.scheduleEnabled
-      ZNotification.success({ message: schedulePaused ? '存储配置已保存，定时备份已暂停，请测试连接后重新启用' : '存储配置已保存' })
+      ZNotification.success({ message: schedulePaused ? t('settings.backup.storageSaved') : t('settings.backup.storageConfigurationSaved') })
       return true
     }
     catch {
@@ -121,7 +122,7 @@ export function useBackupSettings() {
       const result = await testBackupStorage()
       if (result.ok) {
         verified.value = true
-        ZNotification.success({ message: '连接测试通过' })
+        ZNotification.success({ message: t('settings.backup.connectionVerified') })
       }
       else {
         verified.value = false
@@ -148,7 +149,7 @@ export function useBackupSettings() {
         retentionCount: Number(schedule.value.retentionCount) || 0,
       })
       applySchedule(data)
-      ZNotification.success({ message: '备份计划已保存' })
+      ZNotification.success({ message: t('settings.backup.backupPlanSaved') })
       return true
     }
     catch {

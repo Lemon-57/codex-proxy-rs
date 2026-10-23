@@ -3,7 +3,6 @@
 use std::io;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Utc};
 use gateway_core::operation::GenerateRequest;
 use gateway_protocol::openai::{
     WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY, is_transport_managed_request_header,
@@ -122,23 +121,17 @@ fn adapt_codex_responses_body(
     body.insert("model".to_owned(), Value::String(upstream_model.to_owned()));
     normalize_codex_request_body(body);
     if let Some(location) = location {
-        align_structured_location_fields(body, Utc::now(), location);
+        align_structured_location_fields(body, location);
     }
 }
 
 pub(crate) fn align_structured_location_fields(
     body: &mut Map<String, Value>,
-    now: DateTime<Utc>,
     location: &CodexRequestLocation,
 ) {
-    // 环境与 Desktop 时间上下文使用同一位置；epoch 时间戳保持绝对时间原值
-    let current_date = now
-        .with_timezone(&location.timezone)
-        .format("%Y-%m-%d")
-        .to_string();
     if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
         for item in input {
-            align_time_context(item, &current_date, location.timezone.name());
+            align_time_context(item, location.timezone.name());
         }
     }
     if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
@@ -148,7 +141,7 @@ pub(crate) fn align_structured_location_fields(
     }
 }
 
-fn align_time_context(item: &mut Value, current_date: &str, timezone: &str) {
+fn align_time_context(item: &mut Value, timezone: &str) {
     let Some(item) = item.as_object_mut() else {
         return;
     };
@@ -192,18 +185,13 @@ fn align_time_context(item: &mut Value, current_date: &str, timezone: &str) {
         let Some(Value::String(text)) = part.get_mut("text") else {
             continue;
         };
-        if let Some(aligned) = aligned_time_context(text, context_tag, current_date, timezone) {
+        if let Some(aligned) = aligned_time_context(text, context_tag, timezone) {
             *text = aligned;
         }
     }
 }
 
-fn aligned_time_context(
-    text: &str,
-    context_tag: &str,
-    current_date: &str,
-    timezone: &str,
-) -> Option<String> {
+fn aligned_time_context(text: &str, context_tag: &str, timezone: &str) -> Option<String> {
     let trimmed = text.trim();
     if !trimmed.starts_with(&format!("<{context_tag}>"))
         || !trimmed.ends_with(&format!("</{context_tag}>"))
@@ -215,17 +203,12 @@ fn aligned_time_context(
     if !root.has_tag_name(context_tag) {
         return None;
     }
+    // 日期属于客户端生成该条上下文时的事实，不能用当前时间刷新历史并改变缓存前缀
+    // 仅有日期无法确定跨时区换算所需的时间点，因此位置覆盖只改时区
     let mut replacements = root
         .children()
-        .filter(|node| node.is_element())
-        .filter_map(|node| {
-            let replacement = match node.tag_name().name() {
-                "current_date" => format!("<current_date>{current_date}</current_date>"),
-                "timezone" => format!("<timezone>{timezone}</timezone>"),
-                _ => return None,
-            };
-            Some((node.range(), replacement))
-        })
+        .filter(|node| node.is_element() && node.tag_name().name() == "timezone")
+        .map(|node| (node.range(), format!("<timezone>{timezone}</timezone>")))
         .collect::<Vec<_>>();
     if replacements.is_empty() {
         return None;

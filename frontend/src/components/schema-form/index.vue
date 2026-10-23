@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import type { InputField } from './schema'
+
 import { ZForm, ZFormItem, ZIconButton, ZInput, ZPopover, ZSelect, ZTextarea } from '@codex-proxy/ui'
 import { Braces, Info, List } from '@lucide/vue'
 import { computed, nextTick, shallowRef, useTemplateRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { parseJsonObject } from '@/utils/data'
 import { inputFields } from './schema'
 
@@ -12,6 +14,9 @@ const props = defineProps<{
   maximumBytes?: number
   fieldErrors?: Record<string, string>
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
+
 const text = defineModel<string>({ required: true })
 const jsonMode = shallowRef(false)
 const root = useTemplateRef<HTMLElement>('root')
@@ -49,8 +54,8 @@ function inputValue(key: string) {
 function fieldOptions(field: InputField) {
   const options = field.values
     ? field.values.map((item, index) => ({ value: String(index), label: String(item) }))
-    : [{ value: 'true', label: '是' }, { value: 'false', label: '否' }]
-  return [{ value: '', label: '未填写' }, ...options]
+    : [{ value: 'true', label: t('common.values.yes') }, { value: 'false', label: t('common.values.no') }]
+  return [{ value: '', label: t('common.values.unspecified') }, ...options]
 }
 
 function update(field: InputField, input: string) {
@@ -95,9 +100,9 @@ defineExpose({ focusField })
 <template>
   <div v-if="!empty" ref="root" class="grid gap-3">
     <ZForm v-if="showJson">
-      <ZFormItem label="输入内容" :error="error">
+      <ZFormItem :label="t('common.form.inputPlaceholder')" :error="error">
         <template #extra>
-          <ZIconButton v-if="fields !== null" aria-label="使用表单" size="small" variant="solid" :disabled="disabled || Boolean(error) || hasExtra || incompatibleValue" @click="jsonMode = false">
+          <ZIconButton v-if="fields !== null" :aria-label="t('common.form.useForm')" size="small" variant="solid" :disabled="disabled || Boolean(error) || hasExtra || incompatibleValue" @click="jsonMode = false">
             <List class="size-4" />
           </ZIconButton>
         </template>
@@ -115,7 +120,7 @@ defineExpose({ focusField })
         <template v-if="field.description" #label-extra>
           <ZPopover trigger="hover-click" placement="top-start">
             <template #reference>
-              <ZIconButton :aria-label="`${field.label}说明`" class="size-3.5!" :title="undefined">
+              <ZIconButton :aria-label="t('common.form.fieldHelp', { label: field.label })" class="size-3.5!" :title="undefined">
                 <Info class="size-3.5" />
               </ZIconButton>
             </template>
@@ -125,7 +130,7 @@ defineExpose({ focusField })
           </ZPopover>
         </template>
         <template v-if="index === 0" #extra>
-          <ZIconButton aria-label="编辑 JSON" size="small" variant="solid" :disabled="disabled" @click="jsonMode = true">
+          <ZIconButton :aria-label="t('common.form.editJson')" size="small" variant="solid" :disabled="disabled" @click="jsonMode = true">
             <Braces class="size-4" />
           </ZIconButton>
         </template>

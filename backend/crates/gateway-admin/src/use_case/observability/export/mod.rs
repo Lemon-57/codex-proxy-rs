@@ -7,6 +7,8 @@ use std::{
 
 use tokio::time::{Instant, timeout_at};
 
+mod availability;
+
 use super::{DefaultObservabilityService, map_store_error};
 use crate::model::{
     AdminError, AdminErrorKind,
@@ -150,38 +152,7 @@ impl DefaultObservabilityService {
                         &format!("{section}.trace"),
                         "not_recorded_or_retained",
                     ),
-                    Some(trace) => {
-                        if trace["droppedEvents"].as_u64().unwrap_or(0) > 0 {
-                            gap(&mut bundle, &format!("{section}.trace"), "events_evicted");
-                        }
-                        let events = trace["events"].as_array();
-                        if !events.is_some_and(|events| {
-                            events.iter().any(|event| {
-                                event["stage"] == "request.routed"
-                                    && event["data"]["accountPolicy"].is_object()
-                            })
-                        }) {
-                            gap(&mut bundle, &section, "incident_policy_not_recorded");
-                        }
-                        for event in events.into_iter().flatten() {
-                            if event["stage"] == "capture.gap" || event["data"]["truncated"] == true
-                            {
-                                gap(
-                                    &mut bundle,
-                                    &format!("{section}.trace"),
-                                    "capture_gap_or_truncation",
-                                );
-                            }
-                            if event["stage"] == "retry.decided" && event["data"]["phase"].is_null()
-                            {
-                                gap(
-                                    &mut bundle,
-                                    &format!("{section}.trace"),
-                                    "legacy_retry_facts_not_recorded",
-                                );
-                            }
-                        }
-                    }
+                    Some(trace) => availability::trace_gaps(&mut bundle, &section, trace),
                 }
                 gap(
                     &mut bundle,

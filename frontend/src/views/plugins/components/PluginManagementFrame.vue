@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { PluginManagementPage, PluginManagementView } from '@/api'
+
 import { ZButton, ZEmpty } from '@codex-proxy/ui'
 import { RotateCw } from '@lucide/vue'
 import { useEventListener, useResizeObserver } from '@vueuse/core'
 import { computed, onMounted, shallowRef, useTemplateRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useThemeStore } from '@/stores/modules/theme'
 import { usePluginFrameSession } from '../composables/usePluginFrameSession'
 import PluginPageLoading from './PluginPageLoading.vue'
@@ -16,6 +18,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   stale: []
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
 
 const themeStore = useThemeStore()
 const containerRef = useTemplateRef<HTMLDivElement>('container')
@@ -60,13 +64,13 @@ onMounted(pushLayout)
     <div v-if="!loadError && (loading || !frameReady)" class="absolute inset-0 z-10 flex bg-cp-bg-layout">
       <PluginPageLoading />
     </div>
-    <ZEmpty v-if="loadError" title="插件页面无法加载" :description="loadError" class="min-h-0 flex-1 content-center" surface="none" role="alert">
+    <ZEmpty v-if="loadError" :title="t('plugins.frame.pluginPageCannotBeLoaded')" :description="loadError" class="min-h-0 flex-1 content-center" surface="none" role="alert">
       <template #action>
         <ZButton size="small" @click="loadPage">
           <template #icon>
             <RotateCw class="size-3.5" />
           </template>
-          重试
+          {{ t('common.actions.retry') }}
         </ZButton>
       </template>
     </ZEmpty>

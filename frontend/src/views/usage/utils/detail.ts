@@ -1,4 +1,5 @@
 import type { UsageRecordDetail } from '@/api'
+import { t } from '@/i18n'
 import { isRecord } from '@/utils/data'
 
 // 详情弹窗共享的字段展示约定：占位符、标签/值样式，供弹窗与其子组件复用。
@@ -22,11 +23,11 @@ export function isErrorUsageRecord(record: Pick<UsageRecordDetail, 'logicalOutco
 
 export function attemptOutcomeText(outcome: string) {
   const labels: Record<string, string> = {
-    succeeded: '成功',
-    failed: '失败',
-    cancelled: '取消',
-    incomplete: '未完成',
-    running: '进行中',
+    succeeded: t('common.status.success'),
+    failed: t('common.status.failed'),
+    cancelled: t('usage.status.cancelled'),
+    incomplete: t('usage.health.notCompleted'),
+    running: t('usage.request.inProgress'),
   }
   return labels[outcome] ?? outcome
 }

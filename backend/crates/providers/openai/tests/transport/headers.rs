@@ -197,7 +197,8 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
     let payload = server.await.expect("header server task");
 
     assert!(response.body.contains("resp_ws_security"));
-    assert_eq!(payload["prompt_cache_key"], "client-thread");
+    assert_ne!(payload["prompt_cache_key"], "client-thread");
+    assert!(uuid::Uuid::parse_str(payload["prompt_cache_key"].as_str().unwrap()).is_ok());
     let metadata = payload["client_metadata"]
         .as_object()
         .expect("client metadata");
@@ -226,11 +227,16 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
         ("x-openai-memgen-request", "true"),
         ("session-id", "cp_derived"),
     ] {
-        assert!(
-            headers
-                .iter()
-                .any(|(header, value)| { header == name && value == expected })
-        );
+        let value = &headers.iter().find(|(header, _)| header == name).unwrap().1;
+        if matches!(
+            name,
+            "session-id" | "x-client-request-id" | "x-codex-window-id" | "x-codex-parent-thread-id"
+        ) {
+            assert_ne!(value, expected);
+            assert!(uuid::Uuid::parse_str(value).is_ok());
+        } else {
+            assert_eq!(value, expected);
+        }
     }
     for forbidden in [
         "x-codex-installation-id",
@@ -326,7 +332,7 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
             Some(expected_user_agent.as_str()),
             Some("text/event-stream"),
             None,
-            Some("session-1"),
+            read_header_value(&raw_request, "session-id"),
             Some("turn-state"),
         )
     );
@@ -334,6 +340,9 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
         read_header_value(&raw_request, "version"),
         Some(expected_core_version.as_str())
     );
+    let scoped_session = read_header_value(&raw_request, "session-id").unwrap();
+    assert_ne!(scoped_session, "session-1");
+    assert!(uuid::Uuid::parse_str(scoped_session).is_ok());
     for required in [
         "authorization",
         "chatgpt-account-id",

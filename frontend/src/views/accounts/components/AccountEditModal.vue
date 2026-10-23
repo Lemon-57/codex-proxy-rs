@@ -4,6 +4,8 @@ import type { ApiKeyAccountForm } from '../utils/upstreamApiKey'
 import type { Account, AccountGroupRef, AccountModelAccess } from '@/api'
 
 import { ZButton, ZDatePicker, ZDialog, ZEmpty, ZFormItem, ZInput, ZSegmented, ZTextarea } from '@codex-proxy/ui'
+
+import { useI18n } from 'vue-i18n'
 import AccountPlanBadge from '@/components/account/AccountPlanBadge.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import { isOpenAiApiKeyAccount, isOpenAiOAuthAccount } from '../utils/upstreamApiKey'
@@ -16,13 +18,14 @@ defineProps<{
   groups: AccountGroupRef[]
   groupsLoading: boolean
   saving: boolean
-  configurationLoading: boolean
   configurationReady: boolean
 }>()
 
 const emit = defineEmits<{
   save: []
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
 
 const open = defineModel<boolean>({ required: true })
 const apiKey = defineModel<ApiKeyAccountForm>('apiKey', { required: true })
@@ -46,7 +49,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
 <template>
   <ZDialog
     v-model="open"
-    title="编辑账号"
+    :title="t('accounts.editor.title')"
     width="42rem"
     :show-close="!saving" :close-on-click-modal="!saving" :close-on-press-escape="!saving"
   >
@@ -68,23 +71,15 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         </div>
       </div>
 
-      <ZFormItem v-if="isOpenAiOAuthAccount(account)" label="上游传输方式">
-        <p v-if="configurationLoading" role="status" class="m-0 text-cp-sm text-cp-text-secondary">
-          正在读取上游设置…
-        </p>
-        <ZEmpty v-else-if="!configurationReady" title="传输方式读取失败" description="其他设置仍可保存" size="small" surface="none" role="alert" />
-        <ZSegmented v-else v-model="oauthTransport" aria-label="上游传输方式" :options="transportOptions" :disabled="saving" />
+      <ZFormItem v-if="isOpenAiOAuthAccount(account)" :label="t('accounts.editor.transportLabel')">
+        <ZSegmented v-model="oauthTransport" :aria-label="t('accounts.editor.transportLabel')" :options="transportOptions" :disabled="saving || !configurationReady" />
       </ZFormItem>
 
       <section v-if="isOpenAiApiKeyAccount(account)" class="grid gap-4">
         <h3 class="m-0 text-cp font-heavy text-cp-text">
-          上游连接
+          {{ t('accounts.editor.upstreamConnection') }}
         </h3>
-        <p v-if="configurationLoading" role="status" class="m-0 text-cp-sm text-cp-text-secondary">
-          正在读取上游设置…
-        </p>
-        <ZEmpty v-else-if="!configurationReady" title="上游设置读取失败" description="请关闭后重试" size="small" surface="none" role="alert" />
-        <AccountApiKeyFields v-else v-model="apiKey" editing :disabled="saving" />
+        <AccountApiKeyFields v-model="apiKey" editing :disabled="saving || !configurationReady" />
       </section>
 
       <AccountSettingsFields
@@ -110,12 +105,12 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
       <ZFormItem label="到期时间" description="手动记录，不自动停用账号">
         <ZDatePicker v-model="manualExpiresAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" placeholder="选择到期时间" :disabled="saving" class="w-full" />
       </ZFormItem>
-      <ZFormItem label="备注">
+      <ZFormItem :label="t('common.fields.notes')">
         <ZTextarea
           v-model="notes"
           :rows="3"
           :maxlength="500"
-          placeholder="最多 500 字，留空可清除备注"
+          :placeholder="t('accounts.editor.notesHelp')"
           :disabled="saving"
         />
       </ZFormItem>
@@ -123,7 +118,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
 
     <template #footer>
       <ZButton :disabled="saving" @click="open = false">
-        取消
+        {{ t('common.actions.cancel') }}
       </ZButton>
       <ZButton
         type="primary"
@@ -131,7 +126,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         :disabled="!account || groupsLoading || (isOpenAiApiKeyAccount(account) && !configurationReady)"
         @click="emit('save')"
       >
-        保存更改
+        {{ t('accounts.batchEdit.saveChanges') }}
       </ZButton>
     </template>
   </ZDialog>

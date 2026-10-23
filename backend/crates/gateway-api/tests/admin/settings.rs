@@ -472,16 +472,15 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
 }
 
 #[test]
-fn settings_service_contract_stays_flat_and_rejects_unknown_fields() {
+fn settings_service_contract_flattens_values_and_rejects_unknown_fields() {
     use gateway_admin::model::settings::{ReplaceRuntimeSettings, RuntimeSettings};
 
     let current = super::test_runtime_settings();
-    assert_eq!(
-        serde_json::from_slice::<RuntimeSettings>(&serde_json::to_vec(&current).unwrap()).unwrap(),
-        current
-    );
     let mut record = serde_json::to_value(&current).unwrap();
-    assert!(record.get("values").is_none());
+    assert_eq!(
+        record["refresh_margin_seconds"],
+        current.values.refresh_margin_seconds
+    );
     assert_eq!(
         serde_json::from_value::<RuntimeSettings>(record.clone()).unwrap(),
         current
@@ -490,13 +489,11 @@ fn settings_service_contract_stays_flat_and_rejects_unknown_fields() {
     assert!(serde_json::from_value::<RuntimeSettings>(record).is_err());
 
     let command = ReplaceRuntimeSettings::from(current);
-    assert_eq!(
-        serde_json::from_slice::<ReplaceRuntimeSettings>(&serde_json::to_vec(&command).unwrap())
-            .unwrap(),
-        command
-    );
     let mut wire = serde_json::to_value(&command).unwrap();
-    assert!(wire.get("values").is_none());
+    assert_eq!(
+        wire["refresh_margin_seconds"],
+        command.values.refresh_margin_seconds
+    );
     assert_eq!(
         serde_json::from_value::<ReplaceRuntimeSettings>(wire.clone()).unwrap(),
         command
@@ -1430,10 +1427,10 @@ async fn guardian_reservation_round_trips_and_rejects_invalid_values() {
 
 #[tokio::test]
 async fn account_affinity_and_rotation_budget_round_trip_and_reject_invalid_values() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let mut body = update_body();
     for (mode, rotations, ttl) in [("relaxed", 0, 1), ("preferred", 3, 24), ("strict", 31, 720)] {
-        let fixture = AdminTestFixture::new().await;
-        fixture.auth.insert_session("valid-session");
-        let mut body = update_body();
         body["openaiAccountAffinity"] = json!(mode);
         body["maxAccountRotations"] = json!(rotations);
         body["openaiSessionAffinityTtlHours"] = json!(ttl);
@@ -1441,7 +1438,7 @@ async fn account_affinity_and_rotation_budget_round_trip_and_reject_invalid_valu
             .oneshot(request(
                 Method::POST,
                 "/api/admin/settings/update",
-                Some(body),
+                Some(body.clone()),
             ))
             .await
             .unwrap();
@@ -1450,7 +1447,9 @@ async fn account_affinity_and_rotation_budget_round_trip_and_reject_invalid_valu
         assert_eq!(response["data"]["openaiAccountAffinity"], mode);
         assert_eq!(response["data"]["maxAccountRotations"], rotations);
         assert_eq!(response["data"]["openaiSessionAffinityTtlHours"], ttl);
+        body["configRevision"] = response["data"]["configRevision"].clone();
     }
+    let saved = fixture.settings.settings.lock().unwrap().clone();
     // 类型错误沿用 AdminJson 的 422，合法类型越界由字段校验返回 400
     for (field, value, expected_status) in [
         (
@@ -1485,20 +1484,19 @@ async fn account_affinity_and_rotation_budget_round_trip_and_reject_invalid_valu
             StatusCode::UNPROCESSABLE_ENTITY,
         ),
     ] {
-        let fixture = AdminTestFixture::new().await;
-        fixture.auth.insert_session("valid-session");
-        let mut body = update_body();
-        body[field] = value;
+        let mut invalid = body.clone();
+        invalid[field] = value;
         let response = app(fixture.state())
             .oneshot(request(
                 Method::POST,
                 "/api/admin/settings/update",
-                Some(body),
+                Some(invalid),
             ))
             .await
             .unwrap();
         assert_eq!(response.status(), expected_status, "{field}");
     }
+    assert_eq!(*fixture.settings.settings.lock().unwrap(), saved);
 }
 
 #[test]

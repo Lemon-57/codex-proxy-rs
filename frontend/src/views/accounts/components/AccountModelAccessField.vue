@@ -2,8 +2,10 @@
 import type { AccountModelAccess } from '@/api'
 
 import { ZCheckbox, ZEmpty, ZFormItem, ZIconButton, ZInput, ZScrollbar, ZSegmented } from '@codex-proxy/ui'
+
 import { RefreshCw, Search } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { getAccountModels, refreshAccountModels } from '@/api'
 import { useRequestState } from '@/composables/useRequestState'
 import { accountModelAccessError, accountModelIdError } from '../utils/modelAccess'
@@ -13,6 +15,9 @@ const props = withDefaults(defineProps<{
   disabled?: boolean
   allowPreserve?: boolean
 }>(), { disabled: false, allowPreserve: false })
+
+const { t } = useI18n({ useScope: 'global' })
+
 const model = defineModel<AccountModelAccess | undefined>({ required: true })
 const catalog = ref<Array<{ id: string, label: string }>>([])
 const search = ref('')
@@ -20,10 +25,10 @@ const inputError = ref('')
 const request = useRequestState()
 const { loading, error } = request
 const modes = computed(() => [
-  ...(props.allowPreserve ? [{ value: 'preserve', label: '保留' }] : []),
-  { value: 'all', label: '不限制' },
-  { value: 'allowlist', label: '白名单' },
-  { value: 'denylist', label: '黑名单' },
+  ...(props.allowPreserve ? [{ value: 'preserve', label: t('accounts.modelAccess.reserve') }] : []),
+  { value: 'all', label: t('common.values.unlimited') },
+  { value: 'allowlist', label: t('accounts.modelAccess.allowlist') },
+  { value: 'denylist', label: t('accounts.modelAccess.blocklist') },
 ])
 const mode = computed({
   get: () => model.value?.mode ?? 'preserve',
@@ -110,19 +115,19 @@ watch(search, () => {
 
 <template>
   <div class="grid gap-3">
-    <ZFormItem label="模型限制">
+    <ZFormItem :label="t('accounts.modelAccess.modelLimitations')">
       <template v-if="restricted && accountId" #extra>
-        <ZIconButton aria-label="刷新模型" size="small" :loading="loading" :disabled="disabled" @click="load(true)">
+        <ZIconButton :aria-label="t('accounts.modelAccess.refreshModel')" size="small" :loading="loading" :disabled="disabled" @click="load(true)">
           <template #loading>
             <RefreshCw class="size-3.5 animate-spin motion-reduce:animate-none" />
           </template>
           <RefreshCw class="size-3.5" />
         </ZIconButton>
       </template>
-      <ZSegmented v-model="mode" class="w-80 max-w-full" aria-label="模型限制模式" :options="modes" :disabled="disabled" />
+      <ZSegmented v-model="mode" class="w-80 max-w-full" :aria-label="t('accounts.modelAccess.modelRestrictionMode')" :options="modes" :disabled="disabled" />
     </ZFormItem>
     <template v-if="restricted">
-      <ZInput v-model="search" aria-label="搜索或添加模型" placeholder="搜索或输入 ID，回车添加" :disabled="disabled" :aria-invalid="Boolean(inputError)" @keydown.enter.prevent="addModel">
+      <ZInput v-model="search" :aria-label="t('accounts.modelAccess.searchOrAddModels')" :placeholder="t('accounts.modelAccess.searchOrEnterIdAndPressEnter')" :disabled="disabled" :aria-invalid="Boolean(inputError)" @keydown.enter.prevent="addModel">
         <template #prefix>
           <Search class="size-4" aria-hidden="true" />
         </template>
@@ -131,7 +136,7 @@ watch(search, () => {
         {{ inputError }}
       </p>
       <ZScrollbar v-if="models.length" max-height="15rem" class="min-w-0 -m-1">
-        <div class="grid grid-cols-2 gap-2 p-1 sm:grid-cols-3" role="group" aria-label="选择模型" :aria-busy="loading || undefined">
+        <div class="grid grid-cols-2 gap-2 p-1 sm:grid-cols-3" role="group" :aria-label="t('accounts.modelAccess.selectModel')" :aria-busy="loading || undefined">
           <ZCheckbox
             v-for="item in models"
             :key="item.id"
@@ -139,7 +144,7 @@ watch(search, () => {
             :class="model?.models.includes(item.id) ? 'bg-cp-primary-container text-cp-primary-on-container' : 'bg-cp-fill-quaternary text-cp-text-secondary hover:bg-cp-fill-tertiary hover:text-cp-text'"
             :model-value="model?.models.includes(item.id) ?? false"
             :label="item.id"
-            :title="item.unavailable && accountId ? `${item.id}（当前目录未返回）` : item.id"
+            :title="item.unavailable && accountId ? t('accounts.modelAccess.notInCurrentModelCatalog', { id: item.id }) : item.id"
             :disabled="disabled"
             @update:model-value="select(item.id, $event)"
           >
@@ -150,10 +155,10 @@ watch(search, () => {
         </div>
       </ZScrollbar>
       <p v-else-if="loading" class="m-0 py-4 text-center text-cp-sm text-cp-text-tertiary" role="status">
-        加载模型中…
+        {{ t('accounts.modelAccess.loadingModel') }}
       </p>
-      <ZEmpty v-else-if="!error" :title="search ? '无匹配模型' : '暂无模型'" :icon="search ? Search : undefined" size="small" surface="none" />
-      <ZEmpty v-if="error" title="模型列表加载失败" description="请刷新后重试" size="small" surface="none" role="alert" />
+      <ZEmpty v-else-if="!error" :title="search ? t('accounts.modelAccess.noMatchingModels') : t('accounts.modelAccess.noModels')" :icon="search ? Search : undefined" size="small" surface="none" />
+      <ZEmpty v-if="error" :title="t('accounts.modelAccess.modelListLoadingFailed')" :description="t('accounts.modelAccess.retryHint')" size="small" surface="none" role="alert" />
     </template>
   </div>
 </template>

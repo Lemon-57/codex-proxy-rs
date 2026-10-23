@@ -70,8 +70,8 @@ pub(super) fn quota_service_with_base_url(
     http: reqwest::Client,
     base_url: String,
 ) -> CodexCredentialQuotaService {
-    // 首查随机启动延迟只在 initial_sync 专项测试中注入非零值；
-    // 其余测试固定为零，保持「首轮即查」的确定性旧行为。
+    // 首查随机启动延迟只在 initial_sync 专项测试中注入非零值
+    // 其余测试固定为零，避免计时抖动影响业务断言
     quota_service_with_initial_delays(store, http, base_url, Arc::new(|| Duration::ZERO))
 }
 

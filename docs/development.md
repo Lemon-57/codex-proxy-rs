@@ -135,6 +135,9 @@ pnpm --dir modules/plugins/examples/workbench/frontend build:source
 )
 ```
 
+独立插件的构建、打包和安装后功能验证见 [Workbench 示例](../modules/plugins/examples/workbench/README.md)。
+宿主插件集成测试的数据库与 Redis 配置见[本地测试库](../backend/migrations/README.md#本地测试库)
+
 ## 编辑与提交
 
 直接打开宿主目录即可开发，分别在对应仓库目录操作 Git

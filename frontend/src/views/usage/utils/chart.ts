@@ -2,6 +2,7 @@ import type { LineSeriesOption } from 'echarts'
 import type { useChartPalette } from '@/composables/useChartPalette'
 import { sampleGapBridgeSeries } from '@/components/charts/timeSeriesGap'
 import { chartTooltipStyle } from '@/components/charts/tooltip'
+
 import { formatLocalizedCompactNumber } from '@/utils/format'
 
 type UsageChartPalette = ReturnType<typeof useChartPalette>['palette']['value']
@@ -103,7 +104,7 @@ export function usageTooltipContent(
   lines: string[],
 ) {
   const title = escapeTooltip(label)
-  return `<div style="margin:0 0 7px;padding:0 0 7px;border-bottom:1px solid ${theme.divider};color:${theme.textPrimary};font-family:'JetBrains Mono Variable','JetBrains Mono',monospace;font-size:11px;font-weight:750;line-height:1.2">${title}</div><div style="line-height:1.55">${lines.join('<br/>')}</div>`
+  return `<div style="margin:0 0 7px;padding:0 0 7px;border-bottom:1px solid ${theme.divider};color:${theme.textPrimary};font-family:var(--font-mono);font-size:11px;font-weight:750;line-height:1.2">${title}</div><div style="line-height:1.55">${lines.join('<br/>')}</div>`
 }
 
 export function usageTooltipItem(label: string, value: string, color: string) {
@@ -117,7 +118,7 @@ export function usageCategoryAxis(labels: string[], theme: UsageChartPalette) {
     axisLabel: {
       color: theme.textMuted,
       fontSize: 10,
-      fontFamily: 'JetBrains Mono Variable, JetBrains Mono, monospace',
+      fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || 'monospace',
       hideOverlap: true,
     },
     axisLine: { show: false },
@@ -141,7 +142,7 @@ export function usageValueAxis(
       show: true,
       color: theme.textMuted,
       fontSize: 10,
-      fontFamily: 'JetBrains Mono Variable, JetBrains Mono, monospace',
+      fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || 'monospace',
       formatter,
     },
     splitLine: {
@@ -162,7 +163,7 @@ export function usageLegend(theme: UsageChartPalette, data: string[]) {
     textStyle: {
       color: theme.textSecondary,
       fontSize: 11,
-      fontFamily: 'Inter Variable, Inter, system-ui, sans-serif',
+      fontFamily: getComputedStyle(document.documentElement).fontFamily,
       fontWeight: 650,
     },
   }

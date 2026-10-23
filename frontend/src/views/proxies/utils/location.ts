@@ -1,6 +1,6 @@
 import type { OutboundProxyRecord } from '@/api'
+import { numberLocale } from '@/utils/format'
 
-const countryNames = new Intl.DisplayNames(['zh-CN'], { type: 'region', fallback: 'code' })
 const flags = import.meta.glob<string>('/node_modules/circle-flags/flags/??.svg', { eager: true, import: 'default', query: '?url&no-inline' })
 
 export function proxyExitLocation(proxy: OutboundProxyRecord) {
@@ -15,7 +15,9 @@ export function proxyExitLocation(proxy: OutboundProxyRecord) {
 }
 
 export function countryName(code: string): string {
-  return /^[A-Z]{2}$/u.test(code) ? countryNames.of(code) ?? code : code
+  return /^[A-Z]{2}$/u.test(code)
+    ? new Intl.DisplayNames([numberLocale()], { type: 'region', fallback: 'code' }).of(code) ?? code
+    : code
 }
 
 export function countryFlagUrl(code: string): string | undefined {

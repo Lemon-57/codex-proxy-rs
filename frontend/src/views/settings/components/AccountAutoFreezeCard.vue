@@ -2,7 +2,11 @@
 import { ZCard, ZCheckbox, ZForm, ZFormItem, ZIconButton, ZInput, ZPopover, ZSwitch } from '@codex-proxy/ui'
 
 import { Activity, CircleAlert, Gauge, Snowflake, Timer } from '@lucide/vue'
+
 import { useId } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n({ useScope: 'global' })
 
 const enabled = defineModel<boolean>('enabled', { required: true })
 const threshold = defineModel<string>('threshold', { required: true })
@@ -16,24 +20,24 @@ const adaptiveConcurrencyHintId = useId()
 
 <template>
   <ZCard
-    title="过载保护"
-    description="上游容量类错误累计达到阈值时，暂停账号调度并进入冷却"
+    :title="t('settings.autoDisable.overloadProtection')"
+    :description="t('settings.autoDisable.description')"
   >
-    <ZForm class="max-w-6xl sm:grid-cols-2">
+    <ZForm class="max-w-6xl sm:grid-cols-2 sm:items-end">
       <ZSwitch
         v-model="enabled"
         class="col-span-full justify-self-start"
-        label="启用过载保护"
+        :label="t('settings.autoDisable.enableOverloadProtection')"
       />
 
       <ZFormItem
-        label="失败次数阈值"
-        description="统计窗口内累计容量类失败达到此次数后触发"
+        :label="t('settings.autoDisable.failureCountThreshold')"
+        :description="t('settings.autoDisable.thresholdHelp')"
       >
         <ZInput
           v-model="threshold"
           :disabled="!enabled"
-          aria-label="失败次数阈值"
+          :aria-label="t('settings.autoDisable.failureCountThreshold')"
           type="number"
           min="2"
           max="1000"
@@ -43,19 +47,19 @@ const adaptiveConcurrencyHintId = useId()
             <Activity class="size-4" />
           </template>
           <template #suffix>
-            <span class="text-cp-sm">次</span>
+            <span class="text-cp-sm">{{ t('settings.autoDisable.times') }}</span>
           </template>
         </ZInput>
       </ZFormItem>
 
       <ZFormItem
-        label="统计窗口"
-        description="每次失败后，计数有效期向后顺延"
+        :label="t('settings.autoDisable.statisticsWindow')"
+        :description="t('settings.autoDisable.windowHelp')"
       >
         <ZInput
           v-model="windowSeconds"
           :disabled="!enabled"
-          aria-label="统计窗口秒数"
+          :aria-label="t('settings.autoDisable.statisticsWindowSeconds')"
           type="number"
           min="60"
           max="3600"
@@ -65,19 +69,19 @@ const adaptiveConcurrencyHintId = useId()
             <Timer class="size-4" />
           </template>
           <template #suffix>
-            <span class="text-cp-sm">秒</span>
+            <span class="text-cp-sm">{{ t('settings.autoDisable.seconds') }}</span>
           </template>
         </ZInput>
       </ZFormItem>
 
       <ZFormItem
-        label="冷却时长"
-        description="探测失败时，按此时长延后恢复"
+        :label="t('settings.autoDisable.cooldownTime')"
+        :description="t('settings.autoDisable.cooldownHelp')"
       >
         <ZInput
           v-model="durationSeconds"
           :disabled="!enabled"
-          aria-label="冷却时长秒数"
+          :aria-label="t('settings.autoDisable.cooldownTimeInSeconds')"
           type="number"
           min="300"
           max="604800"
@@ -87,26 +91,26 @@ const adaptiveConcurrencyHintId = useId()
             <Snowflake class="size-4" />
           </template>
           <template #suffix>
-            <span class="text-cp-sm">秒</span>
+            <span class="text-cp-sm">{{ t('settings.autoDisable.seconds') }}</span>
           </template>
         </ZInput>
       </ZFormItem>
       <ZFormItem
-        label="恢复探测模型"
-        description="启用后需探测成功才恢复，模型留空时选择首个可用模型"
+        :label="t('settings.autoDisable.recoveryProbeModel')"
+        :description="t('settings.autoDisable.probeModelHelp')"
       >
         <template #extra>
           <ZCheckbox
             v-model="probeEnabled"
             :disabled="!enabled"
-            label="恢复前探测"
+            :label="t('settings.autoDisable.requireSuccessfulProbe')"
           />
         </template>
         <ZInput
           v-model="probeModel"
           :disabled="!enabled || !probeEnabled"
-          aria-label="恢复探测模型"
-          placeholder="留空自动选择"
+          :aria-label="t('settings.autoDisable.recoveryProbeModel')"
+          :placeholder="t('settings.autoDisable.modelPlaceholder')"
         >
           <template #prefix>
             <Gauge class="size-4" />
@@ -118,12 +122,12 @@ const adaptiveConcurrencyHintId = useId()
         <ZCheckbox
           v-model="adaptiveConcurrency"
           :disabled="!enabled"
-          label="自适应并发下调"
+          :label="t('settings.autoDisable.concurrencyReduction.label')"
         />
         <ZPopover class="-my-1" trigger="hover-click" placement="top-start" :hover-delay="240">
           <template #reference="{ open }">
             <ZIconButton
-              aria-label="自适应并发下调说明"
+              :aria-label="t('settings.autoDisable.concurrencyReduction.helpTitle')"
               :title="undefined"
               class="size-6! hover:bg-transparent! active:bg-transparent!"
               :aria-expanded="open"
@@ -133,7 +137,7 @@ const adaptiveConcurrencyHintId = useId()
             </ZIconButton>
           </template>
           <p :id="adaptiveConcurrencyHintId" role="tooltip" class="m-0 max-w-72 px-3 py-2 text-cp-sm leading-relaxed text-cp-text-secondary">
-            修改账号并发上限，恢复后不自动调高
+            {{ t('settings.autoDisable.concurrencyReduction.description') }}
           </p>
         </ZPopover>
       </div>

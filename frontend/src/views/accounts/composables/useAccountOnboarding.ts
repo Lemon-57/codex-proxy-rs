@@ -1,8 +1,9 @@
 import type { Account, AccountImportTask } from '@/api'
-import { ZNotification } from '@codex-proxy/ui'
 import { computed, ref, shallowRef, watch } from 'vue'
 import { createAccountImportTask, importAccounts } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
+import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage, generateRequestId } from '@/utils/operation'
 import { formatProviderLabel, isSupportedProvider } from '@/utils/providers'
 import { accountCreateProvider, accountCreateSourceKey, accountImportModes, accountImportSettings, accountProxyError, emptyAccountCreateForm } from '../utils/accountCreate'
@@ -18,7 +19,7 @@ export function useAccountOnboarding(options: {
   const reauthorizingAccount = shallowRef<Account | null>(null)
   const creatingAccountAction = useAsyncAction()
   const createForm = ref(emptyAccountCreateForm())
-  const authorization = useAccountAuthorization(() => finishCreate(reauthorizingAccount.value ? '账号重新授权成功' : '账号已添加'))
+  const authorization = useAccountAuthorization(() => finishCreate(reauthorizingAccount.value ? t('accounts.onboarding.reauthorized') : t('accounts.onboarding.accountAdded')))
   let submissionIds: string[] = []
   watch(createForm, () => {
     submissionIds = []
@@ -41,9 +42,9 @@ export function useAccountOnboarding(options: {
 
   function requireImportProvider(provider: string | undefined) {
     if (!provider)
-      throw new Error('请选择账号平台')
+      throw new Error(t('accounts.onboarding.providerRequired'))
     if (!isSupportedProvider(provider))
-      throw new Error('账号平台不受支持')
+      throw new Error(t('accounts.onboarding.accountPlatformIsNotSupported'))
     return provider
   }
 
@@ -66,7 +67,7 @@ export function useAccountOnboarding(options: {
       const provider = accountCreateProvider(form)
       if (mode === 'api_key') {
         if (requireImportProvider(provider) !== 'openai')
-          throw new Error('当前平台不支持 API Key 账号')
+          throw new Error(t('accounts.onboarding.apiKeyUnsupported'))
         const error = apiKeyAccountError(form.apiKey)
         if (error)
           throw new Error(error)
@@ -76,7 +77,7 @@ export function useAccountOnboarding(options: {
           outboundProxyId,
           data: { provider: 'openai', authentication_kind: 'api_key', name: form.apiKey.name.trim(), base_url: form.apiKey.base_url.trim(), api_key: form.apiKey.apiKey, transport: form.apiKey.transport },
         })
-        await finishCreate('API Key 账号已添加')
+        await finishCreate(t('accounts.onboarding.apiKeyAccountAdded'))
         return
       }
       const documents = form.source?.kind === 'bundle'
@@ -95,11 +96,11 @@ export function useAccountOnboarding(options: {
           showCreateModal.value = false
         options.onImportTaskCreated(task, finished)
       }
-      ZNotification.success({ message: submitted > 1 ? `已创建 ${submitted} 个导入任务` : '导入任务已创建' })
+      ZNotification.success({ message: submitted > 1 ? t('accounts.onboarding.importTasksCreated', { submitted }) : t('accounts.onboarding.importTaskCreated') })
     }, {
       onError: () => {
         if (submitted)
-          ZNotification.warning({ message: '部分导入任务已创建，保持输入不变重试可继续提交' })
+          ZNotification.warning({ message: t('accounts.onboarding.partialSubmission') })
       },
     })
   }
@@ -111,7 +112,7 @@ export function useAccountOnboarding(options: {
       const form = createForm.value
       const provider = accountCreateProvider(form)
       if (!isSupportedProvider(provider))
-        throw new Error('账号平台不受支持')
+        throw new Error(t('accounts.onboarding.accountPlatformIsNotSupported'))
       const account = reauthorizingAccount.value
       const proxyError = accountProxyError(form)
       if (proxyError)
@@ -119,7 +120,7 @@ export function useAccountOnboarding(options: {
       await authorization.start({
         start: {
           provider,
-          name: account?.name || account?.email || `${formatProviderLabel(provider)} 账号`,
+          name: account?.name || account?.email || t('accounts.onboarding.accountName', { provider: formatProviderLabel(provider) }),
           accountId: account?.id,
           outboundProxyId: account ? undefined : form.proxyMode === 'proxy' ? form.proxyId.trim() : undefined,
         },
@@ -127,7 +128,7 @@ export function useAccountOnboarding(options: {
       })
     }
     catch (cause) {
-      ZNotification.error({ message: errorMessage(cause, '启动授权失败') })
+      ZNotification.error({ message: errorMessage(cause, t('accounts.onboarding.failedToStartAuthorization')) })
     }
   }
 

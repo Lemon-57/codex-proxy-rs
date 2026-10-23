@@ -4,7 +4,9 @@ import type { Account } from '@/api'
 import { ZEmpty, ZIconButton } from '@codex-proxy/ui'
 
 import { ChartNoAxesCombined, RefreshCw, UserRound } from '@lucide/vue'
+
 import { computed, shallowRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import AccountPlanBadge from '@/components/account/AccountPlanBadge.vue'
 import { formatProviderLabel } from '@/utils/providers'
 import { groupedAccountQuotaWindows, orderedPanelQuotaWindows } from '../../constants'
@@ -23,6 +25,8 @@ const emit = defineEmits<{
   refreshQuota: [accountId: string]
   quotaReset: [accountId: string]
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
 
 const quotaEntries = computed(() => groupedAccountQuotaWindows(
   orderedPanelQuotaWindows(props.account.quota.windows),
@@ -43,25 +47,25 @@ watch(hasPersonalInfo, (available) => {
     <div class="mb-3 flex shrink-0 items-start justify-between gap-3">
       <div class="min-w-0">
         <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
-          账号额度
+          {{ t('accounts.quota.accountLimit') }}
         </h3>
         <p
           v-if="account.capabilities.quota || quotaEntries.length > 0"
           class="m-0 mt-1 flex min-w-0 items-center gap-1.5 text-cp-xs font-emphasis text-cp-text-secondary"
         >
-          <span>{{ account.provider === 'openai' ? 'Codex' : formatProviderLabel(account.provider) }} 额度</span>
+          <span>{{ t('accounts.quota.quota', { provider: account.provider === 'openai' ? 'Codex' : formatProviderLabel(account.provider) }) }}</span>
           <template v-if="account.planType">
             <span>·</span>
             <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
           </template>
           <span>·</span>
-          <span>最近刷新: {{ account.quota.refreshedAtDisplay }}</span>
+          <span>{{ t('accounts.quota.lastRefreshed', { refreshedAtDisplay: account.quota.refreshedAtDisplay }) }}</span>
         </p>
       </div>
       <div v-if="hasActions" class="flex shrink-0 items-center gap-0.5 [&_svg]:size-3.5 [&_svg]:stroke-2">
         <ZIconButton
           v-if="hasPersonalInfo"
-          aria-label="查看个人信息"
+          :aria-label="t('accounts.quota.viewPersonalInformation')"
           size="small"
           :pressed="profileOpen"
           @click="profileOpen = true"
@@ -75,7 +79,7 @@ watch(hasPersonalInfo, (available) => {
         />
         <ZIconButton
           v-if="hasForecast"
-          aria-label="预测周/月额度"
+          :aria-label="t('accounts.quota.forecastWeeklyMonthlyQuota')"
           size="small"
           aria-haspopup="dialog"
           :pressed="forecastOpen"
@@ -86,7 +90,7 @@ watch(hasPersonalInfo, (available) => {
         <ZIconButton
           v-if="account.capabilities.quotaRefresh"
           size="small"
-          aria-label="刷新额度"
+          :aria-label="t('accounts.quotaForecast.refreshQuota')"
           :loading="refreshing"
           :disabled="refreshing"
           @click="emit('refreshQuota', account.id)"
@@ -100,7 +104,7 @@ watch(hasPersonalInfo, (available) => {
     </div>
 
     <div v-if="!account.capabilities.quota && quotaEntries.length === 0" class="grid flex-1 place-items-center">
-      <ZEmpty title="暂不支持查询上游额度" surface="none" />
+      <ZEmpty :title="t('accounts.quota.queryUnsupported')" surface="none" />
     </div>
     <div v-else class="grid min-h-0 gap-3">
       <AccountQuotaPanelEntry
@@ -110,7 +114,7 @@ watch(hasPersonalInfo, (available) => {
         :windows="entry.windows"
       />
       <p v-if="quotaEntries.length === 0" class="m-0 text-cp-sm font-emphasis text-cp-text-secondary">
-        额度待观测
+        {{ t('accounts.quota.unobserved') }}
       </p>
     </div>
   </section>

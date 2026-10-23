@@ -43,7 +43,6 @@ impl CodexProvider {
                 endpoint_path,
                 body: image.payload().body().clone(),
                 image_turn_id,
-                turn_metadata: None,
                 session_affinity,
             },
         )
@@ -119,12 +118,6 @@ impl CodexProvider {
                 UpstreamSendState::NotSent,
             ));
         }
-        let turn_metadata = search
-            .payload()
-            .context()
-            .get("turn_metadata")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
         let session_affinity = derive_codex_endpoint_session_affinity(
             search.payload(),
             context.client_api_key_ref(),
@@ -139,7 +132,6 @@ impl CodexProvider {
                 endpoint_path: CODEX_ALPHA_SEARCH_PATH,
                 body: search.payload().body().clone(),
                 image_turn_id: None,
-                turn_metadata,
                 session_affinity,
             },
         )
@@ -256,7 +248,7 @@ impl CodexProvider {
                 .map_err(map_selection_error)?;
         }
         let lease = Arc::new(lease);
-        let passthrough_headers = match operation {
+        let payload = match &operation {
             Operation::GenerateImage(image) => {
                 let Operation::GenerateImage(original) = &request.operation else {
                     return Err(provider_error(
@@ -270,14 +262,13 @@ impl CodexProvider {
                         UpstreamSendState::NotSent,
                     ));
                 }
-                request.body = image.payload().body().clone();
                 request.image_turn_id = image
                     .payload()
                     .context()
                     .get("image_turn_id")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                crate::transport::request::decode_passthrough_headers(image.payload().context())
+                image.payload()
             }
             Operation::Search(search) => {
                 if !matches!(&request.operation, Operation::Search(_))
@@ -288,14 +279,7 @@ impl CodexProvider {
                         UpstreamSendState::NotSent,
                     ));
                 }
-                request.body = search.payload().body().clone();
-                request.turn_metadata = search
-                    .payload()
-                    .context()
-                    .get("turn_metadata")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                crate::transport::request::decode_passthrough_headers(search.payload().context())
+                search.payload()
             }
             _ => {
                 return Err(provider_error(
@@ -304,6 +288,9 @@ impl CodexProvider {
                 ));
             }
         };
+        request.body = payload.body().clone();
+        let passthrough_headers =
+            crate::transport::request::decode_passthrough_headers(payload.context());
         if !context.is_diagnostic_required_account()
             && let Some(affinity) = affinity.as_ref()
             && let Some(turn) = affinity.turn_alias()
@@ -336,11 +323,19 @@ impl CodexProvider {
             account_selection_wait_ms,
             lease.capacity_snapshot(),
         ));
-        // Standalone Provider 端点没有可证明的账号 owner；Search metadata 必须按
+        // Standalone Provider 端点没有可证明的账号 owner；Images/Search metadata 必须按
         // 跨账号输入收敛到当前 lease，不能沿用下游声明的账号或 installation identity
-        let turn_metadata = request.turn_metadata.as_deref().and_then(|metadata| {
-            crate::transport::request::scope_turn_metadata(metadata, lease.installation_id(), true)
-        });
+        let turn_metadata = payload
+            .context()
+            .get("turn_metadata")
+            .and_then(Value::as_str)
+            .and_then(|metadata| {
+                crate::transport::request::scope_turn_metadata(
+                    metadata,
+                    lease.installation_id(),
+                    true,
+                )
+            });
         let events = cold_json_response_stream(ColdJsonResponse {
             client: self
                 .client_for_request(&context)?
@@ -378,7 +373,6 @@ struct RawJsonEndpointRequest {
     endpoint_path: &'static str,
     body: Bytes,
     image_turn_id: Option<String>,
-    turn_metadata: Option<String>,
     session_affinity: Option<CodexSessionAffinity>,
 }
 
@@ -966,6 +960,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         // 同协议保留原始帧；canonical 解析只提取计费、续接和状态事实
         let websocket_transport = response.transport == CodexBackendTransport::WebSocket;
         let mut decoder = CodexCanonicalDecoder::new(upstream_model.as_str())
+            .with_trace(trace.clone())
             .with_pricing(context.pricing().get("openai").and_then(|models| models.get(upstream_model.as_str())).cloned())
             .with_reported_model(response.response_metadata.effective_model.as_deref())
             .with_requested_service_tier(request.service_tier())

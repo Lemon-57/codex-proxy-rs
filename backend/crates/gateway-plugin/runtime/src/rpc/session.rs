@@ -199,11 +199,6 @@ pub struct RpcSession {
 }
 
 impl RpcSession {
-    /// 响应合同错误只结束所属调用，不影响共享传输与其他在途调用
-    pub(crate) fn invalid_response(&self, stage: Stage) -> RpcError {
-        RpcError::InvalidResponse(stage, None)
-    }
-
     pub(crate) fn decode_response<T: serde::de::DeserializeOwned>(
         &self,
         stage: Stage,

@@ -1,9 +1,8 @@
-const integerFormatter = new Intl.NumberFormat('zh-CN')
+import { locale } from '@/i18n'
 
-const localizedCompactFormatter = new Intl.NumberFormat('zh-CN', {
-  notation: 'compact',
-  maximumFractionDigits: 1,
-})
+export function numberLocale() {
+  return locale.value === 'en' ? 'en-US' : locale.value
+}
 
 const metricUnits = [
   ['P', 1_000_000_000_000_000],
@@ -14,11 +13,14 @@ const metricUnits = [
 ] as const
 
 export function formatInteger(value: number) {
-  return integerFormatter.format(value)
+  return new Intl.NumberFormat(numberLocale()).format(value)
 }
 
 export function formatLocalizedCompactNumber(value: number) {
-  return localizedCompactFormatter.format(Number.isFinite(value) ? value : 0)
+  return new Intl.NumberFormat(numberLocale(), {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(Number.isFinite(value) ? value : 0)
 }
 
 export function formatCompactNumber(value: number) {
@@ -38,13 +40,10 @@ export function formatCompactNumber(value: number) {
   return formatInteger(normalized)
 }
 
-const percentFormatter = new Intl.NumberFormat('zh-CN', {
-  style: 'percent',
-  maximumFractionDigits: 1,
-})
-
 export function formatPercent(value?: number | null) {
-  return value == null || !Number.isFinite(value) ? '—' : percentFormatter.format(value)
+  return value == null || !Number.isFinite(value)
+    ? '—'
+    : new Intl.NumberFormat(numberLocale(), { style: 'percent', maximumFractionDigits: 1 }).format(value)
 }
 
 export function formatDuration(value?: number | null) {

@@ -3,6 +3,7 @@
 mod account_isolation;
 mod capacity;
 mod cookies;
+mod correlation;
 mod error_details;
 mod image_account_eligibility;
 mod image_model_access;
@@ -1872,7 +1873,7 @@ async fn provider_should_send_the_request_snapshot_location_to_the_upstream() {
         "model": "gpt-5.4",
         "input": [{
             "role": "user",
-            "content": [{"type": "input_text", "text": "<environment_context><timezone>UTC</timezone></environment_context>"}],
+            "content": [{"type": "input_text", "text": "<environment_context><current_date>2026-10-22</current_date><timezone>UTC</timezone></environment_context>"}],
             "internal_chat_message_metadata_passthrough": {
                 "content_item_kinds": ["environments.environment_context"],
                 "create_time": 1789293131.822
@@ -1898,7 +1899,7 @@ async fn provider_should_send_the_request_snapshot_location_to_the_upstream() {
     assert_eq!(
         body.pointer("/input/0/content/0/text"),
         Some(&json!(
-            "<environment_context><timezone>Pacific/Auckland</timezone></environment_context>"
+            "<environment_context><current_date>2026-10-22</current_date><timezone>Pacific/Auckland</timezone></environment_context>"
         ))
     );
     assert_eq!(
@@ -1924,8 +1925,8 @@ async fn provider_should_override_unclassified_time_contexts_over_websocket() {
         }).to_string().into())).await.expect("complete response");
         body
     });
-    let environment = "<environment_context><cwd>/home/example/项目</cwd><timezone>Asia/Shanghai</timezone></environment_context>";
-    let desktop = "<codex_apps_client_time_context><timezone>Asia/Shanghai</timezone></codex_apps_client_time_context>";
+    let environment = "<environment_context><cwd>/home/example/项目</cwd><current_date>2026-10-22</current_date><timezone>Asia/Shanghai</timezone></environment_context>";
+    let desktop = "<codex_apps_client_time_context><timezone>Asia/Shanghai</timezone><current_date>2026-10-21</current_date></codex_apps_client_time_context>";
     let payload = ProtocolPayload::json_object(
         "openai",
         json!({
@@ -3550,14 +3551,13 @@ async fn standalone_search_preserves_wire_and_scopes_turn_metadata_to_the_select
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
     let server = MockServer::start().await;
-    let request_body = br#"{ "id":"search-session", "model":"gpt-future", "commands":{"search_query":[{"q":"private query","future":9007199254740993}]}, "future":1, "future":2 }"#;
+    let request_body = br#"{ "id":"search-session", "future_session":"search-session", "model":"gpt-future", "commands":{"search_query":[{"q":"private query","future":9007199254740993}]}, "future":1, "future":2 }"#;
     let response_body = br#"{ "encrypted_output":"ciphertext", "output":"search result", "results":[{"type":"text_result","ref_id":"turn0search0","future":9007199254740993}] }"#;
     Mock::given(method("POST"))
         .and(path("/codex/alpha/search"))
         .and(header("originator", "codex_cli_rs"))
         .and(header("version", "0.144.0"))
         .and(header("accept", "*/*"))
-        .and(body_bytes(request_body.to_vec()))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "application/json")
@@ -3624,13 +3624,13 @@ async fn standalone_search_preserves_wire_and_scopes_turn_metadata_to_the_select
     assert_eq!(raw_response.as_deref(), Some(response_body.as_slice()));
     let requests = server.received_requests().await.expect("received requests");
     let request = requests.first().expect("single search request");
-    assert_eq!(request.body.as_slice(), request_body);
+    assert_scoped_search_body(&request.body, request_body);
     let metadata_values = captured_header_values(request, "x-codex-turn-metadata");
     assert_eq!(metadata_values.len(), 1);
     let metadata: Value = serde_json::from_slice(&metadata_values[0]).expect("turn metadata JSON");
-    assert_eq!(metadata.get("session_id"), Some(&json!("session")));
-    assert_eq!(metadata.get("thread_id"), Some(&json!("thread")));
-    assert_eq!(metadata.get("turn_id"), Some(&json!("turn")));
+    assert_scoped_id(metadata["session_id"].as_str().unwrap(), "session");
+    assert_scoped_id(metadata["thread_id"].as_str().unwrap(), "thread");
+    assert_eq!(metadata["turn_id"], "turn");
     assert_eq!(metadata.get("future"), Some(&json!(true)));
     assert!(metadata.get("account_id").is_none());
     assert_ne!(
@@ -3650,7 +3650,6 @@ async fn standalone_search_returns_the_exact_upstream_error_response() {
     let response_body = br#"{ "error":{"message":"future search validation","type":"search_error","code":"future_code"}, "future":9007199254740993 }"#;
     Mock::given(method("POST"))
         .and(path("/codex/alpha/search"))
-        .and(body_bytes(request_body.to_vec()))
         .respond_with(
             ResponseTemplate::new(422)
                 .insert_header("content-type", "application/problem+json")
@@ -4252,6 +4251,7 @@ async fn websocket_midstream_error_frame_surfaces_upstream_message_after_deliver
     create_account(&store, ACCOUNT_ID).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (release_error, error_released) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept WebSocket");
         let mut websocket = accept_codex_test_websocket(stream).await;
@@ -4283,7 +4283,9 @@ async fn websocket_midstream_error_frame_surfaces_upstream_message_after_deliver
             ))
             .await
             .expect("send response.in_progress");
-        tokio::time::sleep(Duration::from_millis(1_600)).await;
+        error_released
+            .await
+            .expect("prelude delivered to the client");
         websocket
             .send(Message::Text(
                 json!({
@@ -4312,6 +4314,16 @@ async fn websocket_midstream_error_frame_surfaces_upstream_message_after_deliver
         )
         .await
         .expect("prepare midstream-failure stream");
+    for kind in ["response.created", "response.in_progress"] {
+        let event = timeout(
+            Duration::from_secs(2),
+            precommit::next_client_event(&mut stream),
+        )
+        .await
+        .expect("upstream prelude must reach the client");
+        assert_eq!(event.wire_event().unwrap().event_type(), Some(kind));
+    }
+    release_error.send(()).unwrap();
     let mut failure = loop {
         match stream.next().await {
             Some(Ok(_)) => {}
@@ -5271,6 +5283,8 @@ async fn oversized_http_threshold_counts_utf8_and_json_escaping() {
     let requests = server.received_requests().await.unwrap();
     let mut frame = captured_request_body(&requests[0]);
     frame["type"] = json!("response.create");
+    // 发送前阈值按本地请求副本计量，账号域映射在实际出站时执行
+    frame["session_id"] = body["session_id"].clone();
     let baseline_len = serde_json::to_vec(&frame).unwrap().len();
 
     for (payload_len, expected) in [(THRESHOLD - 1, "websocket"), (THRESHOLD, "http_sse")] {
@@ -5885,7 +5899,6 @@ async fn websocket_opening_account_rejection_keeps_replay_safe_without_transport
         "before-payload rejection is replay safe"
     );
     // 回放安全的账号级拒绝必须把换号决策留给 Core，不得钉死同账号传输重试
-    // （旧行为会携带小时级 retry-after 的同账号重试标记，请求必然超时）
     assert_eq!(error.pre_delivery_retry(), None);
 }
 
@@ -6364,9 +6377,9 @@ async fn cross_account_scope_removes_only_account_bound_body_fields() {
 
     assert!(body.get("authorization").is_none());
     assert!(body.get("conversation").is_none());
-    assert_eq!(
-        body.get("conversation_id"),
-        Some(&json!("client-correlation"))
+    assert_scoped_id(
+        body["conversation_id"].as_str().unwrap(),
+        "client-correlation",
     );
     assert_eq!(
         body.get("client_metadata"),
@@ -6729,6 +6742,8 @@ async fn missing_affinity_continuation_should_require_client_replay_without_an_u
 
 #[tokio::test]
 async fn missing_affinity_full_request_should_clear_unowned_turn_state() {
+    let trace = gateway_core::diagnostics::TraceContext::new("req_unknown_turn_state");
+    let input = json!((0..520).map(|index| json!({"role":"user", "content":format!("{index}:{}", "private-transcript".repeat(60))})).collect::<Vec<_>>());
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_unknown_turn_state").await;
     let server = MockServer::start().await;
@@ -6747,7 +6762,9 @@ async fn missing_affinity_full_request_should_clear_unowned_turn_state() {
             "openai",
             Map::from_iter([
                 ("model".to_owned(), json!("gpt-5.4")),
-                ("input".to_owned(), json!("full transcript")),
+                ("input".to_owned(), input.clone()),
+                ("instructions".to_owned(), json!("private-instructions")),
+                ("tools".to_owned(), json!([{"type":"function", "name":"private_tool", "parameters":{"type":"object"}}])),
             ]),
         )
         .expect("OpenAI payload")
@@ -6761,7 +6778,21 @@ async fn missing_affinity_full_request_should_clear_unowned_turn_state() {
     let mut stream = provider_with_base_url(&store, server.uri())
         .execute(
             planned_request("openai", Operation::Generate(generation)),
-            context("req_unknown_turn_state", CancellationToken::new()),
+            AttemptContext::new(
+                RequestAttemptContext::new(
+                    ModelRequestId::new("req_unknown_turn_state").unwrap(),
+                    ClientApiKeyId::new("key_openai_contract").unwrap(),
+                )
+                .with_trace(trace.clone())
+                .with_request_location(Some(global_request_location())),
+                NonZeroU32::new(1).unwrap(),
+                SystemTime::now() + Duration::from_secs(30),
+                account_policy(),
+                AccountAttemptContext::new(BTreeSet::<ProviderAccountId>::new(), None, None)
+                    .with_account_scope(contract_account_scope()),
+                None,
+                CancellationToken::new(),
+            ),
         )
         .await
         .expect("prepare full replay stream");
@@ -6774,6 +6805,30 @@ async fn missing_affinity_full_request_should_clear_unowned_turn_state() {
         .expect("captured full replay request");
 
     assert!(captured_header_values(&requests[0], "x-codex-turn-state").is_empty());
+    assert_eq!(captured_request_body(&requests[0])["input"], input);
+    let snapshot = trace.snapshot().unwrap();
+    let events = snapshot["events"].as_array().unwrap();
+    let evidence =
+        |stage: &str| &events.iter().find(|event| event["stage"] == stage).unwrap()["data"];
+    let before = evidence("provider.request.input");
+    let outbound = evidence("provider.request.outbound");
+    assert_eq!(before["input"], outbound["input"]);
+    assert_eq!(before["input"]["omittedItems"], 8);
+    for field in ["instructions", "tools"] {
+        assert_eq!(before["fields"][field], outbound["fields"][field]);
+    }
+    let scope = evidence("provider.request.account_scope");
+    assert_eq!(scope["scope"], "unknown");
+    assert!(scope["before"]["turnState"].is_object());
+    assert!(scope["after"]["turnState"].is_null());
+    for private in [
+        "private-transcript",
+        "private-instructions",
+        "private_tool",
+        "unowned-turn-state",
+    ] {
+        assert!(!snapshot.to_string().contains(private));
+    }
 }
 
 #[tokio::test]
@@ -11214,7 +11269,11 @@ async fn api_key_default_http_uses_own_prefix_plain_json_and_only_own_authentica
         }
         assert_eq!(request.headers["x-business-extension"], "keep");
         for name in API_KEY_BUSINESS_HEADERS {
-            assert_eq!(request.headers[*name], "downstream-value", "lost {name}");
+            if matches!(*name, "session-id" | "thread-id") {
+                assert_scoped_id(request.headers[*name].to_str().unwrap(), "downstream-value");
+            } else {
+                assert_eq!(request.headers[*name], "downstream-value", "lost {name}");
+            }
         }
         for header in ["cookie", "chatgpt-account-id"] {
             assert!(!request.headers.contains_key(header), "unexpected {header}");
@@ -11443,7 +11502,14 @@ async fn api_key_websocket_uses_api_path_and_bearer_without_oauth_identity() {
                 }
                 assert_eq!(request.headers()["x-business-extension"], "keep");
                 for name in API_KEY_BUSINESS_HEADERS {
-                    assert_eq!(request.headers()[*name], "downstream-value", "lost {name}");
+                    if matches!(*name, "session-id" | "thread-id") {
+                        assert_scoped_id(
+                            request.headers()[*name].to_str().unwrap(),
+                            "downstream-value",
+                        );
+                    } else {
+                        assert_eq!(request.headers()[*name], "downstream-value", "lost {name}");
+                    }
                 }
             })
             .await;
@@ -12856,4 +12922,28 @@ async fn public_catalog_filters_each_api_account_before_union_without_gating_inf
             ["gpt-5.4", "gpt-public"]
         );
     }
+}
+
+fn assert_scoped_id(actual: &str, original: &str) {
+    assert_ne!(actual, original);
+    assert!(
+        uuid::Uuid::parse_str(actual).is_ok(),
+        "scoped ID must retain UUID format"
+    );
+}
+
+fn assert_scoped_search_body(actual: &[u8], original: &[u8]) {
+    let actual_json: Value = serde_json::from_slice(actual).unwrap();
+    let original_json: Value = serde_json::from_slice(original).unwrap();
+    let id = actual_json["id"].as_str().unwrap();
+    let original_id = original_json["id"].as_str().unwrap();
+    assert_scoped_id(id, original_id);
+    assert_eq!(
+        std::str::from_utf8(actual).unwrap(),
+        std::str::from_utf8(original).unwrap().replacen(
+            &serde_json::to_string(original_id).unwrap(),
+            &serde_json::to_string(id).unwrap(),
+            1
+        )
+    );
 }

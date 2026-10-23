@@ -323,10 +323,25 @@ pub struct TrendPointView {
     pub capacity_utilization: Option<f64>,
 }
 
+/// 趋势指标的稳定身份，展示名称由管理端本地化
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TrendMetric {
+    InputTokens,
+    OutputTokens,
+    CachedInputTokens,
+    FirstTokenP95Ms,
+    LatencyP95Ms,
+    OutputThroughputP50,
+    Errors,
+    SuccessRate,
+    Requests,
+}
+
 /// Dashboard 趋势摘要
 #[derive(Debug, Serialize)]
 pub struct TrendSummaryView {
-    pub label: String,
+    pub metric: TrendMetric,
     pub value: String,
     pub ratio: Option<String>,
 }
@@ -515,7 +530,7 @@ pub struct DashboardWireProfileView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardWireAttributeView {
-    pub label: String,
+    pub key: String,
     pub value: String,
 }
 

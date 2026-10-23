@@ -1,4 +1,4 @@
-import type { DashboardTrendResponse } from '@/api'
+import type { DashboardSummaryResponse, DashboardTrendResponse } from '@/api'
 import { useIntervalFn } from '@vueuse/core'
 import { computed, onMounted, onScopeDispose, shallowRef } from 'vue'
 
@@ -8,7 +8,8 @@ import { dashboardSnapshotView, dashboardTrendView, normalizeDashboardTrendKind 
 
 export function useDashboard() {
   const activeTrendKind = shallowRef(normalizeDashboardTrendKind('usage'))
-  const snapshot = shallowRef(dashboardSnapshotView(null))
+  const summary = shallowRef<DashboardSummaryResponse | null>(null)
+  const snapshot = computed(() => dashboardSnapshotView(summary.value))
   const trend = shallowRef<DashboardTrendResponse | null>(null)
   const trendLoading = shallowRef(false)
   const trendError = shallowRef('')
@@ -110,15 +111,15 @@ export function useDashboard() {
       trendError.value = ''
     }
     try {
-      const summary = await getDashboardSummary({ kind: trendKind, period: 'today', asOf }, { silent, signal: summaryController.signal })
+      const response = await getDashboardSummary({ kind: trendKind, period: 'today', asOf }, { silent, signal: summaryController.signal })
       if (disposed)
         return
       rangeAsOf = asOf
-      snapshot.value = dashboardSnapshotView(summary)
+      summary.value = response
       analyticsError.value = ''
-      lastRefreshedAt.value = summary.asOfDisplay
+      lastRefreshedAt.value = response.asOfDisplay
       if (isCurrentTrendRequest(requestId, trendKind)) {
-        trend.value = summary.trend
+        trend.value = response.trend
         trendError.value = ''
       }
       else {

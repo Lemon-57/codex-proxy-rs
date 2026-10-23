@@ -4,6 +4,7 @@ import type { UsageModelRecord } from './shared/presenter'
 import { CornerDownRight } from '@lucide/vue'
 
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { usageModelDisplay } from './shared/presenter'
 
 const props = defineProps<{
@@ -11,13 +12,14 @@ const props = defineProps<{
 }>()
 
 const modelDisplay = computed(() => usageModelDisplay(props.record))
+const { t } = useI18n({ useScope: 'global' })
 </script>
 
 <template>
   <div class="inline-grid max-w-full gap-1">
     <code
       class="block max-w-full truncate font-mono text-cp-sm leading-none font-heavy text-cp-text"
-      :title="`请求模型：${modelDisplay.primary}`"
+      :title="t('usage.status.requestedModel', { model: modelDisplay.primary })"
     >
       {{ modelDisplay.primary }}
     </code>

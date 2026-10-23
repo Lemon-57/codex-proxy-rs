@@ -243,63 +243,173 @@ async fn live_bootstrap_rejects_missing_planned_model_before_upstream_send() {
     assert!(upstream.received_requests().await.unwrap().is_empty());
 }
 
+fn live_protocol_headers() -> Vec<gateway_core::operation::ProviderHttpHeader> {
+    [
+        ("originator", "foreign-originator"),
+        ("User-Agent", "foreign-agent"),
+        ("authorization", "Bearer foreign"),
+        ("openai-organization", "foreign-org"),
+        ("OpenAI-Project", "foreign-project"),
+        ("ChatGPT-Account-Id", "foreign-account"),
+        ("x-openai-internal-codex-residency", "foreign-region"),
+        ("x-oai-attestation", "foreign-attestation"),
+        ("x-forwarded-for", "192.0.2.1"),
+        ("x-stainless-runtime", "node"),
+        ("traceparent", "client-trace"),
+        ("tracestate", "client-state"),
+        ("ws_request_header_traceparent", "client-ws-trace"),
+        ("x-codex-turn-state", "foreign-turn-state"),
+        ("x-codex-routing-hint", "foreign-route"),
+        ("openai-alpha", "live-test"),
+        ("voice-session-id", "voice-product-session"),
+        ("x-session-id", "realtime-api-session"),
+        ("session-id", "client-session"),
+        ("thread-id", "client-session"),
+        ("x-test-business", "first"),
+        ("x-test-business", "second"),
+        ("x-codex-turn-metadata", r#"{"session_id":"client-session","account_id":"foreign-account","installation_id":"foreign-installation","traceparent":"client-trace","future":true}"#),
+    ]
+    .into_iter()
+    .map(|(name, value)| gateway_core::operation::ProviderHttpHeader::new(name, Bytes::from_static(value.as_bytes())))
+    .collect()
+}
+
+fn assert_live_correlation(headers: &reqwest::header::HeaderMap) {
+    assert_eq!(headers["voice-session-id"], "voice-product-session");
+    assert_eq!(headers["x-session-id"], "realtime-api-session");
+    let session = headers["session-id"].to_str().unwrap();
+    assert_ne!(session, "client-session");
+    uuid::Uuid::parse_str(session).unwrap();
+    assert_eq!(headers["thread-id"], session);
+    assert_eq!(headers["openai-alpha"], "live-test");
+    assert_eq!(
+        headers
+            .get_all("x-test-business")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    for name in [
+        "openai-organization",
+        "x-oai-attestation",
+        "x-forwarded-for",
+        "x-stainless-runtime",
+        "traceparent",
+        "tracestate",
+        "ws_request_header_traceparent",
+        "x-codex-turn-state",
+        "x-codex-routing-hint",
+    ] {
+        assert!(!headers.contains_key(name), "leaked {name}");
+    }
+    let metadata: serde_json::Value =
+        serde_json::from_slice(headers["x-codex-turn-metadata"].as_bytes()).unwrap();
+    assert_eq!(metadata["session_id"], session);
+    assert_eq!(metadata["future"], true);
+    assert_ne!(metadata["installation_id"], "foreign-installation");
+    assert!(metadata.get("account_id").is_none());
+    assert!(metadata.get("traceparent").is_none());
+}
+
 #[tokio::test]
-async fn live_upstream_should_not_receive_foreign_identity() {
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, ACCOUNT).await;
+async fn live_should_scope_correlation_to_account_and_preserve_business_headers() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/codex/realtime/calls"))
         .respond_with(
             ResponseTemplate::new(201)
                 .insert_header("location", format!("/v1/live/{CALL}"))
-                .set_body_string("v=0\r\n"),
+                .set_body_raw("v=0\r\n", "application/sdp")
+                .append_header("x-test-response", "first")
+                .append_header(
+                    "x-test-response",
+                    reqwest::header::HeaderValue::from_bytes(b"\x80second").unwrap(),
+                )
+                .insert_header("set-cookie", "upstream-private=1")
+                .insert_header("openai-organization", "upstream-org")
+                .insert_header("connection", "x-upstream-hop")
+                .insert_header("x-upstream-hop", "private"),
         )
-        .expect(1)
+        .expect(4)
         .mount(&upstream)
         .await;
-    let provider = crate::admin::initialized_test_provider(store, upstream.uri()).await;
-    let names = [
-        "originator",
-        "openai-organization",
-        "openai-project",
-        "x-oai-attestation",
-    ];
-    let headers = names
-        .iter()
-        .map(|name| {
-            gateway_core::operation::ProviderHttpHeader::new(
-                *name,
-                Bytes::from_static(b"downstream-identity"),
-            )
-        })
-        .collect();
-    let mut stream = provider
-        .execute(
-            live_request_with_headers(headers),
-            context(
-                "req_live_identity",
-                gateway_core::lifecycle::CancellationToken::new(),
-            ),
-        )
-        .await
-        .unwrap();
-    while let Some(event) = stream.next().await {
-        event.unwrap();
+    // 独立账号安装身份分别发送相同客户端标识，同账号重复请求应稳定、不同账号域应隔离
+    for _ in 0..2 {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, ACCOUNT).await;
+        let provider = crate::admin::initialized_test_provider(store, upstream.uri()).await;
+        for _ in 0..2 {
+            let mut headers = live_protocol_headers();
+            headers.push(gateway_core::operation::ProviderHttpHeader::new(
+                "x-test-opaque",
+                Bytes::from_static(b"\x80request"),
+            ));
+            let mut stream = provider
+                .clone()
+                .execute(
+                    live_request_with_headers(headers),
+                    context("req_live_headers", CancellationToken::new()),
+                )
+                .await
+                .unwrap();
+            let mut response_headers = Vec::new();
+            while let Some(event) = stream.next().await {
+                let event = event.unwrap();
+                if let Some(observation) = event.response_observation() {
+                    response_headers.extend_from_slice(observation.client_headers());
+                }
+            }
+            let values = response_headers
+                .iter()
+                .filter(|header| header.name() == "x-test-response")
+                .map(|header| header.value())
+                .collect::<Vec<_>>();
+            assert_eq!(values, [b"first".as_slice(), b"\x80second".as_slice()]);
+            assert!(
+                response_headers
+                    .iter()
+                    .any(|header| header.name() == "location")
+            );
+            assert!(
+                response_headers
+                    .iter()
+                    .any(|header| header.name() == "content-type"
+                        && header.value().as_ref() == b"application/sdp")
+            );
+            assert!(response_headers.iter().all(|header| {
+                ![
+                    "set-cookie",
+                    "openai-organization",
+                    "connection",
+                    "x-upstream-hop",
+                    "content-length",
+                ]
+                .contains(&header.name())
+            }));
+        }
     }
     let requests = upstream.received_requests().await.unwrap();
-    let leaked: Vec<_> = names
-        .iter()
-        .filter(|name| {
-            requests[0]
-                .headers
-                .get(**name)
-                .is_some_and(|value| value == "downstream-identity")
-        })
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "foreign identity reached selected account upstream: {leaked:?}"
+    for request in &requests {
+        assert_live_correlation(&request.headers);
+        assert_eq!(
+            request.headers["authorization"],
+            format!("Bearer at-{ACCOUNT}")
+        );
+        assert_ne!(request.headers["originator"], "foreign-originator");
+        assert_eq!(request.headers["x-test-opaque"].as_bytes(), b"\x80request");
+    }
+    assert_eq!(
+        requests[0].headers["session-id"],
+        requests[1].headers["session-id"]
+    );
+    assert_eq!(
+        requests[2].headers["session-id"],
+        requests[3].headers["session-id"]
+    );
+    assert_ne!(
+        requests[0].headers["session-id"],
+        requests[2].headers["session-id"]
     );
 }
 
@@ -428,7 +538,7 @@ async fn verify_live_call_identity() {
     let mut stream = provider
         .clone()
         .execute(
-            live_request(),
+            live_request_with_headers(live_protocol_headers()),
             gateway_core::engine::AttemptContext::new(
                 gateway_core::engine::RequestAttemptContext::new(
                     gateway_core::engine::ModelRequestId::new("req_live_frozen_profile").unwrap(),
@@ -452,6 +562,9 @@ async fn verify_live_call_identity() {
     drop(stream);
     let creation = upstream.received_requests().await.unwrap().pop().unwrap();
     assert_live_profile(&creation.headers, &profile, &format!("Bearer at-{ACCOUNT}"));
+
+    assert_live_correlation(&creation.headers);
+    let scoped_session = creation.headers["session-id"].clone();
 
     let mut changed_profile = profile.clone();
     changed_profile.exact_user_agent = Some("changed-key-profile".to_owned());
@@ -480,6 +593,16 @@ async fn verify_live_call_identity() {
             })
             .unwrap();
         let account = store.account(ACCOUNT).unwrap();
+        let current = store
+            .load_credential(account.id(), account.revision())
+            .await
+            .unwrap();
+        let replacement_credential =
+            provider_openai::credential::CodexCredentialCodec::preserve_installation_id(
+                &replacement.credential,
+                &current.credential,
+            )
+            .unwrap();
         let outcome = store
             .compare_and_swap_credential(
                 CredentialCasUpdate::new(
@@ -491,7 +614,7 @@ async fn verify_live_call_identity() {
                         email: None,
                         plan_type: None,
                     },
-                    replacement.credential,
+                    replacement_credential,
                     true,
                     None,
                     None,
@@ -512,6 +635,7 @@ async fn verify_live_call_identity() {
             None,
         );
         let expected = profile.clone();
+        let expected_session = scoped_session.clone();
         let server = tokio::spawn(async move {
             let mut tls = accept_live_proxy(listener).await;
             if iteration < 2 {
@@ -525,7 +649,8 @@ async fn verify_live_call_identity() {
                             &expected,
                             &format!("Bearer rotated-live-{iteration}"),
                         );
-                        assert_eq!(request.headers()["openai-alpha"], "live-test");
+                        assert_live_correlation(request.headers());
+                        assert_eq!(request.headers()["session-id"], expected_session);
                     },
                 )
                 .await;
@@ -549,31 +674,14 @@ async fn verify_live_call_identity() {
                     &expected,
                     &format!("Bearer rotated-live-{iteration}"),
                 );
-                tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                assert_live_correlation(&headers);
+                assert_eq!(headers["session-id"], expected_session);
+                tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Test-Response: first\r\nX-Test-Response: \x80second\r\nSet-Cookie: private=1\r\nConnection: close\r\n\r\n")
                     .await
                     .unwrap();
             }
         });
-        let protocol_headers = vec![
-            ("Originator".to_owned(), "foreign-originator".to_owned()),
-            ("User-Agent".to_owned(), "foreign-agent".to_owned()),
-            ("OpenAI-Organization".to_owned(), "foreign-org".to_owned()),
-            ("OpenAI-Project".to_owned(), "foreign-project".to_owned()),
-            (
-                "X-Oai-Attestation".to_owned(),
-                "foreign-attestation".to_owned(),
-            ),
-            ("Authorization".to_owned(), "Bearer foreign".to_owned()),
-            (
-                "ChatGPT-Account-Id".to_owned(),
-                "foreign-account".to_owned(),
-            ),
-            (
-                "x-openai-internal-codex-residency".to_owned(),
-                "foreign-region".to_owned(),
-            ),
-            ("openai-alpha".to_owned(), "live-test".to_owned()),
-        ];
+        let protocol_headers = live_protocol_headers();
         if iteration < 2 {
             let relay = gateway
                 .open_sideband(LiveSidebandRequest {
@@ -599,6 +707,21 @@ async fn verify_live_call_identity() {
                 .await
                 .expect("hangup through current account proxy");
             assert_eq!(outcome.status, 200);
+            assert_eq!(
+                outcome
+                    .headers
+                    .iter()
+                    .filter(|header| header.name() == "x-test-response")
+                    .map(|header| header.value())
+                    .collect::<Vec<_>>(),
+                [b"first".as_slice(), b"\x80second".as_slice()]
+            );
+            assert!(
+                outcome
+                    .headers
+                    .iter()
+                    .all(|header| header.name() != "set-cookie")
+            );
         }
         server.await.unwrap();
     }

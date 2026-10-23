@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { EChartsOption } from 'echarts'
-import type { MetricCardView, MetricTone } from '../presenter'
 
+import type { MetricCardView, MetricTone } from '../presenter'
 import { ZCard, ZMotionIcon } from '@codex-proxy/ui'
+
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import AnimatedMetricValue from '@/components/AnimatedMetricValue.vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
@@ -13,6 +15,8 @@ import { metricToneIconClasses, metricToneValueClasses } from '../constants'
 const props = defineProps<{
   metric: MetricCardView
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
 
 const trendToneClasses: Record<MetricTone, string> = {
   normal: 'bg-cp-text-tertiary',
@@ -88,7 +92,7 @@ const sparklineOption = computed<EChartsOption | null>(() => {
       </strong>
       <i
         v-if="metric.trend && metric.trend.direction !== 'flat'"
-        title="较昨日"
+        :title="t('dashboard.comparedWithYesterday')"
         class="mb-1.25 block size-3"
         :class="[
           trendToneClasses[metric.trend.tone],

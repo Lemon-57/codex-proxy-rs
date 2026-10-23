@@ -144,7 +144,7 @@ async fn middleware_plugin_rejects_invalid_calls_before_business_dispatch() {
     shutdown(&mut host, task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn independent_calls_complete_concurrently() {
     let (mut host, task) = start_session(TestHandler::default()).await;
     send_call(&mut host, 1, "slow", json!("slow"), vec![1]).await;
@@ -170,7 +170,7 @@ async fn independent_calls_complete_concurrently() {
     shutdown(&mut host, task).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn completed_call_does_not_discard_a_partially_read_next_frame() {
     let next = Frame {
         message: Message::Call {

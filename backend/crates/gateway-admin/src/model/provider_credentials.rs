@@ -820,6 +820,13 @@ pub struct ProviderQuotaRequest {
     pub rolling_usage: Option<AccountUsage>,
 }
 
+/// 当前目录页已读取的账号事实；批量投影不触发上游刷新
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderQuotaReadRequest<'a> {
+    pub account: &'a AccountRecord,
+    pub rolling_usage: Option<&'a AccountUsage>,
+}
+
 /// Provider 已解析的 quota 结果及其不透明差异字段
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderQuota {

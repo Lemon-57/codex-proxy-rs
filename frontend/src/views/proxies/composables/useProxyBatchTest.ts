@@ -2,6 +2,7 @@ import type { ProxyBatchItem } from '../utils/batch'
 import type { OutboundProxyRecord, ProxyBatchResult } from '@/api'
 import type { RequestOptions } from '@/api/request'
 import { onScopeDispose, ref, shallowRef } from 'vue'
+import { t } from '@/i18n'
 import { proxyBatchFailure, proxyRequestFailure } from '../utils/batch'
 
 export type ProxyTestExecutor = (proxies: OutboundProxyRecord[], options: RequestOptions, detectLocation: boolean) => Promise<ProxyBatchResult<OutboundProxyRecord>[]>
@@ -47,7 +48,7 @@ export function useProxyBatchTest(test: ProxyTestExecutor) {
               const record = result.data
               item.record = record
               item.status = record.lastTest!.success ? 'succeeded' : 'failed'
-              item.message = record.lastTest!.message || (record.lastTest!.success ? '连接正常' : '连接失败')
+              item.message = record.lastTest!.message || (record.lastTest!.success ? t('proxies.batchTest.connectionIsNormal') : t('proxies.region.connectionFailed'))
             }
             else {
               const failure = proxyBatchFailure(result)
@@ -73,7 +74,7 @@ export function useProxyBatchTest(test: ProxyTestExecutor) {
       for (const item of items.value) {
         if (item.status === 'pending') {
           item.status = 'skipped'
-          item.message = '已停止后续测试'
+          item.message = t('proxies.batchTest.stopped')
         }
       }
       running.value = false

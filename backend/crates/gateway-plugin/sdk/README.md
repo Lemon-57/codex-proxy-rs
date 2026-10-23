@@ -1,15 +1,9 @@
 # Gateway Plugin SDK
 
 用于编写 Codex Proxy 插件的 Rust 合同与可选会话辅助。插件只依赖本包，不依赖宿主 Core、Admin、Store 或 Host。
-SDK 处于实验阶段；能力是否可用取决于宿主支持、清单声明与实际注册，
-而不只是枚举中存在该名称
+SDK 包版本为 `0.1.0`，独立于网关版本，处于实验阶段。能力是否可用取决于宿主支持、清单声明与实际注册
 
-| 版本 | 当前值 | 用途 |
-| --- | --- | --- |
-| SDK 包 | `0.1.0` | Rust 开发依赖，独立于网关版本 |
-| `manifestVersion` | `2` | 安装清单格式 |
-| `package.protocolVersion` | `5` | 宿主与插件的进程通信 |
-| `contributes.*.version` | `middleware` 为 `5`，`scheduler` 为 `3`，`upstream_adapter` 为 `4`，其余见声明 | 单项能力合同，见[扩展项声明](docs/manifest.md#扩展项简写) |
+清单、进程协议和各项能力分别版本化，当前版本与声明规则统一见[插件清单](docs/manifest.md)
 
 开发顺序：编写[清单](docs/manifest.md) → 实现[能力处理器](docs/capabilities.md) → 用 [CLI](../../../apps/plugin-cli/README.md)
 打包 → [安装、配置与启用](../../../../docs/plugins.md)。完整可运行示例位于独立仓库
@@ -51,12 +45,7 @@ use gateway_plugin_sdk::client::{read_frame, write_frame};
 默认 feature 不引入异步运行时。`io` 除帧编解码外，还提供 `PluginBuilder`、
 `PluginSession::accept/run` 和 `PluginHandler`。组合插件从作者清单建立类型化方法，SDK 自动生成
 `plugin.register`；作者不需要复制贡献项或手写方法名、阶段和敏感载荷编解码。
-会话管理握手、有界并发、父调用关联、回调、流信用、取消、排空与关闭。
-
-`SessionConfig.maximum_calls` 默认 256，限制包含下游等待和响应流在内的在途调用；`maximum_callbacks` 默认 64，
-限制普通宿主回调。`next` 使用独立回调预算，上限为 `maximum_calls`，不挤占普通回调容量。
-宿主负责执行与准入调度，等待与处理独立计时；默认预算与过载行为见[插件使用](../../../../docs/plugins.md#故障处理)。
-插件显式覆盖配置时需与宿主协调在途预算；较小的插件侧上限会提前拒绝新调用
+会话管理握手、有界并发、父调用关联、回调、流信用、取消、排空与关闭，容量与计时见[并发与期限](#并发与期限)
 
 `ResponseStream::channel` 提供有界流生产入口，`ResponseStream::pull` 按消费进度驱动生产者；`PluginCall` 的宿主客户端只代表当前父调用，
 不能把一个调用的资源误用到另一个调用。插件程序自行选择运行时和启动入口，不会启动网关。
@@ -85,6 +74,22 @@ sequenceDiagram
   end
   P-->>H: 结果或错误；流以 End 结束
 ```
+
+### 并发与期限
+
+每个宿主插件会话默认允许 64 个执行中的 RPC 调用、64 个初次排队调用和 256 个总在途上下文。
+初次排队和等待 `next` 后的恢复排队各限 30 秒，不扣插件自身默认上限 120 秒的处理预算。
+恢复等待占总在途名额，不占初次排队名额。
+等待 `next` 时释放执行名额并暂停处理预算，返回后重新取得名额，继续同一次调用；
+已返回响应头的流继续占用在途预算，不占首结果执行名额。具体组合行为见[洋葱中间件](docs/capabilities.md#洋葱中间件)
+
+插件侧 `SessionConfig.maximum_calls` 默认 256，限制包含下游等待和响应流在内的在途调用；
+`maximum_callbacks` 默认 64，限制普通宿主回调。宿主普通回调的默认上限同样为 64，
+`next` 使用总在途上限对应的独立回调预算，不挤占普通回调容量
+
+实际容量由宿主预算与 SDK 会话配置共同限制，较小的插件侧上限会提前拒绝新调用。
+达到容量或等待上限时，中间件返回过载错误；HTTP 响应为 503（`middleware_capacity_unavailable`），
+不跳过插件或重放请求。调整 SDK 会话配置需重新构建插件包，容量应结合插件耗时、正文和响应流的资源占用评估
 
 ### 帧与会话
 
@@ -117,6 +122,10 @@ SDK 帧读写器自动拆装这些字段，不拼接复制二进制正文。`Mes
 
 ## 本地验证
 
+以下命令面向宿主仓库中的 SDK 维护。独立插件的构建、安装与能力验收见[开发技能](../../../../.agents/skills/cpr-plugin-dev/SKILL.md)及所用示例
+
+### 生成服务合同
+
 设置与账号自动重置服务的 SDK 类型和操作由宿主领域类型及[操作声明](../../gateway-admin/src/public_service)生成，SDK 构建不依赖宿主源码。
 修改宿主合同后，在仓库根目录更新生成文件；Admin 合同测试会检查生成结果是否同步：
 
@@ -128,7 +137,7 @@ cargo +1.99.1 fmt --all --manifest-path backend/Cargo.toml
 
 用量服务合同由 Admin 与 SDK 分别持有，`sdk_wire_types_match_host_contracts` 检查数值、明细、聚合、查询和计价类型一致性；修改合同需同步两侧类型与 [使用说明](docs/usage-data.md)
 
-SDK 自身的验证命令：
+### 验证命令
 
 ```bash
 RUST_MIN_STACK=16777216 cargo +1.99.1 test --manifest-path backend/Cargo.toml -p gateway-plugin-sdk --no-default-features --locked

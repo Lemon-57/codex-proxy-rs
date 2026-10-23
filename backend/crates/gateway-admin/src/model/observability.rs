@@ -157,12 +157,15 @@ impl OtherRequestOutcome {
 /// 用量记录过滤条件
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct UsageFilter {
+    pub client_api_key_name: Option<String>,
+    pub provider_account_name: Option<String>,
     pub client_api_key_ref: Option<String>,
     pub request_id: Option<String>,
     pub provider_account_ref: Option<String>,
     pub operation: Option<String>,
     pub provider_kind: Option<String>,
     pub model: Option<String>,
+    pub model_contains: Option<String>,
     pub outcome: Option<RequestOutcome>,
     pub status_code: Option<u16>,
     pub transport: Option<String>,
@@ -504,6 +507,46 @@ pub struct RequestMetrics {
     pub capacity_utilization_p95_basis_points: Option<u64>,
     pub cache_eligible_request_count: u64,
     pub cache_hit_request_count: u64,
+}
+
+/// 摘要实际消费的请求计数与延迟样本，不承诺分位数或分布
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestSummaryMetrics {
+    pub request_count: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub cancelled_count: u64,
+    pub incomplete_count: u64,
+    pub caller_error_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+    pub latency_sum_ms: u64,
+    pub latency_count: u64,
+}
+
+impl From<&RequestMetrics> for RequestSummaryMetrics {
+    fn from(metrics: &RequestMetrics) -> Self {
+        Self {
+            request_count: metrics.request_count,
+            success_count: metrics.success_count,
+            failure_count: metrics.failure_count,
+            cancelled_count: metrics.cancelled_count,
+            incomplete_count: metrics.incomplete_count,
+            caller_error_count: metrics.caller_error_count,
+            input_tokens: metrics.input_tokens,
+            output_tokens: metrics.output_tokens,
+            cached_input_tokens: metrics.cached_input_tokens,
+            cache_write_input_tokens: metrics.cache_write_input_tokens,
+            reasoning_output_tokens: metrics.reasoning_output_tokens,
+            total_tokens: metrics.total_tokens,
+            latency_sum_ms: metrics.latency_sum_ms,
+            latency_count: metrics.latency_count,
+        }
+    }
 }
 
 /// 上游 attempt 聚合指标
@@ -893,10 +936,19 @@ pub struct UsageOverview {
     pub providers: Vec<ProviderObservation>,
 }
 
+/// 用量摘要所需的窄聚合事实
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSummaryObservation {
+    pub analytics: AnalyticsMetadata,
+    pub range: TimeRange,
+    pub requests: RequestSummaryMetrics,
+    pub attempts: AttemptMetrics,
+}
+
 /// 用量摘要的用例结果
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageSummary {
-    pub overview: UsageOverview,
+    pub observation: UsageSummaryObservation,
     pub average_latency_ms: Option<u64>,
 }
 
@@ -1138,10 +1190,10 @@ pub struct DashboardWireProfile {
     pub release: Option<DashboardDesktopRelease>,
 }
 
-/// Provider 画像的差异字段；展示层只显示标签和值，不解释 Provider 语义
+/// Provider 画像的差异字段，以稳定标识传递语义，名称由前端本地化
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardWireAttribute {
-    pub label: String,
+    pub key: String,
     pub value: String,
 }
 

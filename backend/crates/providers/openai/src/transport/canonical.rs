@@ -42,6 +42,7 @@ const CONTENTS_PER_OUTPUT: u32 = 1_024;
 /// 上游 wire 是客户端可见的事实来源；canonical facts 只用于观测、亲和和计费
 /// 因而未知或形状变化的 JSON event 只能放弃 canonical 投影，不能截断 wire 流
 pub struct CodexCanonicalDecoder {
+    trace: gateway_core::diagnostics::TraceContext,
     pricing: Option<gateway_core::metering::ModelPriceOverride>,
     decoder: SseEventDecoder,
     upstream_model: String,
@@ -154,6 +155,7 @@ impl CodexCanonicalDecoder {
     /// 使用路由后最终发往上游的请求模型计价，并在响应缺少模型时用于 canonical 兜底
     pub fn new(upstream_model: impl Into<String>) -> Self {
         Self {
+            trace: gateway_core::diagnostics::TraceContext::default(),
             decoder: SseEventDecoder::default(),
             upstream_model: upstream_model.into(),
             response_id: None,
@@ -176,6 +178,13 @@ impl CodexCanonicalDecoder {
             timing_signals: ResponseEventSignals::default(),
             raw_sse_passthrough: false,
         }
+    }
+
+    /// 只旁路保存已解析的终态用量，不改变 wire 或计费事件
+    #[must_use]
+    pub fn with_trace(mut self, trace: gateway_core::diagnostics::TraceContext) -> Self {
+        self.trace = trace;
+        self
     }
 
     /// 让 HTTP SSE 上游帧以原始字节随 wire event 向下游传递
@@ -358,6 +367,12 @@ impl CodexCanonicalDecoder {
         let value = match serde_json::from_str::<Value>(&event.data) {
             Ok(value) => value,
             Err(_) => {
+                super::diagnostics::evidence::record_parse_gap(
+                    &self.trace,
+                    "invalid_json",
+                    Some(event.data.as_bytes()),
+                    event.event.as_deref(),
+                );
                 let wire = match raw_sse_frame {
                     Some(RawResponseFrame::Sse(raw)) => {
                         ProtocolWireEvent::raw_sse("openai", raw).ok()
@@ -377,6 +392,12 @@ impl CodexCanonicalDecoder {
             .event
             .as_deref()
             .or_else(|| value.get("type").and_then(Value::as_str));
+        if let Some(
+            kind @ ("response.completed" | "response.incomplete" | "response.failed" | "error"),
+        ) = event_type
+        {
+            super::diagnostics::evidence::record_response_usage(&self.trace, kind, &value);
+        }
         if event_type == Some("codex.rate_limits") {
             // HTTP 传输已将此控制帧投影为本地额度事实
             // 此帧只贡献首响应观测，不能成为客户端输出
@@ -429,8 +450,17 @@ impl CodexCanonicalDecoder {
             return Err(CodexCanonicalError::Upstream(Box::new(failure)));
         }
         let mut canonical = Vec::new();
-        if let Some(event_type) = event_type {
-            let _ = self.decode_event(event_type, &value, &mut canonical);
+        if let Some(event_type) = event_type
+            && self
+                .decode_event(event_type, &value, &mut canonical)
+                .is_err()
+        {
+            super::diagnostics::evidence::record_parse_gap(
+                &self.trace,
+                "canonical_decode_failed",
+                None,
+                Some(event_type),
+            );
         }
         let Some(wire) = Self::wire_for_event(event, value, raw_sse_frame) else {
             return Ok(());

@@ -1,6 +1,7 @@
 import type { Component } from 'vue'
 import { Key, LinkAlt, Openai, Xai } from '@boxicons/vue'
 import { Fingerprint, Plug } from '@lucide/vue'
+import { t } from '@/i18n'
 
 const PROVIDER_DISPLAY_NAMES = {
   openai: 'OpenAI',
@@ -34,7 +35,7 @@ export function formatAuthenticationLabel(value?: string | null) {
   switch (normalized?.toLowerCase()) {
     case 'oauth': return 'OAuth'
     case 'api_key': return 'API Key'
-    default: return normalized ? `自定义认证 · ${normalized}` : '未知认证类型'
+    default: return normalized ? t('common.providers.customAuth', { normalized }) : t('common.providers.unknownAuth')
   }
 }
 

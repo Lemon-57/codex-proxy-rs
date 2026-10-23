@@ -1,5 +1,7 @@
 # 受管上游适配器
 
+[返回 SDK](../README.md) · [清单声明](manifest.md#扩展项简写) · [能力与回调](capabilities.md)
+
 `upstream_adapter` v4 是现有生成请求洋葱链的终端，只挂到内置 `openai` / `xai`，不替换独立图像或压缩端点。
 插件定义 Base URL、业务路径、请求编码和响应解析；宿主继续持有身份、ACL、选号、租约、凭据、代理、重试和账本。
 普通请求或响应加工使用 [middleware](capabilities.md#洋葱中间件)

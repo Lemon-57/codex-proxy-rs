@@ -1,5 +1,6 @@
 import type { AuthSession } from '@/api'
 import { createRouter, createWebHistory, START_LOCATION } from 'vue-router'
+import { t } from '@/i18n'
 
 import { useAuthStore } from '@/stores/modules/auth'
 import { routes } from './routes'
@@ -12,7 +13,7 @@ export const router = createRouter({
 function resolveRoleEntry(role: AuthSession['role']) {
   const entry = router.getRoutes().find(route => route.meta.role === role && route.meta.defaultEntry)
   if (!entry)
-    throw new Error(`未配置 ${role} 身份的默认入口`)
+    throw new Error(t('navigation.missingEntryPoint', { role }))
   return { path: entry.path }
 }
 

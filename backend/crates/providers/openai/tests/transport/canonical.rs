@@ -9,6 +9,79 @@ use provider_openai::transport::protocol::websocket::websocket_event_to_sse_fram
 use serde_json::json;
 
 #[test]
+fn diagnostic_usage_survives_large_terminal_events_without_changing_wire() {
+    for websocket in [false, true] {
+        for (cached, expected_state, expected_value) in [
+            (None, "missing", None),
+            (Some(json!(0)), "value", Some(0)),
+            (Some(json!(180_000)), "value", Some(180_000)),
+            (Some(json!("private-invalid-token-value")), "invalid", None),
+        ] {
+            let trace = gateway_core::diagnostics::TraceContext::new("req_usage_evidence");
+            let mut decoder = CodexCanonicalDecoder::new("gpt-5.4")
+                .with_trace(trace.clone())
+                .with_raw_sse_passthrough();
+            let mut value = json!({"type":"response.completed", "response":{
+                "id":"resp_evidence", "output":[{"type":"message", "id":"msg_evidence", "role":"assistant", "content":[{"type":"output_text", "text":"private-output".repeat(20_000)}]}],
+                "usage":{"input_tokens":200_000, "output_tokens":50, "input_tokens_details":{}}
+            }});
+            if let Some(cached) = cached {
+                value["response"]["usage"]["input_tokens_details"]["cached_tokens"] = cached;
+            }
+            let raw = value.to_string();
+            let frame = if websocket {
+                websocket_event_to_sse_frame(&raw).unwrap()
+            } else {
+                format!("data: {raw}\n\n")
+            };
+            let events = decoder
+                .push(frame.as_bytes())
+                .expect("large terminal event");
+            assert!(
+                events
+                    .iter()
+                    .any(|event| event.wire_event().is_some_and(|wire| wire.data() == &value))
+            );
+            let snapshot = trace.snapshot().unwrap();
+            let evidence = &snapshot["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|event| event["stage"] == "provider.response.usage")
+                .unwrap()["data"];
+            let cached = &evidence["fields"]["cachedInputTokens"][0];
+            assert_eq!(cached["state"], expected_state);
+            assert_eq!(cached["value"].as_u64(), expected_value);
+            assert_eq!(evidence["parsedUsage"]["inputTokens"], 200_000);
+            assert_eq!(
+                evidence["parsedUsage"]["cachedInputTokens"],
+                expected_value.unwrap_or(0)
+            );
+            assert!(!snapshot.to_string().contains("private-output"));
+            assert!(!snapshot.to_string().contains("private-invalid-token-value"));
+        }
+    }
+}
+
+#[test]
+fn diagnostic_parse_failure_keeps_raw_passthrough_without_persisting_plaintext() {
+    let trace = gateway_core::diagnostics::TraceContext::new("req_parse_evidence");
+    let mut decoder = CodexCanonicalDecoder::new("model")
+        .with_trace(trace.clone())
+        .with_raw_sse_passthrough();
+    let events = decoder
+        .push(b"data: private-invalid-json\n\n")
+        .expect("raw invalid event remains deliverable");
+    assert!(events.iter().any(|event| event.wire_event().is_some()));
+    let snapshot = trace.snapshot().unwrap();
+    assert_eq!(
+        snapshot["events"][0]["stage"],
+        "provider.response.parse_gap"
+    );
+    assert!(!snapshot.to_string().contains("private-invalid-json"));
+}
+
+#[test]
 fn response_model_observation_prefers_reported_headers_without_changing_wire() {
     for websocket in [false, true] {
         let mut decoder = CodexCanonicalDecoder::new("requested")

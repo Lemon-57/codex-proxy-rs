@@ -3,6 +3,8 @@ import { ZFormItem, ZTextarea } from '@codex-proxy/ui'
 
 import { computed } from 'vue'
 
+import { useI18n } from 'vue-i18n'
+
 withDefaults(defineProps<{
   label: string
   description?: string
@@ -10,9 +12,10 @@ withDefaults(defineProps<{
   disabled?: boolean
 }>(), {
   description: undefined,
-  placeholder: '每行一项',
   disabled: false,
 })
+
+const { t } = useI18n({ useScope: 'global' })
 
 const values = defineModel<string[]>({ required: true })
 const text = computed({
@@ -29,7 +32,7 @@ const text = computed({
       v-model="text"
       :rows="2"
       :disabled="disabled"
-      :placeholder="placeholder"
+      :placeholder="placeholder ?? t('plugins.onePerLine')"
       :aria-label="label"
       class="font-mono"
     />

@@ -4,6 +4,7 @@ import type { PluginArtifact, PluginInstance, PluginRelease, PluginSourceCredent
 import { isEqual } from 'es-toolkit'
 import { onScopeDispose, shallowRef, watch } from 'vue'
 import { checkPluginUpdate, getPluginUpdateSources, queryPluginRelease, verifyRemotePlugin } from '@/api'
+import { t } from '@/i18n'
 import { notifyPluginError } from '../utils/actions'
 import { currentPluginInstance } from '../utils/catalog'
 import { selectPluginReleaseAsset } from '../utils/updates'
@@ -43,7 +44,7 @@ export function usePluginUpdateCheck(credentials: Ref<PluginSourceCredential[]>)
       const options = { signal: current.signal, silent: true }
       const binding = (await getPluginUpdateSources(options)).find(value => value.pluginId === target.id)
       if (!binding || (binding.source.kind !== 'github' && binding.source.kind !== 'url'))
-        throw new Error('此来源不支持检查更新，请安装新版本')
+        throw new Error(t('plugins.updates.unsupportedSource'))
       const source = binding.source
       const history = [...target.artifacts].sort((left, right) => right.installedAt.localeCompare(left.installedAt))
       const previous = history.find((artifact: PluginArtifact) => source.kind === 'github'
@@ -78,14 +79,14 @@ export function usePluginUpdateCheck(credentials: Ref<PluginSourceCredential[]>)
       candidate.instance = currentPluginInstance(target)
       const latest = (await getPluginUpdateSources(options)).find(value => value.pluginId === target.id)
       if (!isEqual(binding, latest))
-        throw new Error('安装来源已变更，请重新检查')
+        throw new Error(t('plugins.updates.sourceChanged'))
       if (controller === current)
         result.value = candidate
     }
     catch (error) {
       if (controller === current) {
         open.value = false
-        notifyPluginError('检查更新失败', error)
+        notifyPluginError(t('plugins.updates.checkForUpdatesFailed'), error)
       }
     }
     finally {

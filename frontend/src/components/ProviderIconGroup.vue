@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+
+import { useI18n } from 'vue-i18n'
 import { authenticationIcon, formatAuthenticationLabel, formatProviderLabel, providerIcon } from '@/utils/providers'
 
 const props = withDefaults(
@@ -12,6 +14,8 @@ const props = withDefaults(
     size: 'md',
   },
 )
+
+const { t } = useI18n({ useScope: 'global' })
 
 const normalizedProvider = computed(() => (props.provider ?? '').trim().toLowerCase())
 const providerIconComponent = computed(() => normalizedProvider.value ? providerIcon(normalizedProvider.value) : undefined)
@@ -33,7 +37,7 @@ const iconClass = computed(() => {
   return props.size === 'sm' ? 'size-3' : 'size-4'
 })
 
-const providerLabel = computed(() => formatProviderLabel(props.provider, '未知平台'))
+const providerLabel = computed(() => formatProviderLabel(props.provider, t('common.providers.unknown')))
 
 const authenticationLabel = computed(() => formatAuthenticationLabel(props.authenticationKind))
 </script>

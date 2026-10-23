@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import type { PluginInstance } from '@/api'
+
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import PluginHelpPopover from './PluginHelpPopover.vue'
 
 const props = defineProps<{ instance: PluginInstance }>()
+
+const { t } = useI18n({ useScope: 'global' })
+
 const failure = computed(() => props.instance.loadError ?? props.instance.runtime.failure?.message)
-const title = computed(() => failure.value ? (props.instance.loadError ? '无法启动' : '运行失败') : props.instance.compatibilityWarning ? '兼容性提醒' : '接口待升级，当前仍兼容')
+const title = computed(() => failure.value ? (props.instance.loadError ? t('plugins.status.unableToStart') : t('plugins.status.runFailed')) : props.instance.compatibilityWarning ? t('plugins.status.compatibilityReminder') : t('plugins.status.deprecatedApi'))
 </script>
 
 <template>
@@ -28,7 +33,7 @@ const title = computed(() => failure.value ? (props.instance.loadError ? '无法
         {{ instance.compatibilityWarning }}
       </p>
       <p class="m-0">
-        可以尝试启动，运行结果仍需验证
+        {{ t('plugins.status.startupUnverified') }}
       </p>
     </template>
     <div v-for="entry in instance.apiDeprecations" :key="`${entry.capability}:${entry.version}`" class="grid gap-1">
@@ -36,20 +41,20 @@ const title = computed(() => failure.value ? (props.instance.loadError ? '无法
         {{ entry.capability }} v{{ entry.version }} → v{{ entry.replacementVersion }}
       </p>
       <p class="m-0 text-cp-warning">
-        {{ entry.remainingReleases > 0 ? `旧接口还将兼容至少 ${entry.remainingReleases} 个正式版本` : '兼容窗口已满，后续正式版本将移除旧接口转换' }}
+        {{ entry.remainingReleases > 0 ? t('plugins.status.compatibilityWindow', { remainingReleases: entry.remainingReleases }) : t('plugins.status.compatibilityEnding') }}
       </p>
       <p class="m-0">
         {{ entry.migration }}
       </p>
     </div>
     <p v-if="instance.loadError" class="m-0">
-      配置与数据保留，请安装可加载的插件版本
+      {{ t('plugins.status.unsupportedVersionHelp') }}
     </p>
     <p v-else-if="failure" class="m-0">
-      启用配置保留，可在插件详情中重新启动
+      {{ t('plugins.status.restartHelp') }}
     </p>
     <p v-else-if="instance.apiDeprecations.length" class="m-0">
-      请更新插件，或联系作者升级接口
+      {{ t('plugins.status.upgradeHelp') }}
     </p>
   </PluginHelpPopover>
 </template>

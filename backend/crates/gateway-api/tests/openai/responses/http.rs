@@ -3214,12 +3214,12 @@ async fn compressed_http_request_above_default_limit_should_reach_execution_afte
 
 #[tokio::test]
 async fn streaming_middleware_preserves_heartbeats_before_and_after_rewriting() {
+    let admin = crate::admin::AdminTestFixture::new().await.services;
     for opaque in [
         b": ping\n\n".as_slice(),
         b"id: next\nretry: 1000\n\n".as_slice(),
         b"event: vendor.future\ndata: future non-JSON payload\n\n".as_slice(),
     ] {
-        let admin = crate::admin::AdminTestFixture::new().await.services;
         let trace = Arc::new(Trace::default());
         let heartbeat = Bytes::copy_from_slice(opaque);
         let future = Bytes::from_static(

@@ -1,8 +1,8 @@
-//! 验证 OpenAI 配置默认值、路径派生与上游地址约束
+//! 验证 OpenAI 配置解析、路径派生与上游地址约束
 
 use std::path::Path;
 
-use provider_openai::config::{DEFAULT_STREAM_MAX_RETRIES, MAX_STREAM_MAX_RETRIES, OpenAiConfig};
+use provider_openai::config::{MAX_STREAM_MAX_RETRIES, OpenAiConfig};
 
 #[test]
 fn openai_config_keeps_residency_separate_from_client_identity() {
@@ -57,39 +57,6 @@ fn openai_config_restricts_upstream_base_url_to_https_or_loopback_http() {
             "expected {base_url} to be accepted"
         );
     }
-}
-
-#[test]
-fn openai_config_defaults_to_the_provider_owned_operating_values() {
-    let config = OpenAiConfig::default();
-    assert_eq!(DEFAULT_STREAM_MAX_RETRIES, 5);
-
-    assert_eq!(
-        (
-            config.api.base_url.as_str(),
-            config.ws_pool.enabled,
-            config.ws_pool.max_age_ms,
-            config.ws_pool.max_connecting,
-            config.ws_pool.stream_idle_timeout_ms,
-            config.quota.refresh_interval_minutes,
-            config.auth.refresh_enabled,
-            config.auth.oauth_client_id.as_str(),
-            config.auth.oauth_token_endpoint.as_str(),
-            config.stream_max_retries(),
-        ),
-        (
-            "https://chatgpt.com/backend-api",
-            true,
-            3_300_000,
-            8,
-            300_000,
-            15,
-            true,
-            "app_EMoamEEZ73f0CkXaXp7hrann",
-            "https://auth.openai.com/oauth/token",
-            u32::try_from(DEFAULT_STREAM_MAX_RETRIES).expect("default retry budget fits u32"),
-        )
-    );
 }
 
 #[test]

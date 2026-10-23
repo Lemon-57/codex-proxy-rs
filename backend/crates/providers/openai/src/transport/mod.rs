@@ -8,6 +8,7 @@ mod client_json;
 mod client_live;
 mod client_sse;
 pub(crate) mod connection;
+mod correlation;
 pub mod diagnostics;
 mod downstream;
 pub mod endpoints;

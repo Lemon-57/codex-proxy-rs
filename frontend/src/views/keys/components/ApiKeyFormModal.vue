@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { ApiKeyFormValue } from '../composables/useApiKeyEditor'
+
 import type { AccountGroupRef } from '@/api'
 import { ZButton, ZDialog, ZForm, ZFormItem, ZInput } from '@codex-proxy/ui'
-
 import { DollarSign, KeyRound } from '@lucide/vue'
+
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
 import ProviderRequestProfilesEditor from '@/components/client-profile/ProviderRequestProfilesEditor.vue'
 
@@ -14,13 +16,17 @@ const props = defineProps<{
   editing: boolean
   saving: boolean
 }>()
+
 const emit = defineEmits<{
   save: []
   afterLeave: []
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
+
 const open = defineModel<boolean>({ default: false })
 const form = defineModel<ApiKeyFormValue>('form', { required: true })
-const title = computed(() => props.editing ? '编辑密钥' : '创建 API Key')
+const title = computed(() => props.editing ? t('keys.actions.editKey') : t('keys.filters.createApiKey'))
 
 function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFormValue[Key]) {
   form.value = { ...form.value, [key]: value }
@@ -31,7 +37,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
   <ZDialog
     v-model="open"
     :title="title"
-    description="配置密钥信息、分组与使用限制"
+    :description="t('keys.editor.description')"
     type="info"
     width="48rem"
     :show-close="!saving" :close-on-click-modal="!saving" :close-on-press-escape="!saving"
@@ -42,20 +48,20 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
     </template>
 
     <ZForm class="grid gap-6">
-      <ZFormItem label="名称" required>
+      <ZFormItem :label="t('common.fields.name')" required>
         <ZInput
-          :model-value="form.name" aria-label="名称"
-          placeholder="例如：生产环境"
+          :model-value="form.name" :aria-label="t('common.fields.name')"
+          :placeholder="t('keys.editor.namePlaceholder')"
           :disabled="saving"
           @update:model-value="updateForm('name', $event)"
         />
       </ZFormItem>
 
       <div class="grid gap-6" :class="{ 'sm:grid-cols-2': !editing }">
-        <ZFormItem label="标签（可选）">
+        <ZFormItem :label="t('keys.editor.labelOptional')">
           <ZInput
-            :model-value="form.label" aria-label="标签（可选）"
-            placeholder="例如：后端服务"
+            :model-value="form.label" :aria-label="t('keys.editor.labelOptional')"
+            :placeholder="t('keys.editor.forExampleBackendService')"
             :disabled="saving"
             @update:model-value="updateForm('label', $event)"
           />
@@ -63,21 +69,21 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
 
         <ZFormItem
           v-if="!editing"
-          label="自定义 Key（可选）"
+          :label="t('keys.editor.customKeyOptional')"
         >
           <ZInput
             :model-value="form.customKey" type="password"
             autocomplete="new-password"
             :spellcheck="false"
-            aria-label="自定义 Key（可选）"
-            placeholder="留空自动生成"
+            :aria-label="t('keys.editor.customKeyOptional')"
+            :placeholder="t('keys.editor.keyPlaceholder')"
             :disabled="saving"
             @update:model-value="updateForm('customKey', $event)"
           />
         </ZFormItem>
       </div>
 
-      <ZFormItem label="分组">
+      <ZFormItem :label="t('groups.group')">
         <AccountGroupCheckboxGrid
           :model-value="form.groupIds" :groups="groups"
           :loading="groupLoading"
@@ -86,7 +92,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
         />
       </ZFormItem>
 
-      <ZFormItem label="上游身份">
+      <ZFormItem :label="t('keys.editor.upstreamIdentity')">
         <ProviderRequestProfilesEditor
           :model-value="form.providerRequestProfileOverrides" allow-inherit
           :active="open"
@@ -96,13 +102,13 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
       </ZFormItem>
 
       <div class="grid gap-6 sm:grid-cols-2">
-        <ZFormItem label="日限额">
+        <ZFormItem :label="t('keys.editor.dailyLimit')">
           <ZInput
             :model-value="form.dailyLimitUsd" type="number"
             min="0"
             step="any"
-            aria-label="日限额（美元）"
-            placeholder="不限制"
+            :aria-label="t('keys.editor.dailyLimitUsd')"
+            :placeholder="t('common.values.unlimited')"
             :disabled="saving"
             @update:model-value="updateForm('dailyLimitUsd', $event)"
           >
@@ -111,13 +117,13 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
             </template>
           </ZInput>
         </ZFormItem>
-        <ZFormItem label="周限额">
+        <ZFormItem :label="t('keys.editor.weeklyLimit')">
           <ZInput
             :model-value="form.weeklyLimitUsd" type="number"
             min="0"
             step="any"
-            aria-label="周限额（美元）"
-            placeholder="不限制"
+            :aria-label="t('keys.editor.weeklyLimitUsd')"
+            :placeholder="t('common.values.unlimited')"
             :disabled="saving"
             @update:model-value="updateForm('weeklyLimitUsd', $event)"
           >
@@ -129,24 +135,24 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
       </div>
 
       <div class="grid gap-6 sm:grid-cols-2">
-        <ZFormItem label="最大并发">
+        <ZFormItem :label="t('keys.editor.maximumConcurrency')">
           <ZInput
             :model-value="form.maxConcurrency" type="number"
-            aria-label="最大并发"
+            :aria-label="t('keys.editor.maximumConcurrency')"
             min="0"
             step="1"
-            placeholder="不限制"
+            :placeholder="t('common.values.unlimited')"
             :disabled="saving"
             @update:model-value="updateForm('maxConcurrency', $event)"
           />
         </ZFormItem>
-        <ZFormItem label="每分钟请求数（RPM）">
+        <ZFormItem :label="t('keys.editor.requestsPerMinuteRpm')">
           <ZInput
             :model-value="form.requestsPerMinute" type="number"
-            aria-label="每分钟请求数（RPM）"
+            :aria-label="t('keys.editor.requestsPerMinuteRpm')"
             min="0"
             step="1"
-            placeholder="不限制"
+            :placeholder="t('common.values.unlimited')"
             :disabled="saving"
             @update:model-value="updateForm('requestsPerMinute', $event)"
           />
@@ -156,7 +162,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
 
     <template #footer>
       <ZButton :disabled="saving" @click="open = false">
-        取消
+        {{ t('common.actions.cancel') }}
       </ZButton>
       <ZButton
         type="primary"
@@ -164,7 +170,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
         :disabled="!form.name.trim()"
         @click="emit('save')"
       >
-        {{ editing ? '保存更改' : '创建' }}
+        {{ editing ? t('keys.editor.saveChanges') : t('common.actions.create') }}
       </ZButton>
     </template>
   </ZDialog>

@@ -36,7 +36,9 @@ flowchart TB
   Core --> Registry[Provider Registry]
   Admin --> Registry
   Registry --> Builtin[OpenAI / xAI]
-  Registry --> Plugins[Plugin Runtime / 插件进程]
+  Core -. 请求扩展 .-> Plugins[Plugin Runtime / 插件进程]
+  Admin -. 安装与发布 .-> Plugins
+  API -. 入口与管理扩展 .-> Plugins
   Builtin --> Upstream[上游服务]
   Plugins --> Upstream
   Core --> Store[gateway-store]
@@ -89,7 +91,7 @@ Pinia 持久化、登录、路由和业务请求由各应用持有
 
 部署时区由 Host 配置拥有，组合根把不可变的 `DeploymentTimeZone` 传给各模块。
 Core 的 `time` 只提供时区与日历边界换算；Admin/Provider 拥有查询范围与调度规则，Store 绑定显式 UTC 边界并维护事务。
-API 的时间 presenter 负责页面及事件展示文本，前端消费投影，不解释时区或格式化日期。
+API 的时间 presenter 负责部署时区下的日期及事件展示文本，前端不重新解释时区或格式化绝对日期；最近使用的相对时间本地化边界见 [API 页面时间](api.md#页面时间合同)。
 持久化、协议传输、排序与 TTL 使用 UTC 时间点或持续时长，不依赖进程、浏览器及数据库会话的本地时区。
 请求位置中的时区属于 Provider 请求身份，与部署日历规则独立。配置操作见[部署时区](../deploy/README.md#部署时区)
 
@@ -225,7 +227,7 @@ flowchart LR
 
 插件以与宿主相同的 OS 身份运行，安装者承担插件安全；宿主不提供插件安全沙箱或访问域隔离。
 进程、RPC、下载、缓存与回调均有容量和期限限制；Host 提供受管资源，Runtime 负责协议、调用关联与资源生命周期。
-RPC 的调用数、队列与流窗口有界，完整载荷尚无独立的总驻留内存配额。
+RPC 的调用数、队列与流窗口有界，完整载荷没有独立的总驻留内存配额。
 下载来源、凭据与代理按目标匹配，网络操作不占用数据库事务，提交前重新校验来源与代理版本
 
 管理页面使用无同源权限的 sandbox iframe，通过固定目标的宿主桥访问已声明路由。
@@ -234,9 +236,6 @@ RPC 的调用数、队列与流窗口有界，完整载荷尚无独立的总驻�
 
 安装到使用见 [插件使用](plugins.md)，清单与能力合同见 [SDK](../backend/crates/gateway-plugin/sdk/README.md)，
 HTTP 字段见 [插件 API](api.md#12-插件管理)，更新与数据恢复见 [部署说明](../deploy/README.md#插件兼容与发行目录)
-
-组合根的 workspace architecture tests 冻结成员清单、依赖 DAG、公开模块面、源码纪律以及生产/测试模块
-镜像关系；具体行为边界由各 crate 的集成测试维护
 
 ### 3.2 Rust 模块组织约定
 
@@ -311,8 +310,8 @@ Store 将策略与设置 revision 原子持久化；编译结果随快照、计�
 每条规则跨承载副本原子提交；发送前拒绝携带 `NotSent` 和禁止重试标记。被规则改写的握手头参与 WS 池身份，防止复用旧值，
 关闭策略不进入改写管线。字段与执行限制见[隐私策略 API](api.md#隐私策略)
 
-Fast 限制由同一快照链路冻结：Client Key 所有绑定分组的开关取逻辑或；
-禁用分组仍贡献限制，无分组 Key 不限制 Fast，不按所选账号的分组重新解释。
+Fast 策略由 Core 合并 Client Key 的全部绑定分组并随同一快照链路冻结，禁用分组也参与合并；
+不按所选账号的分组重新解释。三态覆盖顺序与字段合同见[账号分组 API](api.md#6-账号分组)。
 OpenAI Provider 在独立编码请求上、生成上游头与观测前统一应用顶层档位覆盖，HTTP、WS 与重试共用。
 该策略不改变选号、会话亲和或共享原始请求；每个新 WS 请求重新取得当前策略。
 WS 路由提示属于握手，连接复用时不重发；档位变化不重建连接或打断 `previous_response_id` 续写，
@@ -336,17 +335,22 @@ Client Key 费用账本独立累计各次 attempt 的实际费用，不能因请
 | 入口 | 职责 |
 | --- | --- |
 | `api/modules/` | 页面 HTTP 合同，模块名对应 `views/` 一级目录；复杂模块在同名目录内按功能拆分，业务类型由所属模块定义 |
-| `api/request/` | 请求入口与插件链；负责会话恢复、重试、错误提示、错误归一化和原始响应解析，页面不重复解释响应信封 |
+| `api/request/` | 请求入口与插件链；负责会话恢复、重试、错误提示、错误归一化和原始／流式响应处理，页面不重复解释响应信封 |
 | `stores/modules/`、`router/`、`plugins/` | 应用级登录与界面状态、路由和初始化；服务端数据的权威仍在后端 |
 | `views/<页面>/index.vue`、`views/<页面>/components/` | 页面组合与局部交互；复杂组件按职责拆成目录入口和相邻模块 |
 | `views/<页面>/composables/` | 页面查询、轮询、表单及操作生命周期 |
 | `presenter.ts`、页面 `utils/` | 纯展示投影或该页面拥有的业务转换，不启动请求 |
 | `components/usage/`、`components/account/` | 跨页面复用的用量、健康时间线、套餐和额度窗口展示 |
 | `composables/` | 请求取消与过期结果隔离、分页、选择、异步动作、目录加载等共享机制 |
+| `i18n/` | Vue I18n 实例、三语资源和应用语言策略；从全局 Composer 派生 UI 库语言，不翻译用户数据或远端自由文本 |
 | `utils/` | 按用途分开的数据解析、数字与时长格式化、位置校验、客户端配置、插件导航及颜色工具 |
 
+JSON、原始字节与流式请求共用会话恢复和身份代际校验，身份变化后的迟到结果按取消处理。
+流式成功正文由消费方持有读取、期限与取消；交付前失败时，请求层终止底层传输
+
 概览的数据请求和刷新由 `useDashboard` 持有，`views/dashboard/presenter.ts` 生成展示模型。
-Key 创建与编辑共用 `useApiKeyEditor` 和 `ApiKeyFormModal`，创建结果与密钥使用弹窗各自管理明文生命周期。
+Key 创建与编辑共用 `useApiKeyEditor` 和 `ApiKeyFormModal`，`useApiKeyUse` 持有创建结果与使用操作的明文，
+关闭对应弹窗或页面销毁时清除。
 用量表格的列、展示投影及健康时间线规则集中在 `components/usage/shared/`，管理页面与 Key 用量页共用展示，
 各自的查询仍使用对应身份允许的 API
 
@@ -375,7 +379,7 @@ sequenceDiagram
   E-->>A: 提交响应流
   A-->>C: JSON / SSE / WebSocket
   E->>S: 幂等费用结算
-  E->>S: 异步投递观测与计量
+  E->>S: 异步投递请求观测
 ```
 
 请求开始时冻结 `RuntimeSnapshot`、Client Key 的账号范围及账号模型政策、模型映射、Codex 客户端最低版本、Provider
@@ -396,27 +400,22 @@ Client Key 鉴权完成后，API adapter 从有界请求头识别客户端，Cor
 - OpenAI 的自动恢复限于明确识别的账号、容量、`503 + error.code=server_error`、续接和传输场景；
   其他上游拒绝保留响应与重试提示，交由客户端决策。WS opening 尚未发送业务 payload 也不扩大该恢复范围，明确的 `426` 仍允许 HTTP 回退
 - `not_sent`、`sent`、`ambiguous` 是单调的上游发送边界；结果不明确时不能假定上游未收到请求
-- HTTP 明确未发送的瞬时建连失败（含 TLS 握手 EOF）共享最多 4 次 opening、30 秒的请求内预算；
-  先在原账号、HTTP 传输上退避恢复，允许换号且至少剩余两次 opening 时，本次恢复最多使用一半剩余时间，
-  留下时间和一次 opening；再次建连失败才排除原账号并以 HTTP 重选，选号不可用时回原账号使用剩余预算；
+- OpenAI HTTP 明确未发送的瞬时建连失败共享请求级 opening 预算，先在原账号、HTTP 传输上退避恢复；
+  允许换号且预算足够时，为重选保留时间和连接次数；再次建连失败才排除原账号并以 HTTP 重选，选号不可用时回原账号使用剩余预算；
   外部指定账号或换号预算不足时保留同账号恢复，账号与容量拒绝仍按各自的安全重放规则判断换号；
   证书、TLS 协议及配置错误不进入同账号建连恢复，取消和执行 deadline 优先终止等待
 - downstream commit 记录不可撤回的首次交付；不可重放事件交付后禁止换号、重试和 fallback
   HTTP 保活可先提交响应头，Core 记录该首字节时间与实际状态，但首个业务批次仍独立提交；
   SSE 注释不构成业务输出或上游已发送的证明，也不改变重放资格
-  原生 Responses HTTP/SSE 与 WebSocket 即时交付正常事件，仅 Provider 明确标记的可替换前导保留重试资格；Core 单独维护重放屏障，
-  仍检查错误分类、续接归属、发送状态、副作用及预算。中间件链不启用此前导例外
+  Core 单独维护重放屏障，仅 Provider 明确标记的可替换前导保留重试资格，仍检查错误分类、续接归属、发送状态、副作用及预算
 - API 在最终错误编码出口投影客户端恢复信号；该投影不修改 Provider 上游事实，也不改变 Core 的
   重试与提交边界。具体错误合同见 [数据面接口](api.md#3-openai-数据面与模型目录)
 - Provider 为有界同账号退避显式选择耗尽动作：允许换号，或返回客户端错误；Core 在既有安全重放边界内执行，按账号维护请求内预算
-  OpenAI 明确容量拒绝在同账号额外重试最多 3 次后允许按普通规则换号，普通 `503 + error.code=server_error` 额外重试最多 5 次，耗尽后返回最后一次上游错误，不因此换号
-  本地指数退避从 500ms 开始，允许换号策略的基准上限为 8s，不换号策略为 2s；不换号策略每次另加 `[50ms, 250ms)` 随机等待
-  有效的上游 `Retry-After` 优先于本地退避，不受本地上限截断，也不叠加随机等待；等待仍受取消和请求 deadline 约束
-  该退避消耗总路由预算，与 WS 传输恢复、OAuth 刷新及账号额度冷却分开
+  该退避消耗总路由预算，与 WS 传输恢复、OAuth 刷新及账号额度冷却分开；具体次数、退避与 `Retry-After` 规则见[容量拒绝与重试](api.md#容量拒绝与重试)
 - `RetryThenReturnError` 的终态失败按 Client Key、逻辑线程与轮次写入 Redis，后续同轮次请求命中时跳过该策略的退避重试，直接交回错误；其他恢复策略不受影响
   API 从明确的客户端推理请求提取轮次，Core 不解析协议正文；预热、压缩、内部调用和探测不参与该状态
-  标记在失败终态交付前写入并刷新 5 分钟 TTL；成功终态交付前按请求入场时读取的版本原子清理，迟到成功不能删除较新失败
-  Redis 操作最多等待 100ms，读取失败沿用原重试策略，更新失败保留原响应；TTL 到期或状态丢失后重新获得预算，不承诺精确识别客户端重试意图
+  标记在失败终态交付前写入并续期；成功终态交付前按请求入场时读取的版本原子清理，迟到成功不能删除较新失败
+  Redis 操作使用独立有界等待，读取失败沿用原重试策略，更新失败保留原响应；TTL 到期或状态丢失后重新获得预算，不承诺精确识别客户端重试意图
 - OpenAI Provider 与 WS 传输层不暂存前导等待后续事件，正常帧按顺序即时交付；
   Provider 只保留单向推进的重放边界，实际输出、终态或未知事件关闭重放窗口。
   中间件链中的正常事件同样即时交付，但不保留可替换前导的重试资格。
@@ -425,7 +424,7 @@ Client Key 鉴权完成后，API adapter 从有界请求头识别客户端，Cor
   取消、deadline、已观测外部副作用及下游交付边界
 - 换号预算从运行设置冻结到请求计划，选中账号与上一 attempt 不同时计数；首次选号、同账号重试和
   选号阶段过滤候选不消耗预算。跨 Provider 候选推进与 continuation 排除重放同样受限，预算耗尽后
-  以最后一个原始上游错误终态；总路由尝试仍最多 32 次
+  以最后一个原始上游错误终态；配置与总尝试上限见[账号亲和与换号](api.md#账号亲和与换号)
 - Provider 显式标记的终止拒绝禁止自动重试与传输回退，优先于未发送状态和安全重放证明
 - 跨 Provider 只在账号范围和能力都允许，且请求尚未到达上游或已被证明可安全重放时发生
 - 可恢复观测写入失败不能替换已经确定的客户端协议结果
@@ -434,7 +433,13 @@ Responses 按模型目录编译候选；全局模型映射是精确映射，未�
 Images 与 standalone Search 是 OpenAI Provider 自有端点：两者都不参与文本模型映射，只在 Client Key
 的账号范围确实包含 OpenAI 账号时生成单一 OpenAI 候选。Images 的图片模型由 Provider 从正文旁路
 提取，用于账号模型政策检查，并在中间件改写后复验当前租约账号；不要求图片模型进入文本目录。
-Search body 中的模型及其他字段保持原始 bytes 并由上游解释
+Search 的请求身份与正文透传规则见 [OpenAI 透传](api.md#openai-透传)
+
+WebSocket 的根执行携带不解释协议的连接控制端口，Provider 在请求写入上游后绑定原 socket。
+API 在响应期间发送控制帧，终态后还可读取原连接事件；空闲读取必须在下一轮执行前取消，
+与 Provider 正文消费共用单一有界接收通道。连接 owner 持有控制目标，复用时替换，销毁时释放；
+控制句柄使用弱引用，不延长连接生命周期，也不经过全局响应查询、新选号或独立 attempt。
+API 暂存的下一轮请求和连接泵接收队列共用容量名额，控制帧处理不取消中间件正在读取响应体的 future
 
 ## 5. Provider 与协议边界
 
@@ -450,8 +455,10 @@ API Key 默认 HTTP/SSE，可选 WS 优先；选号先验证传输资格，WS po
 OAuth 与 API Key 共用业务请求、响应和能力透传链路，差异限定在上游地址、认证、传输配置及明确的上游请求合同适配。
 OpenAI 模型目录用于发现，不因目录缺项拒绝请求；管理员配置的模型权限仍由 Core 与选号链路执行
 
-- OpenAI 是透明边界。Responses 请求保留未知字段和字段顺序；SSE、WebSocket、Images 与 standalone
-  Search 的业务正文按原始字节转发，原生续写额度恢复遵循下述 continuation 例外。
+- OpenAI 是透明边界。正文兼容、身份归一和显式请求策略之外的业务字段保留原始语义；
+  业务响应按原始字节转发，客户端错误兼容与原生续写额度恢复按明确例外处理，见 [OpenAI 透传](api.md#openai-透传)。
+  `transport/correlation` 在出站副本上统一映射账号关联标识并剥离客户端 trace，
+  内部选号、亲和、连接池与本地诊断继续读取原始身份；具体字段边界见 [API 协议](api.md#请求头与身份)
   canonical facts 从同一数据旁路提取，用于路由、恢复判断、观测和计费。
   WebSocket transport 按完整文本消息交付，wire 同时保留原文与可选解析视图；同协议出口使用原文，
   SSE 转换只发生在需要该表达的出口。插件未改写的封套继续携带原始文本，观测失败不否定交付。
@@ -470,6 +477,9 @@ OpenAI 模型目录用于发现，不因目录缺项拒绝请求；管理员配�
   会话别名只规范化请求头，不清除正文身份字段；未知业务扩展与响应诊断头不受影响，字段见
   [Responses 合同](api.md#3-openai-数据面与模型目录)。Grok 专属请求标记和已知指令开场白的兼容只在
   `downstream/grok.rs` 内判断，且仅用于 Codex/OAuth 上游；普通请求的提示词、工具及业务正文不做品牌清洗
+- Live 共用 OpenAI 的头部身份、下游环境和传输边界，业务扩展不使用固定白名单。
+  引导、sideband 与 hangup 由 Provider 在选定或加载钉住账号后统一处理出站关联标识；
+  API 保留原始入站事实，Core 只传递头值字节和通话归属，具体合同见 [Codex Live 语音通话](api.md#codex-live-语音通话)
 - xAI 是翻译边界。Provider 把 Grok wire 转换为 Responses wire；上游结构化错误的 message/code/type
   可以透出，但账号指纹会先脱敏
 - response ID 是不透明 UTF-8 bytes，不假设 UUID、固定长度或跨 Provider 可复用
@@ -640,8 +650,8 @@ KeyUsageService 从 AuthService 的服务端身份或 Core 的入口认证结果
 ObservabilityStore 的范围查询；数据面额度查询不执行推理准入或开启窗口，入口认证和适用的请求中间件仍会执行。
 API 只输出各入口所需的字段白名单，不复用管理员的宽响应。
 客户端配置通过 ClientKeyStore 显式读取当前会话绑定 Key 的明文，不进入用量响应。
-前端 `/key-usage` 独立于管理布局，不挂载管理员菜单或请求管理接口；配置弹窗和 Codex / CCSwitch
-配置生成逻辑与管理端共用，明文仅在打开弹窗时获取，关闭后清除，不持久化到浏览器
+前端 `/key-usage` 独立于管理布局，不挂载管理员菜单或请求管理接口；配置弹窗、Codex 配置及 CC Switch
+导入链接生成逻辑与管理端共用，明文仅在打开弹窗时获取，关闭后清除，不持久化到浏览器
 
 ## 6. 路由、账号范围与 continuation
 
@@ -779,11 +789,6 @@ Admin 的手动重置复用同一账本与 Key 行锁，在一个事务中清零
 - SSE 持有并发名额直到终态；WebSocket 每个 `response.create` 独立准入，空闲连接不占名额。
   Core 在每次请求开始时重新鉴权并冻结当前策略，既有连接也应用已发布的限额与授权范围变更。
   换号和内部重试复用同一名额，Key 与账号并发上限同时生效；预算拒绝或启动失败释放名额
-- Core 的根执行携带不解释协议的连接控制端口，Provider 在请求写入上游后绑定原 socket。
-  API 在响应期间发送控制帧，终态后还可读取原连接事件；空闲读取必须在下一轮执行前取消，
-  与 Provider 正文消费共用单一有界接收通道。连接 owner 持有控制目标，复用时替换，销毁时释放；
-  控制句柄使用弱引用，不延长连接生命周期，也不经过全局响应查询、新选号或独立 attempt。
-  API 暂存的下一轮请求和连接泵接收队列共用容量名额，控制帧处理不取消中间件正在读取响应体的 future
 
 完成、失败、取消和断连使用同一结算路径，在结束时以网关请求 ID 幂等累计已取得费用。
 执行会话持有结算与准入释放的同一个清理 future；协议等待被取消后，后续驱动或宿主 detached finalizer
@@ -801,9 +806,9 @@ PostgreSQL 不可用时拒绝所有新的计费请求，Redis 继续管理并发
 
 Admin 定义明细、聚合维护与纯计价合同，Provider 复用原生 Token 计价公式，Runtime 传递可信调用身份。插件负责外部格式、来源映射、去重、调整历史、目标选择和跨调用流程
 
-明细直接维护 `model_requests` 的终态记录，沿用现有统计失效触发器；计价快照在维护后清空，Key 结算账本保持独立。聚合贡献复用 `request_analytics_1h` 的 `collection`、维度、计数和费用结构，`usage_contribution` 集合保存调用方输入，其他集合仍为请求投影。该集合独立于请求投影，桶重建和版本重建保留该集合，查询在同一快照中按指定维度和归属时间合并贡献；聚合的删除由调用方管理
+明细直接维护 `model_requests` 的终态记录，通过统计失效触发器更新投影；计价快照在维护后清空，Key 结算账本保持独立。聚合贡献使用 `request_analytics_1h` 的 `usage_contribution` 集合保存调用方输入，其他集合为请求投影。桶重建和版本重建保留贡献集合，查询在同一快照中按指定维度和归属时间合并贡献；聚合的删除由调用方管理
 
-Store 在单次事务内完成有限批量读写和普通审计，复用观测连接与执行预算，不增加数据库表或字段。原生统计结果仍遵守现有数值类型，越界返回错误，不自动修正插件数据。调用合同与时间归属见 [SDK 用量维护与计价](../backend/crates/gateway-plugin/sdk/docs/usage-data.md)
+Store 在单次事务内完成有限批量读写和普通审计，复用观测连接与执行预算。原生统计结果遵守各自数值类型，越界返回错误，不自动修正插件数据。调用合同与时间归属见 [SDK 用量维护与计价](../backend/crates/gateway-plugin/sdk/docs/usage-data.md)
 
 ### 模型价格与费用快照
 
@@ -838,6 +843,10 @@ HTTP validation
 `config_revision` 并写入脱敏审计。账号、分组等响应中的 `configRevision` 表示已提交配置，
 不构成所有写入的统一前置条件。运行设置整体替换必须携带读取版本，Store 在同一事务比较后才提交，
 防止覆盖并发修改；插件、代理等资源使用各自的 `revision` / `expectedRevision`，不能与全局版本混用
+
+账号组的展示投影与配置提交结果分离；提交后的展示查询失败不阻止已提交版本发布，响应可不附带展示记录
+
+人工备份创建与删除不推进配置 revision，Store 在同一事务提交任务状态与审计，Worker 只接手已提交任务
 
 运行设置的共同管理值由 Admin 定义，读取结果与替换命令显式组合这些值，各自持有版本和 Provider 画像的读写语义。
 Core 只持有请求所需设置与策略约束；Store 负责 SQL 解码、密钥隔离和事务，API 负责 wire 类型与展示。
@@ -875,8 +884,7 @@ PostgreSQL 周期对账才是正确性基础
 
 容量冻结与上游限流共用冷却投影，探测恢复与持久化并发调整由 Admin 负责，详见[Worker 与账号冻结](#worker-与账号冻结)
 
-PostgreSQL schema 由迁移目录按编号管理。已应用迁移按字节冻结，后续 schema 变化只能新增编号迁移，
-详见 [迁移规则](../backend/migrations/README.md)
+PostgreSQL schema 由迁移目录按编号管理；冻结、升级与校验规则统一维护在[迁移文档](../backend/migrations/README.md)
 
 ## 9. Credential、额度与主动重置
 
@@ -1000,7 +1008,11 @@ observation、调用 metadata；最终失败的关联头不与 opening 身份混
 但在首次合法冷流建立前发生的无可用账号、准备失败、超时或取消，复用同一请求表补写失败终态与
 诊断快照；没有实际 attempt 时计数为零，账号与传输保持空值。Provider 的准备过程不得发送本次请求的
 上游握手或业务载荷，也不得启动独立发送任务；已合法登记冷流后，即使没有首事件也保留真实 attempt。
+这一冷流约束同样覆盖 attempt 中间件的响应读取，Core 校验元数据并登记 attempt 后才允许开始读取。
 不能因首写失败或缺少 metadata 而伪造零尝试、账号、传输或 `not_sent`
+
+Provider 流返回的错误、随附事件与重试决策由 Core 会话持有；取消单次等待只暂停该错误的处理，
+不能因等待取消而重复读取上游或重建 attempt
 
 终态观测写入由会话持有；事件等待被取消后，后续 poll 或 detached finalizer 继续同一个 future，
 保留原结果及完成时间，不重复创建请求。观测写入失败仍为 best-effort，不阻断费用结算与准入释放。
@@ -1020,7 +1032,7 @@ Provider metadata 的 `upstreamServiceTier`，不改写客户端收到的响应�
 Worker 由各 Bundle 贡献、由 Host 统一监督：
 
 - Store：过期请求恢复和 PostgreSQL/Redis 观测队列
-- Host：历史保留任务，持有每轮结束后一分钟的调度间隔、单轮行数/批数/时长预算、取消和日志；Admin 校验保留窗口，Store 执行有界批量删除
+- Host：历史保留任务，持有调度、单轮行数/批数/时长预算、取消和日志；Admin 校验[保留窗口](api.md#历史保留)，Store 执行有界批量删除
 - Core：`runtime` owner 的 RuntimeSnapshot 周期对账和 Redis change 订阅
 - Admin：S3/R2 备份 daemon，负责调度、执行、删除收敛与保留清理；
   以及账号冻结恢复 worker（容量熔断的自适应并发下调与到期探测解冻）
@@ -1085,6 +1097,10 @@ Compose 的 `stop_grace_period` 必须覆盖后台关闭预算并留出进程清
   嵌套的同名 header 不获得头部白名单权限。诊断下载保留已存 trace 事件 data 与错误原因，
   在服务端按实际凭据与认证合同重新脱敏，不因历史 `sanitized` 标记而信任旧正文。
   普通详情不传输时间线，采集或导出丢失的信息必须明确标记，接口范围见 [诊断与恢复关联](api.md#诊断与恢复关联)
+- Core 集中管理诊断事件预算、关键事实保留与阶段计数；Provider 在既有解析和状态决策边界提取安全事实，
+  协议字段提取集中在所属 Provider 的诊断模块，调用点不重复解释字段或重试规则。
+  管理用例集中归纳缺口，API 对同一份脱敏文档生成 ZIP、结构化 JSON 与文本摘要，前端只负责下载。
+  关键事实复用请求现有 trace JSON 持久化，ZIP 不另行存储；预算和字段合同见诊断接口章节
 - 真实 secret 不进入普通日志、Debug、fixture 或 audit details；明文只能通过账号导出、Key reveal、
   备份设置等明确的敏感 Admin 合同返回
 - OAuth pending flow 使用有期限、带 owner 的一次性 claim；事务成功后才消费，失败释放 claim
@@ -1094,6 +1110,7 @@ Compose 的 `stop_grace_period` 必须覆盖后台关闭预算并留出进程清
 在线更新校验 Release host、大小、SHA-256、归档路径和发行身份，并只允许同一大版本内更新。
 下载阶段不以插件合同不兼容阻止安装。重启前由 Admin 检查已安装发行与启用插件，返回绑定发行摘要和配置版本的确认快照。
 Host 在重启操作锁内重新检查，Admin 复核风险确认与配置版本，不改写插件配置；重启后 Runtime 逐实例加载并隔离失败。
+重启受理后保持排他状态与跨进程文件锁，直到旧服务释放；延迟触发关闭仅用于送达受理响应。
 更新与回滚在文件交换前后复核同一插件配置版本，失败或取消时恢复二进制、Web 与官方插件目录
 
 Host 在受理时持久化任务并转交后台执行，任务持有操作锁与终态写入责任，不依赖 HTTP 请求的生命周期。
@@ -1139,26 +1156,28 @@ PostgreSQL 备份恢复属于人工维护操作。当前没有部署级维护模
 
 ### 验证命令
 
+组合根的 workspace architecture tests 检查成员清单、依赖 DAG、公开模块面、源码纪律以及生产/测试模块镜像关系；
+具体行为边界由各 crate 集成测试维护
+
 后端验证从 `backend/Cargo.toml` 执行，仓库根目录没有 Cargo manifest：
 
 ```bash
 cargo +1.99.1 fmt --all --manifest-path backend/Cargo.toml -- --check
 RUST_MIN_STACK=16777216 cargo +1.99.1 clippy --manifest-path backend/Cargo.toml --all-targets --all-features --locked -- -D warnings
-RUST_MIN_STACK=16777216 cargo +1.99.1 test --manifest-path backend/Cargo.toml --test main --locked
+RUST_MIN_STACK=16777216 cargo +1.99.1 nextest run --manifest-path backend/Cargo.toml --test main --locked --no-tests fail
 ```
 
-线程栈设置与当前 CI 一致。PostgreSQL/Redis 集成测试需按
-[迁移文档](../backend/migrations/README.md#本地测试库) 配置专用测试库；未设置环境变量时，本地相关测试会跳过。
+测试使用 [nextest](https://nexte.st/docs/installation/pre-built-binaries/)，版本与[质量工作流](../.github/workflows/_quality.yml)一致
+各 crate 的 `main` 测试入口统一构建，用例按可用 CPU 数跨 crate 并发执行
+局部验证可追加 `-E 'package(=gateway-store) & test(/^redis::/)'` 等过滤条件；资源受限时用
+`--test-threads 4` 限制同时运行的用例数，编译并发另由 `--build-jobs` 控制
+未安装 nextest 时可使用 `cargo +1.99.1 test --manifest-path backend/Cargo.toml --test main --locked`，
+同样设置 `RUST_MIN_STACK=16777216`；该入口只在单个测试二进制内并发，跨 crate 依次运行
+
+线程栈设置与当前 CI 一致。Store 与插件 Runtime 的 PostgreSQL/Redis 集成测试需按
+[本地测试库](../backend/migrations/README.md#本地测试库) 配置专用服务；未设置环境变量时，本地相关测试会跳过。
 其他检查与界面验证按 [贡献与审查](../CONTRIBUTING.md#验证) 执行
 
-插件 Runtime 的真实子进程与持久化测试使用 `CPR_PLUGIN_TEST_DATABASE_URL` 和
-`CPR_PLUGIN_TEST_REDIS_URL` 指向专用实例；未提供插件专用变量时复用 `CPR_TEST_DATABASE_URL` 与 `CPR_TEST_REDIS_URL`。
-密码及隔离要求与上述 Store 测试一致，CI 缺少服务配置时直接失败。
-
-测试归档缓存在 Cargo 测试临时目录的 `plugin-packages-v1/`，按含 worker 摘要的清单跨进程复用；
-每项测试独立校验、解包并创建会话、子进程与 Store，缓存不承载可变运行状态
-
-独立插件包的构建、安装与功能验证说明位于 `codex-proxy-plugins` 仓库的 `examples/workbench/README.md`。
-功能测试与性能、隔离和平台实测分别记录，不相互替代
+独立插件的本地构建与验证入口见[开发指南](development.md)
 
 文档更新条件、内容归属与行文要求见[文档职责](../CONTRIBUTING.md#文档职责与更新条件)

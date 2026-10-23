@@ -2,7 +2,11 @@
 import type { BackupRecord } from '@/api'
 
 import { defineTableColumns, ZButton, ZCard, ZConfirmDialog, ZIconButton, ZPagination, ZPopover, ZTable } from '@codex-proxy/ui'
+
 import { CircleHelp, Download, Play, RefreshCw, Trash2 } from '@lucide/vue'
+
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import BackupStatusBadge from './BackupStatusBadge.vue'
 
@@ -30,21 +34,24 @@ const emit = defineEmits<{
   requestDelete: [record: BackupRecord]
   confirmDelete: []
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
+
 const deleteOpen = defineModel<boolean>('deleteOpen', { required: true })
 
-const columns = defineTableColumns<BackupRecord>([
+const columns = computed(() => (defineTableColumns<BackupRecord>([
   { key: 'id', label: 'ID', kind: 'mono', size: 'lg' },
-  { key: 'status', label: '状态', kind: 'status' },
-  { key: 'fileName', label: '文件名', kind: 'text' },
-  { key: 'sizeBytes', label: '大小', kind: 'numeric' },
-  { key: 'expiresAt', label: '过期时间', kind: 'datetime' },
-  { key: 'trigger', label: '触发方式', kind: 'status' },
-  { key: 'startedAt', label: '开始时间', kind: 'datetime' },
-  { key: 'actions', label: '操作', kind: 'actions' },
-])
+  { key: 'status', label: t('common.fields.status'), kind: 'status' },
+  { key: 'fileName', label: t('settings.backup.fileName'), kind: 'text' },
+  { key: 'sizeBytes', label: t('settings.backup.size'), kind: 'numeric' },
+  { key: 'expiresAt', label: t('settings.backup.expirationTime'), kind: 'datetime' },
+  { key: 'trigger', label: t('settings.backup.triggerMode'), kind: 'status' },
+  { key: 'startedAt', label: t('settings.backup.startTime'), kind: 'datetime' },
+  { key: 'actions', label: t('common.fields.actions'), kind: 'actions' },
+])))
 
 function triggerLabel(value: string): string {
-  return value === 'manual' ? '手动' : '计划'
+  return value === 'manual' ? t('settings.backup.manual') : t('settings.backup.plan')
 }
 
 function formatSize(value: unknown): string {
@@ -84,19 +91,19 @@ function canDelete(record: BackupRecord): boolean {
 </script>
 
 <template>
-  <ZCard description="不包含请求明细与日志">
+  <ZCard :description="t('settings.backup.exclusions')">
     <template #title>
       <span class="inline-flex items-center gap-1.5">
-        <span>备份记录</span>
+        <span>{{ t('settings.backup.backupRecords') }}</span>
         <ZPopover trigger="hover-click" placement="bottom-start">
           <template #reference="{ open }">
-            <ZIconButton aria-label="备份范围说明" :title="undefined" :aria-expanded="open" class="size-6! hover:bg-transparent! active:bg-transparent!">
+            <ZIconButton :aria-label="t('settings.backup.backupScopeDescription')" :title="undefined" :aria-expanded="open" class="size-6! hover:bg-transparent! active:bg-transparent!">
               <CircleHelp class="size-3.5" aria-hidden="true" />
             </ZIconButton>
           </template>
           <div class="max-w-72 space-y-2 px-3 py-2 text-cp-sm leading-relaxed text-cp-text-secondary">
-            <p>保留账号、Key、设置、插件及已用额度</p>
-            <p>用量保留小时汇总</p>
+            <p>{{ t('settings.backup.contents') }}</p>
+            <p>{{ t('settings.backup.usageRetentionHourSummary') }}</p>
           </div>
         </ZPopover>
       </span>
@@ -112,7 +119,7 @@ function canDelete(record: BackupRecord): boolean {
           <template #icon>
             <Play class="size-4" />
           </template>
-          {{ creating ? '创建中...' : '创建备份' }}
+          {{ creating ? t('settings.backup.creating') : t('settings.backup.createBackup') }}
         </ZButton>
         <ZButton
           :loading="refreshing"
@@ -125,7 +132,7 @@ function canDelete(record: BackupRecord): boolean {
           <template #icon>
             <RefreshCw class="size-4" />
           </template>
-          刷新
+          {{ t('common.actions.refresh') }}
         </ZButton>
       </div>
     </template>
@@ -137,7 +144,7 @@ function canDelete(record: BackupRecord): boolean {
         :data="records"
         row-key="id"
         :loading="loading"
-        empty-text="暂无备份记录"
+        :empty-text="t('settings.backup.noBackupRecordYet')"
       >
         <template #id="{ row }">
           <span class="text-cp-text-secondary" :title="row.id">{{ shortId(row.id) }}</span>
@@ -161,7 +168,7 @@ function canDelete(record: BackupRecord): boolean {
           </span>
         </template>
 
-        <template #reference="{ row }">
+        <template #trigger="{ row }">
           <span class="text-cp-text-secondary">
             {{ triggerLabel(row.triggerKind) }}
           </span>
@@ -178,14 +185,14 @@ function canDelete(record: BackupRecord): boolean {
             <ZIconButton
               :disabled="!canDownload(row)"
               :loading="Boolean(downloadStates[row.id])"
-              aria-label="下载备份"
+              :aria-label="t('settings.backup.downloadBackup')"
               @click="emit('download', row)"
             >
               <Download class="size-4" />
             </ZIconButton>
             <ZIconButton
               :disabled="!canDelete(row)"
-              aria-label="删除备份"
+              :aria-label="t('settings.backup.deleteBackup')"
               @click="emit('requestDelete', row)"
             >
               <Trash2 class="size-4" />
@@ -203,15 +210,15 @@ function canDelete(record: BackupRecord): boolean {
 
     <ZConfirmDialog
       v-model="deleteOpen"
-      title="删除备份"
-      description="将删除远端对象并移除记录，此操作不可撤销"
+      :title="t('settings.backup.deleteBackup')"
+      :description="t('settings.backup.deleteWarning')"
       destructive
-      confirm-text="确认删除"
+      :confirm-text="t('common.actions.delete')"
       :loading="deleting"
       @confirm="emit('confirmDelete')"
     >
       <p class="m-0">
-        确定要删除备份 <span class="font-emphasis">{{ deleteTarget?.id }}</span> 吗？
+        {{ t('settings.backup.deleteConfirmation') }} <span class="font-emphasis">{{ deleteTarget?.id }}</span> {{ t('settings.backup.message') }}
       </p>
     </ZConfirmDialog>
   </ZCard>

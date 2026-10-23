@@ -25,6 +25,11 @@ impl CodexBackendClient {
         image_turn_id: Option<&str>,
         context: CodexRequestContext<'_>,
     ) -> CodexClientResult<CodexBackendJsonResponse> {
+        let body = if endpoint_path == super::endpoints::CODEX_ALPHA_SEARCH_PATH {
+            super::correlation::scope_search_body(body, context.installation_id)
+        } else {
+            body
+        };
         // Provider 端点以 Codex 路径标识；API Key 在自己的 API 前缀下使用对应相对路径
         let endpoint_path = if self.protocol == super::client::OpenAiUpstreamProtocol::ResponsesApi
         {
@@ -49,6 +54,7 @@ impl CodexBackendClient {
             context.turn_metadata,
         );
         self.append_middleware_headers(&mut headers)?;
+        super::correlation::scope_headers(&mut headers, context.installation_id);
         let body = if self.privacy.is_some() {
             let mut value: serde_json::Value =
                 serde_json::from_slice(&body).map_err(CodexClientError::RequestBodyEncode)?;

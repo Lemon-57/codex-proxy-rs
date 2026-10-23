@@ -755,6 +755,13 @@ impl CodexProvider {
                 UpstreamSendState::NotSent,
             ));
         }
+        crate::transport::diagnostics::evidence::record_request(
+            &context.trace(),
+            "provider.request.input",
+            generate.protocol_payload().body(),
+            "provider_input",
+            None,
+        );
         let mut upstream = encode_generate_request(&generate, upstream_model.as_str(), None)
             .map_err(map_request_error)?;
         upstream.client_account_follow_only = crate::request_identity::follows_session_with_headers(
@@ -880,11 +887,30 @@ impl CodexProvider {
             // 当作独立新请求发送，也不能用 previous_response_id 猜测上游存储状态
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
+        let trace = context.trace();
+        let state_before = trace
+            .is_enabled()
+            .then(|| crate::transport::diagnostics::evidence::request_state(&upstream_request));
         scope_request_to_account(
             &mut upstream_request,
             lease.installation_id(),
             account_scope,
         );
+        if let Some(before) = state_before {
+            trace.record_evidence("provider.request.account_scope", serde_json::json!({
+                "scope": match account_scope {
+                    RequestAccountScope::Same => "same",
+                    RequestAccountScope::Different => "different",
+                    RequestAccountScope::Unknown => "unknown",
+                },
+                "explicitStateOwner": has_explicit_state_owner,
+                "ownerCrossAccount": state_owner_cross_account,
+                "accountSwitch": lease.account_switch(),
+                "accountStateReusable": account_scope.can_reuse_account_state(),
+                "before": before,
+                "after": crate::transport::diagnostics::evidence::request_state(&upstream_request),
+            }));
+        }
         let codex_oauth = matches!(
             lease.authentication(),
             crate::credential::CodexRuntimeAuthentication::OAuth(_)
@@ -902,11 +928,7 @@ impl CodexProvider {
             .request_location()
             .or(context.request_location())
         {
-            align_structured_location_fields(
-                upstream_request.body_mut(),
-                chrono::Utc::now(),
-                location,
-            );
+            align_structured_location_fields(upstream_request.body_mut(), location);
         }
         let requirement = transport_requirement(&upstream_request);
         let http_only = lease.transport() == crate::credential::ResponsesTransport::Http;

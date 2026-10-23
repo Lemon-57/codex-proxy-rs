@@ -97,18 +97,14 @@ impl PluginCommand {
             .await
             .map_err(rpc_failure)?;
         if reply.payload.len() > limits.maximum_buffered_body_bytes {
-            self.session.invalid_response(Stage::CommandLine);
             return Err("结果信封无效");
         }
-        let result: CommandResult = serde_json::from_slice(&reply.payload).map_err(|_| {
-            self.session.invalid_response(Stage::CommandLine);
-            "结果数据无效"
-        })?;
+        let result: CommandResult =
+            serde_json::from_slice(&reply.payload).map_err(|_| "结果数据无效")?;
         if result.stdout.len() > MAXIMUM_OUTPUT_BYTES
             || result.stderr.len() > MAXIMUM_OUTPUT_BYTES
             || result.accounts.len() > 32
         {
-            self.session.invalid_response(Stage::CommandLine);
             return Err("结果大小或账号范围无效");
         }
         if result.exit_code == 0 {

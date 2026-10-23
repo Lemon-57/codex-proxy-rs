@@ -23,16 +23,16 @@
 宿主实际开放的合同由 [plugin-host-compatibility.json](../../runtime/plugin-host-compatibility.json)
 声明，SDK 的 `Capability::contract_versions()` 只表示 SDK 能描述的行为版本，不能代替宿主支持检查
 
-| 版本字段 | 对应合同 |
-| --- | --- |
-| `manifestVersion` / `manifest_schema_versions` | 插件清单格式 |
-| `package.protocolVersion` / `protocol_versions` | 插件进程 RPC 封装，不是 OpenAI 或 xAI 的业务协议 |
-| `contributes.<capability>.version` / `capabilities[].versions` | 指定扩展能力的行为合同 |
-| 宿主声明的 `schema_version` | 宿主兼容声明自身的格式 |
+| 版本字段 | 当前值 | 对应合同 |
+| --- | --- | --- |
+| `manifestVersion` / `manifest_schema_versions` | `2` | 插件清单格式 |
+| `package.protocolVersion` / `protocol_versions` | `5` | 插件进程 RPC 封装，不是 OpenAI 或 xAI 的业务协议 |
+| `contributes.<capability>.version` / `capabilities[].versions` | 见[扩展项简写](#扩展项简写) | 指定扩展能力的行为合同 |
+| 宿主声明的 `schema_version` | `2` | 宿主兼容声明自身的格式 |
 
 `capabilities` 使用扩展能力标识；Provider、模型和账号 ID 不属于这个集合
 
-清单与宿主兼容声明的格式版本为 `2`，进程协议版本为 `4`；清单不接受 `permissions` 字段
+清单不接受 `permissions` 字段；插件按[完整信任](#完整信任)运行
 
 RPC v5 的帧布局、编码与会话生命周期见[通信边界](../README.md#通信边界)。插件使用 SDK 构建，并由 CLI 生成包含协议版本的安装包
 
@@ -49,7 +49,17 @@ RPC v5 的帧布局、编码与会话生命周期见[通信边界](../README.md#
 
 ## 扩展项简写
 
-作者声明可以省略 `id` 和固定阶段。版本字段省略时为 `1`，适用于 `model_catalog`、`command_line` 和 `maintenance`；其余能力显式声明当前版本：`middleware` 为 `5`，`scheduler` 为 `3`，`upstream_adapter` 为 `4`，认证、路由、重试、观察和管理能力为 `2`：
+作者声明可以省略 `id` 和固定阶段。版本字段省略时为 `1`，其余版本必须显式声明：
+
+| 能力 | 当前版本 |
+| --- | --- |
+| `middleware` | `5` |
+| `scheduler` | `3` |
+| `upstream_adapter` | `4` |
+| `frontend_authentication`、`model_router`、`retry_policy`、`observer`、`management` | `2` |
+| `model_catalog`、`command_line`、`maintenance` | `1` |
+
+例如，仅声明管理页面、命令行和模型请求中间件：
 
 ```json
 {

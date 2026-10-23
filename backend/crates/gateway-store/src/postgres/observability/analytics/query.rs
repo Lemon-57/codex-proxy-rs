@@ -10,8 +10,16 @@ pub(crate) struct AnalyticsSnapshot<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub(super) enum DistributionRead {
+    None,
+    // 只供窄摘要读取样本统计；不把缺少桶的状态用于百分位或持久化
+    Statistics,
+    Full,
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct ReadSelection<'a> {
-    pub(super) distributions: bool,
+    pub(super) distributions: DistributionRead,
     pub(super) costs: bool,
     pub(super) keys: Option<&'a [String]>,
     pub(super) counters: Option<&'a [&'a str]>,
@@ -157,7 +165,7 @@ impl<'a> AnalyticsSnapshot<'a> {
                 None,
                 Default::default(),
                 ReadSelection {
-                    distributions: false,
+                    distributions: DistributionRead::None,
                     costs: false,
                     keys: None,
                     counters: Some(&[
@@ -172,6 +180,62 @@ impl<'a> AnalyticsSnapshot<'a> {
             )
             .await?;
         merge_states(states.into_values())?.request_metrics()
+    }
+
+    pub async fn summary(
+        &mut self,
+        range: ObservabilityRange,
+        filter: &UsageRecordFilter,
+    ) -> StoreResult<UsageSummaryObservation> {
+        // 摘要只需要均值的样本数，不排序分位数、展开直方图或再按 Provider 聚合
+        let states = self
+            .load_selected(
+                range,
+                filter,
+                None,
+                None,
+                Default::default(),
+                ReadSelection {
+                    distributions: DistributionRead::Statistics,
+                    costs: true,
+                    keys: None,
+                    counters: Some(&[
+                        "request_count",
+                        "success_count",
+                        "failure_count",
+                        "cancelled_count",
+                        "incomplete_count",
+                        "caller_error_count",
+                        "input_tokens",
+                        "output_tokens",
+                        "cached_input_tokens",
+                        "cache_write_input_tokens",
+                        "reasoning_output_tokens",
+                        "total_tokens",
+                        "latency_ms_sum",
+                        "attempt_count",
+                        "attempt_success_count",
+                        "attempt_failure_count",
+                        "attempt_cancelled_count",
+                        "attempt_incomplete_count",
+                        "rate_limited_count",
+                        "auth_failure_count",
+                        "provider_5xx_count",
+                        "provider_reported_count",
+                        "calculated_count",
+                        "unavailable_count",
+                    ]),
+                    distribution_names: Some(&["latency_ms"]),
+                },
+            )
+            .await?;
+        let state = merge_states(states.into_values())?;
+        Ok(UsageSummaryObservation {
+            analytics: self.metadata(),
+            range,
+            requests: state.request_summary_metrics(),
+            attempts: state.attempts()?,
+        })
     }
 
     pub async fn overview(
@@ -201,7 +265,7 @@ impl<'a> AnalyticsSnapshot<'a> {
                 None,
                 Default::default(),
                 ReadSelection {
-                    distributions: false,
+                    distributions: DistributionRead::None,
                     costs: false,
                     keys: None,
                     counters: Some(&[
@@ -254,7 +318,7 @@ impl<'a> AnalyticsSnapshot<'a> {
                 Some(granularity),
                 timezone,
                 ReadSelection {
-                    distributions: true,
+                    distributions: DistributionRead::Full,
                     costs: include_costs,
                     keys: None,
                     counters: None,
@@ -335,7 +399,7 @@ impl<'a> AnalyticsSnapshot<'a> {
                 None,
                 Default::default(),
                 ReadSelection {
-                    distributions: true,
+                    distributions: DistributionRead::Full,
                     costs: true,
                     keys: selected_keys,
                     counters: Some(&[
@@ -631,7 +695,11 @@ impl<'a> AnalyticsSnapshot<'a> {
             granularity,
             timezone,
             ReadSelection {
-                distributions: read_distributions,
+                distributions: if read_distributions {
+                    DistributionRead::Full
+                } else {
+                    DistributionRead::None
+                },
                 costs: true,
                 keys: None,
                 counters: None,
@@ -679,12 +747,13 @@ impl<'a> AnalyticsSnapshot<'a> {
         selection: ReadSelection<'_>,
     ) -> StoreResult<BTreeMap<(DateTime<Utc>, String), MetricState>> {
         let ReadSelection {
-            distributions: read_distributions,
+            distributions,
             costs: read_costs,
             keys: selected_keys,
             counters,
             distribution_names,
         } = selection;
+        let read_distributions = !matches!(distributions, DistributionRead::None);
         filter.validate()?;
         self.require_visible(Some(range))?;
         let selected = collection_for(filter, dimension);
@@ -735,12 +804,12 @@ impl<'a> AnalyticsSnapshot<'a> {
                 } else {
                     "'{}'::jsonb as costs"
                 };
-                let distributions = if read_distributions {
+                let distribution_sql = if read_distributions {
                     "distributions"
                 } else {
                     "'{}'::jsonb as distributions"
                 };
-                query.push(format!(" as output_bucket,{name} as name,counts,{costs},{distributions},last_used_at from {table} a where collection="))
+                query.push(format!(" as output_bucket,{name} as name,counts,{costs},{distribution_sql},last_used_at from {table} a where collection="))
                     .push_bind(collection).push(" and schema_version=").push_bind(SCHEMA_VERSION)
                     .push(" and histogram_version=").push_bind(HISTOGRAM_VERSION);
                 push_summary_buckets(&mut query, &buckets, seconds);
@@ -764,7 +833,7 @@ impl<'a> AnalyticsSnapshot<'a> {
                 query.push(")");
                 aggregate::push_summary_aggregation(
                     &mut query,
-                    read_distributions,
+                    distributions,
                     read_costs,
                     counters,
                     distribution_names,
@@ -857,7 +926,7 @@ impl<'a> AnalyticsSnapshot<'a> {
             &mut query,
             exact,
             read_costs,
-            read_distributions,
+            distributions,
             counters,
             distribution_names,
         );
@@ -868,7 +937,10 @@ impl<'a> AnalyticsSnapshot<'a> {
             .map_err(|error| postgres_unavailable("aggregate analytics facts", error))?
         {
             let key = (get(&row, "bucket_start")?, get(&row, "name")?);
-            let state = MetricState::decode_aggregate(&row, exact)?;
+            let state = MetricState::decode_aggregate(
+                &row,
+                exact && matches!(distributions, DistributionRead::Full),
+            )?;
             if exact {
                 result.insert(key, state);
             } else {
@@ -953,6 +1025,9 @@ pub(super) fn collection_for(
         || filter.response_id.is_some()
         || filter.upstream_request_id.is_some()
         || filter.search.is_some()
+        || filter.model_contains.is_some()
+        || filter.client_api_key_name.is_some()
+        || filter.provider_account_name.is_some()
     {
         return None;
     }
@@ -1004,10 +1079,17 @@ pub(crate) fn push_analytics_filter(
 ) {
     let mut typed = filter.clone();
     typed.search = None;
+    typed.client_api_key_name = None;
+    typed.provider_account_name = None;
     push_usage_filter(query, &typed, alias);
-    if filter.search.is_some() {
+    if filter.search.is_some()
+        || filter.client_api_key_name.is_some()
+        || filter.provider_account_name.is_some()
+    {
         query.push(format!(" and exists(select 1 from model_request_observations searched where searched.id={alias}.id"));
         let text = UsageRecordFilter {
+            client_api_key_name: filter.client_api_key_name.clone(),
+            provider_account_name: filter.provider_account_name.clone(),
             search: filter.search.clone(),
             ..Default::default()
         };

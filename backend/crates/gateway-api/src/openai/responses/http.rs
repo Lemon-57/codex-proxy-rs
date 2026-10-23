@@ -321,24 +321,36 @@ impl AuthorizedResponseBody {
 impl MiddlewareBody for AuthorizedResponseBody {
     fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<MiddlewareFrame>, MiddlewareError>> {
         Box::pin(async move {
-            loop {
-                let elapsed = self.last_authorized_at.elapsed();
-                if elapsed >= AUTHORIZATION_RECHECK_INTERVAL {
-                    if let Err(error) = self.authorization.authorize().await {
-                        return Err(self.revoke(error).await);
-                    }
-                    self.last_authorized_at = Instant::now();
-                    continue;
+            if self.last_authorized_at.elapsed() >= AUTHORIZATION_RECHECK_INTERVAL {
+                if let Err(error) = self.authorization.authorize().await {
+                    return Err(self.revoke(error).await);
                 }
+                self.last_authorized_at = Instant::now();
+            }
+            let error = {
                 let Some(inner) = self.inner.as_mut() else {
                     return Ok(None);
                 };
-                let wait = AUTHORIZATION_RECHECK_INTERVAL - elapsed;
-                tokio::select! {
-                    frame = inner.next_frame() => return frame,
-                    () = tokio::time::sleep(wait) => {}
+                // 复核身份只暂停同一次读取，不能丢弃已经消费上游事件的 future
+                let frame = inner.next_frame();
+                tokio::pin!(frame);
+                loop {
+                    let elapsed = self.last_authorized_at.elapsed();
+                    if elapsed >= AUTHORIZATION_RECHECK_INTERVAL {
+                        if let Err(error) = self.authorization.authorize().await {
+                            break error;
+                        }
+                        self.last_authorized_at = Instant::now();
+                        continue;
+                    }
+                    let wait = AUTHORIZATION_RECHECK_INTERVAL - elapsed;
+                    tokio::select! {
+                        result = &mut frame => return result,
+                        () = tokio::time::sleep(wait) => {}
+                    }
                 }
-            }
+            };
+            Err(self.revoke(error).await)
         })
     }
 

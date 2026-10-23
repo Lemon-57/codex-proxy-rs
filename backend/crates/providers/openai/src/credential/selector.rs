@@ -49,6 +49,7 @@ const CLOUDFLARE_PATH_BLOCK_THRESHOLD: u32 = 3;
 const SESSION_AFFINITY_TIMEOUT: Duration = Duration::from_millis(100);
 const CYBER_POLICY_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
 const MAX_ACCOUNT_SNAPSHOT_RETRIES: u32 = 3;
+const COOLDOWN_READ_CONCURRENCY: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexAccountFailure {
@@ -671,9 +672,16 @@ impl CodexCredentialSelector {
             }
             let mut rate_limits = HashMap::with_capacity(accounts.len());
             if !diagnostic {
-                for account in &accounts {
-                    let until = self.quota.cooldown(account.id()).await.unwrap_or(None);
-                    rate_limits.insert(account.id().clone(), until);
+                // 同一批候选并发读取实时冷却，避免逐账号累加 Redis 往返
+                // 分批限制在途读取，取消选号时直接释放本批 future，不启动后续批次
+                for batch in accounts.chunks(COOLDOWN_READ_CONCURRENCY) {
+                    rate_limits.extend(
+                        futures::future::join_all(batch.iter().map(|account| async {
+                            let until = self.quota.cooldown(account.id()).await.unwrap_or(None);
+                            (account.id().clone(), until)
+                        }))
+                        .await,
+                    );
                 }
             }
             let account_ids = accounts

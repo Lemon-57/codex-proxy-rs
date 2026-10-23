@@ -2115,11 +2115,23 @@ async fn accounts_list_should_degrade_quota_failure_to_empty_window_without_drop
         provider_data: None,
     });
     let failing = FakeProviderAdmin::new("xai", events.clone());
+    let mut xai_quota = failing.quota.lock().expect("provider quota").clone();
+    xai_quota.observed_at = Some(Utc::now());
+    failing.set_quota(xai_quota);
     failing.fail_next_quota(ProviderAdminErrorKind::Invalid);
     let store = FakeAccountStore::new("openai", events.clone());
     let mut xai_account = account_record("xai");
     xai_account.id = "acct_bad_xai".to_owned();
-    store.set_accounts(vec![account_record("openai"), xai_account]);
+    let mut healthy_xai = xai_account.clone();
+    healthy_xai.id = "acct_healthy_xai".to_owned();
+    let mut second_openai = account_record("openai");
+    second_openai.id = "acct_second_openai".to_owned();
+    store.set_accounts(vec![
+        account_record("openai"),
+        xai_account,
+        second_openai,
+        healthy_xai,
+    ]);
     let services = super::AdminHarness::new()
         .accounts(store.clone())
         .settings(Arc::new(StaticSettingsStore::default()))
@@ -2145,7 +2157,18 @@ async fn accounts_list_should_degrade_quota_failure_to_empty_window_without_drop
         .await
         .expect("one failing quota must not fail the directory page");
 
-    assert_eq!(page.items.len(), 2);
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.account.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "acct_test",
+            "acct_bad_xai",
+            "acct_second_openai",
+            "acct_healthy_xai"
+        ]
+    );
     let by_id = page
         .items
         .iter()
@@ -2158,7 +2181,9 @@ async fn accounts_list_should_degrade_quota_failure_to_empty_window_without_drop
     assert!(degraded.quota.windows.is_empty());
     assert!(degraded.quota.observed_at.is_none());
     assert!(degraded.quota.provider_data.is_none());
-    assert_eq!(page.summary.total, 2);
+    assert!(by_id["acct_healthy_xai"].quota.observed_at.is_some());
+    assert_eq!(by_id["acct_second_openai"].quota.windows.len(), 1);
+    assert_eq!(page.summary.total, 4);
 }
 
 #[tokio::test]

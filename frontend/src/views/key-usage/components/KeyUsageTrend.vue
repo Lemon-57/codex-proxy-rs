@@ -1,30 +1,37 @@
 <script setup lang="ts">
 import type { EChartsOption, LineSeriesOption } from 'echarts'
+
 import type { KeyUsageTrendPoint } from '@/api/modules/key-usage'
 import { ZCard, ZEmpty } from '@codex-proxy/ui'
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import { chartTooltipStyle } from '@/components/charts/tooltip'
 import { useChartPalette } from '@/composables/useChartPalette'
+
 import { formatCompactNumber, formatInteger } from '@/utils/format'
 import { money } from '../utils/format'
 import { keyUsageTokenMetrics, keyUsageTokenValue } from '../utils/metrics'
 
 const props = defineProps<{ points: KeyUsageTrendPoint[] }>()
+
+const { t } = useI18n({ useScope: 'global' })
+
 const { color, palette } = useChartPalette()
 const option = computed<EChartsOption>(() => {
   const colors = palette.value
-  const lines: Array<{ name: string, color: string, data: Array<number | null>, cost?: boolean }> = [
-    ...keyUsageTokenMetrics.map(metric => ({
+  const lines: Array<{ key: typeof keyUsageTokenMetrics.value[number]['key'] | 'costUsd', name: string, color: string, data: Array<number | null>, cost?: boolean }> = [
+    ...keyUsageTokenMetrics.value.map(metric => ({
+      key: metric.key,
       name: metric.label,
       color: color(metric.colorToken, metric.fallback),
       data: props.points.map(point => keyUsageTokenValue(point, metric.key)),
     })),
-    { name: '成本', color: colors.danger, data: props.points.map(point => point.costUsd === null ? null : Number(point.costUsd)), cost: true },
+    { key: 'costUsd', name: t('usage.trends.cost'), color: colors.danger, data: props.points.map(point => point.costUsd === null ? null : Number(point.costUsd)), cost: true },
   ]
   return {
     animation: false,
-    textStyle: { fontFamily: 'Inter Variable, Inter, sans-serif' },
+    textStyle: { fontFamily: color('--font-sans', 'sans-serif') },
     grid: { left: 8, right: 12, top: 48, bottom: 0, containLabel: true },
     tooltip: {
       trigger: 'axis',
@@ -48,6 +55,7 @@ const option = computed<EChartsOption>(() => {
       { type: 'value', min: 0, axisLabel: { color: colors.textMuted, fontSize: 10, formatter: (value: number) => money(value) }, splitLine: { show: false } },
     ],
     series: lines.map((line): LineSeriesOption => ({
+      id: line.key,
       name: line.name,
       type: 'line',
       data: line.data,
@@ -58,7 +66,7 @@ const option = computed<EChartsOption>(() => {
       symbolSize: 5,
       lineStyle: { color: line.color, width: 2, type: line.cost ? 'dashed' : 'solid' },
       itemStyle: { color: line.color },
-      areaStyle: line.name === '缓存命中' ? { color: line.color, opacity: 0.1 } : undefined,
+      areaStyle: line.key === 'cachedInputTokens' ? { color: line.color, opacity: 0.1 } : undefined,
       tooltip: { valueFormatter: value => typeof value === 'number' ? (line.cost ? money(value) : formatInteger(value)) : '—' },
     })),
   }
@@ -66,11 +74,11 @@ const option = computed<EChartsOption>(() => {
 </script>
 
 <template>
-  <ZCard title="使用趋势" description="用量随时间的变化">
+  <ZCard :title="t('usage.page.usageTrends')" :description="t('usage.page.changesInUsageOverTime')">
     <BaseChart v-if="points.some(point => point.requests > 0)" :option="option" :height="285" />
     <ZEmpty
       v-else
-      title="所选时间内暂无请求"
+      :title="t('usage.trends.empty')"
       surface="none"
       class="h-71 place-content-center"
     />

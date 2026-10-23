@@ -30,7 +30,7 @@ use crate::model::{
         DashboardObservation, DashboardQuery, DiagnosticDimension, DiagnosticsObservation,
         Granularity, OpsErrorPage, OpsErrorQuery, RequestMetricPoint, TimeRange,
         UsageBillingProjection, UsageCalculatedBillingFact, UsageDetail, UsageFilter,
-        UsageInsightsObservation, UsageOverview, UsagePage, UsageQuery,
+        UsageInsightsObservation, UsagePage, UsageQuery, UsageSummaryObservation,
     },
     provider_credentials::{
         AuthorizationCommit, CredentialDetails, CredentialImportCommit, CredentialImportResult,
@@ -485,7 +485,7 @@ pub trait ObservabilityStore: Send + Sync {
         &self,
         range: TimeRange,
         filter: UsageFilter,
-    ) -> AdminStoreResult<UsageOverview>;
+    ) -> AdminStoreResult<UsageSummaryObservation>;
 
     async fn usage_diagnostics(
         &self,

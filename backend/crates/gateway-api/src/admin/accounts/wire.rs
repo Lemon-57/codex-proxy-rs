@@ -454,11 +454,21 @@ pub struct AccountQuotaWindowView {
     pub reset_at_display: String,
 }
 
+/// 账号用量窗口的语义标识，展示名称由管理端本地化
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountUsageWindowKind {
+    General,
+    Weekly,
+    Monthly,
+    Quota,
+}
+
 /// 账号观测用量
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsageView {
-    pub window_label_display: String,
+    pub window_kind: AccountUsageWindowKind,
     pub request_count: Option<u64>,
     pub request_count_display: String,
     pub input_tokens: Option<u64>,
@@ -1063,8 +1073,7 @@ impl AccountExportData {
         time: crate::time::TimePresenter,
     ) -> Self {
         let filename = format!(
-            "cpr-accounts-selected-{}-{}.json",
-            bundle.documents.len(),
+            "cpr-accounts-{}.json",
             time.label(bundle.exported_at, "%Y-%m-%d")
         );
         let documents = bundle

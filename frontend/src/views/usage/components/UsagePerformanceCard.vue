@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { EChartsOption } from 'echarts'
-import type { getUsageRecordInsightsOverview } from '@/api'
 
+import type { getUsageRecordInsightsOverview } from '@/api'
 import { ZCard, ZEmpty, ZSegmented } from '@codex-proxy/ui'
+
 import { computed, shallowRef } from 'vue'
+import { useI18n } from 'vue-i18n'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import { requestActivityByBucket, zeroInactiveValues } from '@/components/charts/timeSeriesGap'
 import { tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
@@ -21,10 +23,6 @@ import {
   usageValueAxis,
 } from '../utils/chart'
 
-type Performance = Awaited<ReturnType<typeof getUsageRecordInsightsOverview>>['performance']
-type PerformancePoint = Performance['points'][number]
-type Activity = Awaited<ReturnType<typeof getUsageRecordInsightsOverview>>['health']['points']
-
 const props = withDefaults(
   defineProps<{
     performance: Performance
@@ -36,6 +34,12 @@ const props = withDefaults(
   },
 )
 
+const { t } = useI18n({ useScope: 'global' })
+
+type Performance = Awaited<ReturnType<typeof getUsageRecordInsightsOverview>>['performance']
+type PerformancePoint = Performance['points'][number]
+type Activity = Awaited<ReturnType<typeof getUsageRecordInsightsOverview>>['health']['points']
+
 const activeView = shallowRef('total')
 const { palette } = useChartPalette()
 const performancePoints = computed<PerformancePoint[]>(() => props.performance.points)
@@ -44,18 +48,18 @@ const requestActivity = computed(() => requestActivityByBucket(
   props.activity,
 ))
 
-const viewOptions = [
-  { label: '总耗时', value: 'total' },
-  { label: '首字', value: 'firstToken' },
-  { label: '速率', value: 'throughput' },
-  { label: '调度', value: 'scheduling' },
-]
+const viewOptions = computed(() => ([
+  { label: t('usage.latency.totalLatency'), value: 'total' },
+  { label: t('usage.ttft'), value: 'firstToken' },
+  { label: t('usage.outputThroughput'), value: 'throughput' },
+  { label: t('usage.performance.scheduling'), value: 'scheduling' },
+]))
 
 const seriesLabels = computed(() => {
   if (activeView.value === 'throughput')
     return ['P10', 'P50', 'P90'] as const
   if (activeView.value === 'scheduling')
-    return ['准入 P95', '选号 P95', '容量 P95'] as const
+    return [t('usage.performance.admissionP95'), t('usage.performance.accountSelectionP95'), t('usage.performance.capacityP95')] as const
   return ['P50', 'P95', 'P99'] as const
 })
 
@@ -93,9 +97,9 @@ const summaryMetrics = computed(() => {
   }
   if (activeView.value === 'scheduling') {
     return [
-      { label: '判定覆盖', value: formatPercent(performance.admissionDecisionCoverage) },
-      { label: '选号覆盖', value: formatPercent(performance.accountSelectionWaitCoverage) },
-      { label: '容量覆盖', value: formatPercent(performance.capacityCoverage) },
+      { label: t('usage.performance.decisionCoverage'), value: formatPercent(performance.admissionDecisionCoverage) },
+      { label: t('usage.performance.accountSelectionCoverage'), value: formatPercent(performance.accountSelectionWaitCoverage) },
+      { label: t('usage.performance.capacityCoverage'), value: formatPercent(performance.capacityCoverage) },
     ]
   }
   const prefix = activeView.value === 'firstToken' ? 'firstToken' : 'latency'
@@ -237,12 +241,12 @@ function formatThroughput(value: number | null) {
 <template>
   <ZCard
     as="article"
-    title="响应速度"
-    description="延迟、速率与调度分位"
+    :title="t('usage.performance.title')"
+    :description="t('usage.performance.description')"
     class="min-h-90 xl:h-full"
   >
     <template #actions>
-      <ZSegmented v-model="activeView" aria-label="性能指标" :options="viewOptions" :disabled="loading" class="w-68" />
+      <ZSegmented v-model="activeView" :aria-label="t('usage.performance.performanceIndicators')" :options="viewOptions" :disabled="loading" />
     </template>
 
     <template #body>
@@ -260,15 +264,16 @@ function formatThroughput(value: number | null) {
           v-else
           size="small"
           surface="none"
-          :title="loading ? '正在加载性能数据' : '暂无性能数据'"
-          :description="
-            activeView === 'firstToken'
-              ? '当前范围没有首字耗时样本'
-              : activeView === 'throughput'
-                ? '当前范围没有速率样本'
-                : activeView === 'scheduling'
-                  ? '当前范围没有调度或容量样本'
-                  : '当前范围没有总耗时样本'
+          :title="
+            loading
+              ? t('usage.performance.loading')
+              : activeView === 'firstToken'
+                ? t('usage.performance.noTtftSamples')
+                : activeView === 'throughput'
+                  ? t('usage.performance.noThroughput')
+                  : activeView === 'scheduling'
+                    ? t('usage.performance.noScheduling')
+                    : t('usage.performance.noLatency')
           "
           class="h-52.5 place-content-center"
         />

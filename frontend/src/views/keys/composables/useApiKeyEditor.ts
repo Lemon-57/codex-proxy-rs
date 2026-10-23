@@ -1,10 +1,11 @@
 import type { ApiKey } from '@/api'
 import type { ProviderRequestProfiles, ProviderRequestProfileUpdates } from '@/api/modules/settings/profiles'
-import { ZNotification } from '@codex-proxy/ui'
 import { cloneDeep } from 'es-toolkit'
 import { ref, shallowRef } from 'vue'
 import { createApiKey, updateApiKey } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
+import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
 
 export interface ApiKeyFormValue {
   providerRequestProfileOverrides: ProviderRequestProfiles
@@ -105,11 +106,11 @@ export function useApiKeyEditor(options: {
         showFormModal.value = false
         await options.reload()
         if (current) {
-          ZNotification.success({ message: 'API Key 已更新' })
+          ZNotification.success({ message: t('keys.editor.updated') })
         }
         else if (created) {
           options.onCreated(created.key, created.name)
-          ZNotification.success({ message: 'API Key 创建成功' })
+          ZNotification.success({ message: t('keys.editor.created') })
         }
       },
       { onError: () => void options.reload() },
@@ -117,27 +118,27 @@ export function useApiKeyEditor(options: {
   }
 
   function validateForm() {
-    for (const [label, value] of [['日限额', form.value.dailyLimitUsd], ['周限额', form.value.weeklyLimitUsd]]) {
+    for (const [label, value] of [[t('keys.editor.dailyLimit'), form.value.dailyLimitUsd], [t('keys.editor.weeklyLimit'), form.value.weeklyLimitUsd]]) {
       if (value.trim() && !/^\d{1,10}(?:\.\d{1,10})?$/.test(value.trim())) {
-        ZNotification.warning({ message: `${label}必须是非负金额，最多 10 位小数` })
+        ZNotification.warning({ message: t('keys.editor.validation.amount', { label }) })
         return false
       }
     }
     if (!form.value.name.trim()) {
-      ZNotification.warning({ message: '请输入 API Key 名称' })
+      ZNotification.warning({ message: t('keys.editor.enterApiKeyName') })
       return false
     }
     if (!editingKey.value && form.value.customKey && !/^[\x21-\x7E]+$/.test(form.value.customKey)) {
-      ZNotification.warning({ message: '自定义 Key 只能包含 HTTP 可传输的可见字符，不能包含空格或换行' })
+      ZNotification.warning({ message: t('keys.editor.invalidKey') })
       return false
     }
     for (const [label, value] of [
-      ['最大并发', form.value.maxConcurrency],
-      ['每分钟请求数', form.value.requestsPerMinute],
+      [t('keys.editor.maximumConcurrency'), form.value.maxConcurrency],
+      [t('keys.editor.requestsPerMinute'), form.value.requestsPerMinute],
     ] as const) {
       const parsed = Number(value)
       if (!Number.isSafeInteger(parsed) || parsed < 0) {
-        ZNotification.warning({ message: `${label}必须是非负整数` })
+        ZNotification.warning({ message: t('keys.editor.validation.integer', { label }) })
         return false
       }
     }

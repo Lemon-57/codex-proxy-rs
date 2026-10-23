@@ -653,7 +653,7 @@ fn decoder_should_fail_closed_for_non_integer_provider_cost() {
 #[test]
 fn decoder_should_tolerate_content_field_error_without_breaking_stream() {
     // 内容事件的字段校验失败（此处空 delta）不应打断已开始的客户端流
-    // 旧行为在此断整条流；修复后跳过该事件的 canonical 提取、wire 原样转发，并继续解出终态
+    // 跳过该事件的 canonical 提取、wire 原样转发，并继续解出终态
     let body = concat!(
         "event: response.created\n",
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_a3\",\"model\":\"grok-code-test\"}}\n\n",

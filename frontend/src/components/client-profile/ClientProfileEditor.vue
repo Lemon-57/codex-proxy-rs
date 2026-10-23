@@ -4,8 +4,10 @@ import type {
   ClientProfilePreview,
   ClientProfileSelection,
 } from '@/api/modules/settings/profiles'
+
 import { ZButton, ZEmpty, ZSegmented } from '@codex-proxy/ui'
 import { computed, onMounted, shallowRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { getClientProfileOptions, previewClientProfile } from '@/api/modules/settings/profiles'
 import { errorMessage } from '@/utils/operation'
 import ClientProfilePresetFields from './ClientProfilePresetFields.vue'
@@ -16,6 +18,9 @@ const props = withDefaults(defineProps<{ active?: boolean, disabled?: boolean, a
   disabled: false,
   allowInherit: false,
 })
+
+const { t } = useI18n({ useScope: 'global' })
+
 const model = defineModel<ClientProfileSelection | null>({ required: true })
 const options = shallowRef<ClientProfileOptions>()
 const preview = shallowRef<ClientProfilePreview>()
@@ -76,7 +81,7 @@ watch([model, () => props.active], ([configuration, active], _, onCleanup) => {
     }
     catch (error) {
       if (!cancelled)
-        previewError.value = errorMessage(error).replaceAll('User-Agent', '用户代理')
+        previewError.value = errorMessage(error).replaceAll('User-Agent', t('settings.clientProfile.userAgent'))
     }
     finally {
       if (!cancelled)
@@ -97,20 +102,20 @@ onMounted(() => load())
     <div v-if="allowInherit" class="flex flex-wrap items-center justify-between gap-3">
       <ZSegmented
         v-model="profileSource"
-        aria-label="客户端身份来源"
+        :aria-label="t('settings.clientProfile.clientIdentitySource')"
         class="shrink-0"
         :options="[
-          { label: '全局配置', value: 'global' },
-          { label: '独立配置', value: 'independent' },
+          { label: t('settings.clientProfile.globalConfiguration'), value: 'global' },
+          { label: t('settings.clientProfile.customConfiguration'), value: 'independent' },
         ]"
         :disabled="disabled || loading || !options"
       />
       <slot name="source-extra" />
     </div>
-    <ZEmpty v-if="loadError" title="预设加载失败" :description="loadError" size="small" surface="none" role="alert">
+    <ZEmpty v-if="loadError" :title="t('settings.clientProfile.presetLoadingFailed')" :description="loadError" size="small" surface="none" role="alert">
       <template #action>
         <ZButton size="small" :disabled="disabled || loading" @click="load()">
-          重试
+          {{ t('common.actions.retry') }}
         </ZButton>
       </template>
     </ZEmpty>

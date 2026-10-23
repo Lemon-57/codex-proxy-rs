@@ -2,11 +2,11 @@
 import type { useAccountConnectionTest } from '../composables/useAccountConnectionTest'
 
 import { ZButton, ZDialog, ZIconButton, ZSelect } from '@codex-proxy/ui'
+
 import { RefreshCw } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
 import AccountStatusBadge from './account-status-badge/index.vue'
 import AccountIdentityCell from './AccountIdentityCell.vue'
-
-type ConnectionTest = ReturnType<typeof useAccountConnectionTest>
 
 defineProps<{
   account: ConnectionTest['testingAccount']['value']
@@ -27,6 +27,11 @@ const emit = defineEmits<{
   test: []
   refreshModels: []
 }>()
+
+const { t } = useI18n({ useScope: 'global' })
+
+type ConnectionTest = ReturnType<typeof useAccountConnectionTest>
+
 const open = defineModel<boolean>({ default: false })
 const selectedModel = defineModel<string>('selectedModel', { required: true })
 
@@ -44,8 +49,8 @@ function connectionLogClass(tone: string) {
 <template>
   <ZDialog
     v-model="open"
-    title="测试连接"
-    description="验证账号凭据、身份绑定与上游模型端点是否可用"
+    :title="t('accounts.connectionTest.title')"
+    :description="t('accounts.connectionTest.description')"
     type="info"
     width="48rem"
   >
@@ -71,11 +76,11 @@ function connectionLogClass(tone: string) {
         <div class="grid gap-2">
           <div class="flex min-h-8 items-center justify-between gap-3">
             <span class="text-cp-sm font-heavy text-cp-text-quaternary">
-              测试模型
+              {{ t('accounts.connectionTest.model') }}
             </span>
             <ZIconButton
               size="small"
-              aria-label="刷新上游模型"
+              :aria-label="t('accounts.connectionTest.refreshModels')"
               :loading="refreshingModels"
               :disabled="status === 'running' || loadingModels"
               @click="emit('refreshModels')"
@@ -88,11 +93,11 @@ function connectionLogClass(tone: string) {
           </div>
           <ZSelect
             v-model="selectedModel"
-            aria-label="测试模型"
+            :aria-label="t('accounts.connectionTest.model')"
             :options="modelOptions"
             :disabled="status === 'running' || loadingModels || refreshingModels"
-            :placeholder="loadingModels ? '加载模型中' : '选择上游模型'"
-            empty-text="上游没有返回模型"
+            :placeholder="loadingModels ? t('accounts.connectionTest.loadingModels') : t('accounts.connectionTest.modelPlaceholder')"
+            :empty-text="t('accounts.connectionTest.noModels')"
           />
         </div>
       </section>
@@ -125,14 +130,14 @@ function connectionLogClass(tone: string) {
             class="inline-flex h-7 shrink-0 items-center rounded-full px-2.5 text-cp-sm font-heavy"
             :class="statusView.badge"
           >
-            {{ status === 'running' ? '检测中' : statusView.label }}
+            {{ status === 'running' ? t('accounts.connectionTest.running') : statusView.label }}
           </span>
         </div>
 
         <div class="mt-4 grid gap-3 sm:grid-cols-3">
           <div class="rounded-lg bg-cp-bg-container px-3 py-2.5">
             <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
-              开始时间
+              {{ t('accounts.concurrency.startTime') }}
             </p>
             <p class="mt-1.5 mb-0 font-mono text-cp-sm font-emphasis text-cp-text">
               {{ startedAt || '-' }}
@@ -140,7 +145,7 @@ function connectionLogClass(tone: string) {
           </div>
           <div class="rounded-lg bg-cp-bg-container px-3 py-2.5">
             <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
-              完成时间
+              {{ t('accounts.connectionTest.completedAt') }}
             </p>
             <p class="mt-1.5 mb-0 font-mono text-cp-sm font-emphasis text-cp-text">
               {{ finishedAt || '-' }}
@@ -148,7 +153,7 @@ function connectionLogClass(tone: string) {
           </div>
           <div class="rounded-lg bg-cp-bg-container px-3 py-2.5">
             <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
-              响应耗时
+              {{ t('accounts.connectionTest.duration') }}
             </p>
             <p class="mt-1.5 mb-0 font-mono text-cp-sm font-emphasis text-cp-text">
               {{ durationMs !== null ? `${durationMs}ms` : '-' }}
@@ -158,7 +163,7 @@ function connectionLogClass(tone: string) {
 
         <div class="mt-3 rounded-lg bg-cp-bg-container px-3 py-2.5">
           <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
-            测试模型
+            {{ t('accounts.connectionTest.model') }}
           </p>
           <p
             class="mt-1.5 mb-0 truncate font-mono text-cp-sm font-emphasis text-cp-text"
@@ -170,7 +175,7 @@ function connectionLogClass(tone: string) {
 
         <div class="mt-3 rounded-lg bg-cp-bg-container px-3 py-2.5">
           <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
-            事件轨迹
+            {{ t('accounts.connectionTest.events.title') }}
           </p>
           <div class="pt-2">
             <div v-if="logs.length === 0" class="text-cp-sm font-emphasis text-cp-text-quaternary">
@@ -195,7 +200,7 @@ function connectionLogClass(tone: string) {
                       v-if="item.tone === 'danger'"
                       class="mt-0 mb-2 text-cp-xs font-heavy text-cp-text-quaternary"
                     >
-                      原始诊断
+                      {{ t('accounts.connectionTest.diagnostics') }}
                     </p>
                     <pre
                       class="m-0 whitespace-pre-wrap wrap-break-word font-mono text-cp-xs leading-[1.6] font-emphasis text-cp-text"
@@ -212,7 +217,7 @@ function connectionLogClass(tone: string) {
 
     <template #footer>
       <ZButton @click="open = false">
-        关闭
+        {{ t('common.actions.close') }}
       </ZButton>
       <ZButton
         type="primary"
@@ -220,7 +225,7 @@ function connectionLogClass(tone: string) {
         :disabled="!account || loadingModels || refreshingModels || !selectedModel"
         @click="emit('test')"
       >
-        {{ logs.length > 0 || error ? '重新测试' : '开始测试' }}
+        {{ logs.length > 0 || error ? t('accounts.connectionTest.retry') : t('accounts.connectionTest.start') }}
       </ZButton>
     </template>
   </ZDialog>

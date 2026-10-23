@@ -1,4 +1,5 @@
 import type { ProfileActivityCalendar } from '@/api'
+import { t } from '@/i18n'
 import { formatCompactNumber } from '@/utils/format'
 
 export type ProfileActivityMode = 'daily' | 'weekly' | 'cumulative'
@@ -22,8 +23,8 @@ export function buildProfileActivityGrid(calendar: ProfileActivityCalendar | nul
 export function profileActivityCellLabel(cell: { dateDisplay: string, value: number }, mode: ProfileActivityMode) {
   const value = formatCompactNumber(cell.value)
   if (mode === 'weekly')
-    return `${cell.dateDisplay}所在周：${value} Tokens`
+    return t('accounts.profile.activity.weekOfTokens', { dateDisplay: cell.dateDisplay, value })
   if (mode === 'cumulative')
-    return `截至${cell.dateDisplay}：${value} Tokens`
+    return t('accounts.profile.activity.throughTokens', { dateDisplay: cell.dateDisplay, value })
   return `${cell.dateDisplay}：${value} Tokens`
 }
