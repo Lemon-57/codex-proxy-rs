@@ -67,18 +67,10 @@ const groupOptions = computed(() => [
       </ZInput>
 
       <ZSelect
-        v-model="supplier"
-        :options="supplierOptions"
-        aria-label="按供应商筛选"
-        filterable
-        class="col-span-2 min-w-0 sm:col-span-3 xl:w-44 xl:flex-none"
-      />
-
-      <ZSelect
-        v-model="planType"
-        :options="subscriptionOptions"
-        filterable
-        aria-label="按订阅类型筛选"
+        v-model="group"
+        :options="groupOptions"
+        :disabled="groupsLoading"
+        :aria-label="t('accounts.filters.groupLabel')"
         class="w-full min-w-0 xl:w-40 xl:shrink-0"
       />
 
@@ -90,11 +82,19 @@ const groupOptions = computed(() => [
       />
 
       <ZSelect
-        v-model="group"
-        :options="groupOptions"
-        :disabled="groupsLoading"
-        :aria-label="t('accounts.filters.groupLabel')"
+        v-model="planType"
+        :options="subscriptionOptions"
+        filterable
+        aria-label="按订阅类型筛选"
         class="w-full min-w-0 xl:w-40 xl:shrink-0"
+      />
+
+      <ZSelect
+        v-model="supplier"
+        :options="supplierOptions"
+        aria-label="按供应商筛选"
+        filterable
+        class="col-span-2 min-w-0 sm:col-span-3 xl:w-44 xl:flex-none"
       />
 
       <ProviderFilter
