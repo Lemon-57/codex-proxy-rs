@@ -217,7 +217,6 @@ const {
 <template>
   <div class="flex min-h-0 w-full flex-col xl:h-full xl:overflow-hidden">
     <ZPageHeader
-      class="h-17"
       :title="t('navigation.accounts')"
       :description="t('accounts.page.description')"
     />

@@ -170,7 +170,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
         :disabled="!form.name.trim()"
         @click="emit('save')"
       >
-        {{ editing ? t('keys.editor.saveChanges') : t('common.actions.create') }}
+        {{ editing ? t('common.actions.save') : t('common.actions.create') }}
       </ZButton>
     </template>
   </ZDialog>

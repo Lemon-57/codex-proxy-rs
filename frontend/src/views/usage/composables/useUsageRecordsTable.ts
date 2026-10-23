@@ -267,6 +267,7 @@ function emptySummary() {
     cacheWriteInputTokens: '0',
     totalTokens: '0',
     averageLatencyMs: '0 ms',
+    averageLatencyMsValue: null,
   }
   return summary
 }

@@ -126,7 +126,10 @@
       "copied": "Copied"
     },
     "time": {
-      "minutesAgo": "{count} minute ago | {count} minutes ago"
+      "justNow": "Just now",
+      "minutesAgo": "{count} minute ago | {count} minutes ago",
+      "hoursAgo": "{count} hour ago | {count} hours ago",
+      "daysAgo": "{count} day ago | {count} days ago"
     },
     "units": {
       "tokens": "Tokens"

@@ -13,9 +13,17 @@ const props = defineProps<{
 
 const { t } = useI18n({ useScope: 'global' })
 
-function averageLatencyDisplay(value: string) {
-  return !value || value === '—' || value === '-' ? '0 ms' : value
-}
+const averageLatency = computed(() => {
+  const raw = props.summary.averageLatencyMsValue
+  const value = raw == null || !Number.isFinite(raw) || raw < 0 ? 0 : raw
+  if (value < 1_000)
+    return { value: String(Math.round(value)), unit: 'ms' }
+  if (value < 60_000)
+    return { value: (value / 1_000).toFixed(2), unit: 's' }
+  if (value < 3_600_000)
+    return { value: (value / 60_000).toFixed(1), unit: 'min' }
+  return { value: (value / 3_600_000).toFixed(1), unit: 'h' }
+})
 
 const items = computed(() => [
   {
@@ -46,7 +54,8 @@ const items = computed(() => [
     key: 'latency',
     label: t('usage.averageTimeTaken'),
     icon: Timer,
-    value: averageLatencyDisplay(props.summary.averageLatencyMs),
+    value: averageLatency.value.value,
+    unit: averageLatency.value.unit,
     detail: t('usage.successfulRequestAverage'),
     tone: 'bg-cp-cyan-container text-cp-cyan-on-container',
   },
@@ -70,7 +79,7 @@ const items = computed(() => [
           {{ item.label }}
         </span>
         <strong class="my-2 block truncate font-mono text-[24px] leading-none font-extrabold text-cp-text">
-          {{ item.value }}
+          {{ item.value }}<span v-if="item.unit" class="ml-0.5 font-sans text-cp font-semibold text-cp-text-secondary">{{ item.unit }}</span>
         </strong>
         <span class="block truncate text-cp-sm leading-none font-emphasis text-cp-text-quaternary">
           {{ item.detail }}

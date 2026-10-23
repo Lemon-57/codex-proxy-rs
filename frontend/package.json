@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@boxicons/vue": "1.0.1",
-    "@codex-proxy/ui": "github:zyycn/codex-proxy-ui#acd8578f82a91dc5d6da70b68c3bd354a1dde061",
+    "@codex-proxy/ui": "github:zyycn/codex-proxy-ui#8177ba741376564f229aef50da8e76d29e4a5282",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@lucide/vue": "^1.59.0",

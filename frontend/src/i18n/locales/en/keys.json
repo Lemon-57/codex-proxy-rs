@@ -68,7 +68,6 @@
       "weeklyLimitUsd": "Weekly limit (USD)",
       "maximumConcurrency": "Maximum concurrency",
       "requestsPerMinuteRpm": "Requests per minute (RPM)",
-      "saveChanges": "Save changes",
       "updated": "API key updated",
       "created": "API key created",
       "validation": {

@@ -306,21 +306,12 @@ pub struct TrendPointView {
     pub tokens_value: u64,
     pub errors: String,
     pub errors_value: u64,
-    pub latency: String,
     pub latency_value: Option<u64>,
-    pub max_latency: String,
-    pub max_latency_value: Option<u64>,
-    pub min_latency: String,
-    pub min_latency_value: Option<u64>,
     pub success_rate: String,
     pub success_rate_value: Option<f64>,
-    pub first_token_p50_ms: Option<f64>,
     pub first_token_p95_ms: Option<f64>,
     pub latency_p95_ms: Option<f64>,
     pub output_throughput_p50: Option<u64>,
-    pub admission_decision_p95_ms: Option<f64>,
-    pub account_selection_wait_p95_ms: Option<f64>,
-    pub capacity_utilization: Option<f64>,
 }
 
 /// 趋势指标的稳定身份，展示名称由管理端本地化
@@ -401,7 +392,15 @@ pub struct DashboardCacheCardView {
     pub average_first_token_latency_ms: String,
 }
 
-/// 旧 Dashboard 账号概览卡片所需的 Provider 安全投影
+/// Dashboard 账号概览指标的稳定标识
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardAccountMetric {
+    Requests,
+    Tokens,
+}
+
+/// Dashboard 账号概览卡片所需的 Provider 安全投影
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardAccountUsageView {
@@ -416,8 +415,12 @@ pub struct DashboardAccountUsageView {
     pub request_buckets: Vec<crate::time::RequestBucketView>,
     pub quota_used_percent: Option<f64>,
     pub usage_window: Option<crate::admin::accounts::AccountQuotaWindowView>,
+    pub metric: DashboardAccountMetric,
+    pub metric_value_raw: Option<u64>,
     pub metric_label: String,
     pub metric_value: String,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub last_used_relative: Option<crate::time::RelativeTimeView>,
     pub last_used: String,
 }
 
@@ -610,6 +613,7 @@ pub struct UsageSummaryView {
     pub cache_write_input_tokens: String,
     pub total_tokens: String,
     pub average_latency_ms: String,
+    pub average_latency_ms_value: Option<u64>,
     pub logical_requests: RequestMetricsView,
     pub attempts: AttemptMetricsView,
 }

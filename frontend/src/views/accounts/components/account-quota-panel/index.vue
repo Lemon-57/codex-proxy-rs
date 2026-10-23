@@ -9,6 +9,7 @@ import { computed, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AccountPlanBadge from '@/components/account/AccountPlanBadge.vue'
 import { formatProviderLabel } from '@/utils/providers'
+import { formatRelativeTime } from '@/utils/relative-time'
 import { groupedAccountQuotaWindows, orderedPanelQuotaWindows } from '../../constants'
 import AccountProfileModal from '../account-profile-modal/index.vue'
 import AccountQuotaForecastModal from '../account-quota-forecast-modal/index.vue'
@@ -59,7 +60,7 @@ watch(hasPersonalInfo, (available) => {
             <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
           </template>
           <span>·</span>
-          <span>{{ t('accounts.quota.lastRefreshed', { refreshedAtDisplay: account.quota.refreshedAtDisplay }) }}</span>
+          <span>{{ t('accounts.quota.lastRefreshed', { refreshedAtDisplay: formatRelativeTime(account.quota.refreshedAtRelative) }) }}</span>
         </p>
       </div>
       <div v-if="hasActions" class="flex shrink-0 items-center gap-0.5 [&_svg]:size-3.5 [&_svg]:stroke-2">

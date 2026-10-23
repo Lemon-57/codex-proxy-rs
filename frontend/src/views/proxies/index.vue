@@ -68,7 +68,6 @@ watch(search, () => {
 <template>
   <div class="flex h-full min-h-0 w-full flex-col overflow-hidden">
     <ZPageHeader
-      class="h-17"
       :title="t('navigation.proxies')"
       :description="t('proxies.page.description')"
     />

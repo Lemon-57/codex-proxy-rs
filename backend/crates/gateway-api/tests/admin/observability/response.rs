@@ -17,7 +17,11 @@ async fn usage_summary_keeps_request_attempt_cost_and_average_latency_wire_field
     use gateway_api::admin::observability;
     use tower::ServiceExt as _;
 
-    for (sum, count, display) in [(404, 3, "134 ms"), (0, 1, "0 ms"), (0, 0, "—")] {
+    for (sum, count, display, raw) in [
+        (404, 3, "134 ms", Some(134)),
+        (0, 1, "0 ms", Some(0)),
+        (0, 0, "—", None),
+    ] {
         let fixture = AdminTestFixture::new().await;
         fixture.auth.insert_session("valid-session");
         let now = Utc::now();
@@ -84,6 +88,7 @@ async fn usage_summary_keeps_request_attempt_cost_and_average_latency_wire_field
                 "totalRequests": "5", "inputTokens": "400", "outputTokens": "80",
                 "cachedInputTokens": "30", "cacheWriteInputTokens": "7", "totalTokens": "480",
                 "averageLatencyMs": display,
+                "averageLatencyMsValue": raw,
                 "logicalRequests": {"requestCount":5,"successCount":4,"failureCount":0,"cancelledCount":1,"incompleteCount":0,"callerErrorCount":1,"inputTokens":400,"outputTokens":80,"cachedInputTokens":30,"cacheWriteInputTokens":7,"reasoningOutputTokens":9,"totalTokens":480},
                 "attempts": {"attemptCount":6,"successCount":4,"failureCount":1,"cancelledCount":1,"incompleteCount":0,"rateLimitedCount":1,"authFailureCount":0,"provider5xxCount":0,"costCoverage":{"known":3,"partial":0,"unknown":1,"notBillable":0},"costs":[{"currency":"USD","estimatedAmount":"1.25"}]}
             })
@@ -1472,7 +1477,11 @@ async fn dashboard_summary_should_identify_metrics_without_localized_labels() {
         http::{Request, StatusCode, header},
     };
     use chrono::Duration;
-    use gateway_admin::model::observability::{DashboardObservation, TimeRange};
+    use gateway_admin::model::{
+        accounts::AccountUsage,
+        observability::{DashboardAccountUsage, DashboardObservation, TimeRange},
+        provider_credentials::{ProviderQuotaWindow, QuotaLocalUsageAttribution},
+    };
     use gateway_api::admin::observability;
     use tower::ServiceExt as _;
 
@@ -1489,7 +1498,80 @@ async fn dashboard_summary_should_identify_metrics_without_localized_labels() {
         totals: Default::default(),
         provider_accounts: Default::default(),
         trend: Vec::new(),
-        account_usage: Vec::new(),
+        account_usage: [
+            (None, Some(2_000), Some(now)),
+            (None, Some(0), None),
+            (None, None, None),
+            (Some(9), Some(2_000), Some(now)),
+            (Some(0), Some(2_000), None),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (requests, tokens, last_used_at))| {
+            let account_id = format!("acct_metric_{index}");
+            DashboardAccountUsage {
+                account_id: account_id.clone(),
+                provider_kind: "openai".to_owned(),
+                authentication_kind: "oauth".to_owned(),
+                name: account_id.clone(),
+                email: None,
+                plan_type: None,
+                plan_type_display: None,
+                request_count: 10,
+                success_count: 10,
+                input_tokens: None,
+                output_tokens: None,
+                cached_input_tokens: None,
+                cache_write_input_tokens: None,
+                reasoning_output_tokens: None,
+                image_input_tokens: None,
+                image_output_tokens: None,
+                image_request_count: 0,
+                image_request_failed_count: 0,
+                total_tokens: tokens,
+                cost_coverage: Default::default(),
+                costs: Vec::new(),
+                last_used_at,
+                request_buckets: Vec::new(),
+                quota_used_percent: None,
+                quota_window: requests.map(|request_count| ProviderQuotaWindow {
+                    key: "rolling".to_owned(),
+                    group: "shortTerm".to_owned(),
+                    label: "滚动窗口".to_owned(),
+                    limit_id: None,
+                    limit_name: None,
+                    role: None,
+                    local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
+                    window_seconds: Some(86_400),
+                    used_percent: None,
+                    reset_at: None,
+                    limit_reached: false,
+                    local_usage: Some(AccountUsage {
+                        account_id,
+                        request_count,
+                        success_count: request_count,
+                        input_tokens: None,
+                        output_tokens: None,
+                        cached_input_tokens: None,
+                        cache_write_input_tokens: None,
+                        reasoning_output_tokens: None,
+                        image_input_tokens: None,
+                        image_output_tokens: None,
+                        image_request_count: 0,
+                        image_request_failed_count: 0,
+                        total_tokens: None,
+                        cost_coverage: Default::default(),
+                        costs: Vec::new(),
+                        last_used_at,
+                        request_buckets: Vec::new(),
+                        models: Vec::new(),
+                    }),
+                    provider_data: None,
+                }),
+                models: Vec::new(),
+            }
+        })
+        .collect(),
         recent_requests: Vec::new(),
     });
 
@@ -1521,12 +1603,167 @@ async fn dashboard_summary_should_identify_metrics_without_localized_labels() {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(status, StatusCode::OK, "{kind}: {value}");
+        let accounts = value["data"]["accountUsage"].as_array().unwrap();
+        assert_eq!(accounts.len(), 5);
+        for (account, (metric, raw, display, last_used_at)) in accounts.iter().zip([
+            ("tokens", Some(2_000), "2K", Some(now)),
+            ("tokens", Some(0), "0", None),
+            ("tokens", None, "—", None),
+            ("requests", Some(9), "9", Some(now)),
+            ("requests", Some(0), "—", None),
+        ]) {
+            assert_eq!(account["metric"], metric);
+            assert_eq!(account["metricValueRaw"], json!(raw));
+            assert_eq!(account["metricValue"], display);
+            assert_eq!(account["lastUsedAt"], json!(last_used_at));
+        }
         let summary = value["data"]["trend"]["summary"].as_array().unwrap();
         assert_eq!(summary.len(), metrics.len());
         for (item, metric) in summary.iter().zip(metrics) {
             assert_eq!(item["metric"], metric);
             assert!(item.get("label").is_none());
             assert!(item["value"].is_string());
+        }
+    }
+}
+
+#[tokio::test]
+async fn dashboard_relative_time_preserves_server_anchor_boundaries_and_deployment_timezone() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use chrono::{DateTime, Duration};
+    use gateway_admin::model::observability::{
+        DashboardAccountUsage, DashboardObservation, TimeRange,
+    };
+    use gateway_api::admin::observability;
+    use tower::ServiceExt as _;
+
+    use crate::admin::{AdminTestFixture, AdminTestState};
+
+    let now = "2026-06-15T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    for (zone, future_display) in [
+        ("UTC", "2026-06-15 00:00:01"),
+        ("Asia/Shanghai", "2026-06-15 08:00:01"),
+        ("Asia/Kathmandu", "2026-06-15 05:45:01"),
+        ("America/New_York", "2026-06-14 20:00:01"),
+    ] {
+        for (elapsed_ms, expected, legacy) in [
+            (None, json!(null), "—"),
+            (
+                Some(-1_000),
+                json!({ "kind": "absolute", "value": future_display }),
+                future_display,
+            ),
+            (Some(-1), json!({ "kind": "just_now" }), "刚刚"),
+            (Some(0), json!({ "kind": "just_now" }), "刚刚"),
+            (Some(59_999), json!({ "kind": "just_now" }), "刚刚"),
+            (
+                Some(60_000),
+                json!({ "kind": "elapsed", "value": 1, "unit": "minute" }),
+                "1 分钟前",
+            ),
+            (
+                Some(119_999),
+                json!({ "kind": "elapsed", "value": 1, "unit": "minute" }),
+                "1 分钟前",
+            ),
+            (
+                Some(3_599_999),
+                json!({ "kind": "elapsed", "value": 59, "unit": "minute" }),
+                "59 分钟前",
+            ),
+            (
+                Some(3_600_000),
+                json!({ "kind": "elapsed", "value": 1, "unit": "hour" }),
+                "1 小时前",
+            ),
+            (
+                Some(86_399_999),
+                json!({ "kind": "elapsed", "value": 23, "unit": "hour" }),
+                "23 小时前",
+            ),
+            (
+                Some(86_400_000),
+                json!({ "kind": "elapsed", "value": 1, "unit": "day" }),
+                "1 天前",
+            ),
+            (
+                Some(34_560_000_000),
+                json!({ "kind": "elapsed", "value": 400, "unit": "day" }),
+                "400 天前",
+            ),
+        ] {
+            // 每个边界使用独立缓存，避免相同锚点复用上一轮观测数据
+            let fixture = AdminTestFixture::with_timezone(zone.parse().unwrap()).await;
+            fixture.auth.insert_session("valid-session");
+            let last_used_at = elapsed_ms.map(|value| now - Duration::milliseconds(value));
+            *fixture.dashboard_observation.lock().unwrap() = Some(DashboardObservation {
+                yesterday: Default::default(),
+                analytics: Default::default(),
+                runtime_slots: None,
+                range: TimeRange::new(now - Duration::hours(1), now).unwrap(),
+                totals: Default::default(),
+                provider_accounts: Default::default(),
+                trend: Vec::new(),
+                account_usage: vec![DashboardAccountUsage {
+                    account_id: "acct_relative_time".to_owned(),
+                    provider_kind: "openai".to_owned(),
+                    authentication_kind: "oauth".to_owned(),
+                    name: "Relative time fixture".to_owned(),
+                    email: None,
+                    plan_type: None,
+                    plan_type_display: None,
+                    request_count: 1,
+                    success_count: 1,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cached_input_tokens: None,
+                    cache_write_input_tokens: None,
+                    reasoning_output_tokens: None,
+                    image_input_tokens: None,
+                    image_output_tokens: None,
+                    image_request_count: 0,
+                    image_request_failed_count: 0,
+                    total_tokens: None,
+                    cost_coverage: Default::default(),
+                    costs: Vec::new(),
+                    last_used_at,
+                    request_buckets: Vec::new(),
+                    quota_used_percent: None,
+                    quota_window: None,
+                    models: Vec::new(),
+                }],
+                recent_requests: Vec::new(),
+            });
+            let response = observability::router::<AdminTestState>()
+                .with_state(fixture.state())
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/admin/dashboard/summary?asOf={}",
+                            now.timestamp_millis()
+                        ))
+                        .header(header::COOKIE, "cpr_session=valid-session")
+                        .header(header::ACCEPT_LANGUAGE, "en")
+                        .header("x-request-id", "req_relative_time")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::OK, "{zone}: {value}");
+            let account = &value["data"]["accountUsage"][0];
+            assert_eq!(
+                account["lastUsedRelative"], expected,
+                "{zone}: {elapsed_ms:?}"
+            );
+            assert_eq!(account["lastUsed"], legacy, "{zone}: {elapsed_ms:?}");
+            assert_eq!(account["lastUsedAt"], json!(last_used_at));
         }
     }
 }

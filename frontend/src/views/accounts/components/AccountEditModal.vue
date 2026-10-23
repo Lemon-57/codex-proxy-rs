@@ -126,7 +126,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         :disabled="!account || groupsLoading || (isOpenAiApiKeyAccount(account) && !configurationReady)"
         @click="emit('save')"
       >
-        {{ t('accounts.batchEdit.saveChanges') }}
+        {{ t('common.actions.save') }}
       </ZButton>
     </template>
   </ZDialog>

@@ -54,7 +54,6 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
 <template>
   <div class="flex h-full min-h-0 w-full flex-col overflow-hidden">
     <ZPageHeader
-      class="h-17"
       :title="t('navigation.groups')"
       :description="t('groups.page.description')"
     />

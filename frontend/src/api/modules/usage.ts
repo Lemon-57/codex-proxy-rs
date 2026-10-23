@@ -229,6 +229,7 @@ export interface UsageSummaryResponse {
   cacheWriteInputTokens: string
   totalTokens: string
   averageLatencyMs: string
+  averageLatencyMsValue: number | null
 }
 
 export interface UsageOverviewHealthPoint {

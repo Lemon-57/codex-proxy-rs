@@ -68,7 +68,6 @@
       "weeklyLimitUsd": "周限额（USD）",
       "maximumConcurrency": "最大并发",
       "requestsPerMinuteRpm": "每分钟请求数（RPM）",
-      "saveChanges": "保存更改",
       "updated": "API Key 已更新",
       "created": "API Key 已创建",
       "validation": {

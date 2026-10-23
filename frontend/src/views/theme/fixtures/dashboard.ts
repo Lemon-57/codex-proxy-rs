@@ -81,21 +81,12 @@ function previewTrendPoint(requestsValue: number, index: number): DashboardTrend
     tokensValue: inputTokensValue + outputTokensValue,
     errors: errorsValue.toLocaleString('zh-CN'),
     errorsValue,
-    latency: `${410 + index * 7} ms`,
     latencyValue: 410 + index * 7,
-    maxLatency: `${760 + index * 12} ms`,
-    maxLatencyValue: 760 + index * 12,
-    minLatency: `${180 + index * 3} ms`,
-    minLatencyValue: 180 + index * 3,
     successRate: `${successRateValue.toFixed(1)}%`,
     successRateValue,
-    firstTokenP50Ms: 210 + index * 3,
     firstTokenP95Ms: 420 + index * 5,
     latencyP95Ms: 760 + index * 12,
     outputThroughputP50: 52 + (index % 5),
-    admissionDecisionP95Ms: 2 + (index % 3),
-    accountSelectionWaitP95Ms: 8 + (index % 4),
-    capacityUtilization: 0.42 + (index % 6) * 0.04,
   }
 }
 
@@ -337,6 +328,8 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       quotaUsedPercent: 32,
       metricLabel: t('appearance.preview.dashboard.todaySToken'),
       metricValue: '926K',
+      metric: 'tokens',
+      metricValueRaw: 926_000,
       usageWindow: {
         key: 'short',
         group: 'shortTerm',
@@ -352,6 +345,8 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
         resetAtDisplay: '—',
       },
       lastUsed: t('appearance.preview.components.justNow'),
+      lastUsedAt: '2026-08-23T10:30:00+08:00',
+      lastUsedRelative: { kind: 'just_now' },
     },
     {
       id: 'preview-xai-1',
@@ -370,6 +365,8 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       quotaUsedPercent: null,
       metricLabel: t('appearance.preview.dashboard.times'),
       metricValue: '894',
+      metric: 'requests',
+      metricValueRaw: 894,
       usageWindow: {
         key: 'free-rolling-24h',
         group: 'shortTerm',
@@ -394,6 +391,8 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
         },
       },
       lastUsed: t('common.time.minutesAgo', { count: 5 }),
+      lastUsedAt: '2026-08-23T10:25:00+08:00',
+      lastUsedRelative: { kind: 'elapsed', value: 5, unit: 'minute' },
     },
     {
       id: 'preview-openai-2',
@@ -408,6 +407,8 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       quotaUsedPercent: 68,
       metricLabel: t('appearance.preview.dashboard.todaySToken'),
       metricValue: '512K',
+      metric: 'tokens',
+      metricValueRaw: 512_000,
       usageWindow: {
         key: 'short',
         group: 'shortTerm',
@@ -423,6 +424,8 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
         resetAtDisplay: '—',
       },
       lastUsed: t('common.time.minutesAgo', { count: 8 }),
+      lastUsedAt: '2026-08-23T10:22:00+08:00',
+      lastUsedRelative: { kind: 'elapsed', value: 8, unit: 'minute' },
     },
   ],
   usageRecords: [

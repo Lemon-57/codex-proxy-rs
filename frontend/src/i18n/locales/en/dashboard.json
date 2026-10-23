@@ -29,6 +29,7 @@
       "unavailableCount": "Unavailable: {value}"
     },
     "activeAccounts": {
+      "todayTokens": "Today’s tokens",
       "title": "Active account usage",
       "sortByRecent": "Sorted by last used",
       "empty": "No recent account requests",

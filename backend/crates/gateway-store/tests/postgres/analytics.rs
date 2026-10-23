@@ -1692,16 +1692,18 @@ async fn daily_rank_counts_follow_rebuilds_rollbacks_deletions_and_dirty_days() 
 }
 
 #[tokio::test]
-async fn sql_edge_histograms_match_persisted_power_of_two_boundaries() {
+async fn sql_edge_histograms_preserve_repeated_samples_and_power_of_two_boundaries() {
     let Some(database) = TestDatabase::create("analytics_sql_histogram_boundaries").await else {
         return;
     };
     let start = DateTime::parse_from_rfc3339("2026-09-01T10:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
-    for (index, value) in [0_i64, 1, 2, 4, 8, 16, 31, 32, 33, 64, 128, 1024, 1_048_576]
-        .into_iter()
-        .enumerate()
+    for (index, value) in [
+        0_i64, 0, 1, 1, 1, 2, 2, 4, 8, 16, 31, 32, 32, 33, 64, 128, 1024, 1_048_576,
+    ]
+    .into_iter()
+    .enumerate()
     {
         let id = format!("sql_hist_{index}");
         seed(

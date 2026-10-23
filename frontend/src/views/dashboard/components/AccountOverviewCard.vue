@@ -8,6 +8,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AccountUsageWindow from '@/components/account/account-usage-window/index.vue'
 import { formatCompactNumber } from '@/utils/format'
+import { formatRelativeTime } from '@/utils/relative-time'
 import { metricToneIconClasses, metricToneValueClasses } from '../constants'
 import DashboardAccountIdentity from './DashboardAccountIdentity.vue'
 
@@ -251,12 +252,12 @@ const statusBars = computed(() => {
               >
                 <span class="grid min-w-0 gap-1">
                   <span class="text-cp-xs leading-none font-bold text-cp-text-quaternary">
-                    {{ account.metricLabel }}
+                    {{ account.metric === 'requests' ? t('dashboard.metrics.requestCount') : t('dashboard.activeAccounts.todayTokens') }}
                   </span>
                   <strong
                     class="font-mono text-sm leading-[1.15] font-heavy tabular-nums text-cp-text"
                   >
-                    {{ account.metricValue }}
+                    {{ account.metricValueRaw == null || (account.metric === 'requests' && account.metricValueRaw === 0) ? '—' : formatCompactNumber(account.metricValueRaw) }}
                   </strong>
                 </span>
 
@@ -265,7 +266,7 @@ const statusBars = computed(() => {
                   <span
                     class="min-w-0 truncate text-xs leading-[1.15] font-bold text-cp-text-secondary xl:whitespace-nowrap"
                   >
-                    {{ account.lastUsed }}
+                    {{ formatRelativeTime(account.lastUsedRelative) }}
                   </span>
                 </span>
 

@@ -62,7 +62,7 @@ function saveTheme(event: MouseEvent) {
 
 <template>
   <div class="flex min-h-0 w-full flex-col">
-    <ZPageHeader class="xl:h-17" :title="t('navigation.appearance')">
+    <ZPageHeader :title="t('navigation.appearance')">
       <template #description>
         <span class="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span>{{ t('appearance.settings.description') }}</span>

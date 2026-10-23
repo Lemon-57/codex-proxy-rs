@@ -89,8 +89,10 @@ pub(super) fn push_fact_aggregation_selected(
     }
     query.push(") sample(metric,value) where value is not null), sample_stats as (select output_bucket,name,metric,count(*) as count,sum(value) as sum,min(value) as minimum,max(value) as maximum,count(*) filter(where value=0) as zero");
     query.push(" from samples group by output_bucket,name,metric)");
-    // 对数桶定义与 Histogram::add 相同，零值单独保留，不对零取对数
-    query.push(", bin_counts as (select output_bucket,name,metric,floor(log(2::numeric,value::numeric)*16)::integer as bin,count(*) as count from samples where value>0 group by output_bucket,name,metric,bin), merged_bins as (select output_bucket,name,metric,jsonb_object_agg(bin,count) as bins from bin_counts group by output_bucket,name,metric)");
+    // 先合并同值样本，避免逐条重复计算 numeric 对数，保持原有桶边界和样本权重
+    // 零值仍由 sample_stats 单独保留，不参与对数计算
+    query.push(", sample_values as materialized (select output_bucket,name,metric,value,count(*) as count from samples where value>0 group by output_bucket,name,metric,value)");
+    query.push(", bin_counts as (select output_bucket,name,metric,floor(log(2::numeric,value::numeric)*16)::integer as bin,sum(count)::bigint as count from sample_values group by output_bucket,name,metric,bin), merged_bins as (select output_bucket,name,metric,jsonb_object_agg(bin,count) as bins from bin_counts group by output_bucket,name,metric)");
     query.push(", merged_distributions as (select s.output_bucket,s.name,jsonb_object_agg(s.metric,jsonb_build_object('count',s.count,'sum',s.sum,'minimum',s.minimum,'maximum',s.maximum,'zero',s.zero,'bins',");
     query.push("coalesce(b.bins,'{}'::jsonb)");
     query.push(")) as distributions");

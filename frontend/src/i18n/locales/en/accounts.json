@@ -141,7 +141,6 @@
     "batchEdit": {
       "title": "Edit accounts",
       "selectionTitle": "Edit {count} account | Edit {count} accounts",
-      "saveChanges": "Save changes",
       "proxyRequired": "Select a proxy that passed the connection test",
       "saved": "Updated {count} account | Updated {count} accounts",
       "staleAccount": "Account {accountId} is out of date, select it again"

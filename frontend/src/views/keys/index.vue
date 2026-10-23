@@ -114,7 +114,6 @@ watch(
 <template>
   <div class="flex h-full min-h-0 w-full flex-col overflow-hidden">
     <ZPageHeader
-      class="h-17"
       :title="t('navigation.apiKeys')"
       :description="t('keys.page.description')"
     />

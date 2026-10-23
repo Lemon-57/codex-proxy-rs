@@ -1,4 +1,5 @@
 import type { RequestOptions } from '../request'
+import type { RelativeTimeView } from '../time'
 import type { AccountQuotaWindow } from './accounts'
 import type { AnalyticsMetadata } from './analytics'
 import type { UsageListRecord } from './usage'
@@ -25,21 +26,12 @@ export interface DashboardTrendPoint {
   tokensValue: number
   errors: string
   errorsValue: number
-  latency: string
   latencyValue: number | null
-  maxLatency: string
-  maxLatencyValue: number | null
-  minLatency: string
-  minLatencyValue: number | null
   successRate: string
   successRateValue: number | null
-  firstTokenP50Ms: number | null
   firstTokenP95Ms: number | null
   latencyP95Ms: number | null
   outputThroughputP50: number | null
-  admissionDecisionP95Ms: number | null
-  accountSelectionWaitP95Ms: number | null
-  capacityUtilization: number | null
 }
 
 export type DashboardTrendMetric
@@ -160,8 +152,12 @@ export interface DashboardAccountUsage {
   requestBuckets: DashboardAccountRequestBucket[]
   quotaUsedPercent: number | null
   usageWindow: AccountQuotaWindow | null
+  metric: 'requests' | 'tokens'
+  metricValueRaw: number | null
   metricLabel: string
   metricValue: string
+  lastUsedAt: string | null
+  lastUsedRelative: RelativeTimeView | null
   lastUsed: string
 }
 
