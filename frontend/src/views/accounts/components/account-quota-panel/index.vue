@@ -37,6 +37,7 @@ const forecastOpen = shallowRef(false)
 const hasForecast = computed(() => props.account.authenticationKind !== 'api_key')
 const hasPersonalInfo = computed(() => props.account.capabilities.profile || props.account.capabilities.subscription)
 const hasActions = computed(() => hasPersonalInfo.value || hasForecast.value || props.account.capabilities.quotaRefresh || props.account.capabilities.resetCredits)
+const lastRefreshed = computed(() => t('accounts.quota.lastRefreshed', { refreshedAtDisplay: formatRelativeTime(props.account.quota.refreshedAtRelative) }))
 watch(hasPersonalInfo, (available) => {
   if (!available)
     profileOpen.value = false
@@ -45,25 +46,23 @@ watch(hasPersonalInfo, (available) => {
 
 <template>
   <section class="flex min-h-0 flex-col rounded-lg bg-cp-bg-container p-4 shadow-cp-tertiary">
-    <div class="mb-3 flex shrink-0 items-start justify-between gap-3">
-      <div class="min-w-0">
-        <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
-          {{ t('accounts.quota.accountLimit') }}
-        </h3>
-        <p
-          v-if="account.capabilities.quota || quotaEntries.length > 0"
-          class="m-0 mt-1 flex min-w-0 items-center gap-1.5 text-cp-xs font-emphasis text-cp-text-secondary"
-        >
-          <span>{{ t('accounts.quota.quota', { provider: account.provider === 'openai' ? 'Codex' : formatProviderLabel(account.provider) }) }}</span>
-          <template v-if="account.planType">
-            <span>·</span>
-            <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
-          </template>
-          <span>·</span>
-          <span>{{ t('accounts.quota.lastRefreshed', { refreshedAtDisplay: formatRelativeTime(account.quota.refreshedAtRelative) }) }}</span>
-        </p>
-      </div>
-      <div v-if="hasActions" class="flex shrink-0 items-center gap-0.5 [&_svg]:size-3.5 [&_svg]:stroke-2">
+    <div class="mb-3 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
+      <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
+        {{ t('accounts.quota.accountLimit') }}
+      </h3>
+      <p
+        v-if="account.capabilities.quota || quotaEntries.length > 0"
+        class="col-span-2 row-start-2 m-0 flex min-w-0 items-center gap-1.5 text-cp-xs font-emphasis text-cp-text-secondary"
+      >
+        <span class="shrink-0 whitespace-nowrap">{{ t('accounts.quota.quota', { provider: account.provider === 'openai' ? 'Codex' : formatProviderLabel(account.provider) }) }}</span>
+        <template v-if="account.planType">
+          <span class="shrink-0">·</span>
+          <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" class="shrink-0" />
+        </template>
+        <span class="shrink-0">·</span>
+        <span class="min-w-0 truncate" :title="lastRefreshed">{{ lastRefreshed }}</span>
+      </p>
+      <div v-if="hasActions" class="col-start-2 row-start-1 flex items-center gap-0.5 [&_svg]:size-3.5 [&_svg]:stroke-2">
         <ZIconButton
           v-if="hasPersonalInfo"
           :aria-label="t('accounts.quota.viewPersonalInformation')"

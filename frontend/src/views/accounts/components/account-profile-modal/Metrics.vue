@@ -68,10 +68,10 @@ function formatDuration(value: number | null | undefined) {
 </script>
 
 <template>
-  <section class="min-w-0 overflow-x-auto py-1" :aria-label="t('accounts.profile.metrics.cumulativeActivitySummary')" :aria-busy="loading">
-    <dl class="grid min-w-130 grid-cols-5">
+  <section class="@container min-w-0 py-1" :aria-label="t('accounts.profile.metrics.cumulativeActivitySummary')" :aria-busy="loading">
+    <dl class="grid grid-cols-2 gap-y-4 @[24rem]:grid-cols-3 @[34rem]:grid-cols-5">
       <div v-for="metric in metrics" :key="metric.label" class="min-w-0 px-2 text-center sm:px-3">
-        <dd class="m-0 font-mono text-cp-lg leading-tight font-heavy tabular-nums text-cp-text" :title="metric.title">
+        <dd class="m-0 font-mono text-cp-lg leading-tight font-heavy whitespace-nowrap tabular-nums text-cp-text" :title="metric.title">
           <ZSkeleton v-if="loading && !profile" shape="text" class="mx-auto h-4 w-14" />
           <template v-else>
             {{ metric.value }}

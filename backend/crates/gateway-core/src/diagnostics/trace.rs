@@ -15,13 +15,16 @@ use crate::error::ProviderError;
 use super::capture::{bounded, diagnostic_event_json, diagnostic_event_type};
 use super::{body_fingerprint, diagnostic_headers};
 
+/// 完整诊断快照的编码上限，生产者与持久化适配器共用
+pub const MAX_TRACE_SNAPSHOT_BYTES: usize = 128 * 1024;
+
 const MAX_EVENTS: usize = 128;
 const HEAD_EVENTS: usize = 8;
 const MAX_DATA_BYTES: usize = 4096;
-const MAX_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_BUFFER_BYTES: usize = MAX_TRACE_SNAPSHOT_BYTES / 2;
 const MAX_EVIDENCE_EVENTS: usize = 64;
 const MAX_EVIDENCE_DATA_BYTES: usize = 16 * 1024;
-const MAX_EVIDENCE_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_EVIDENCE_BUFFER_BYTES: usize = MAX_TRACE_SNAPSHOT_BYTES / 2;
 
 /// 显式传给异步任务的关联上下文；默认值禁用捕获，避免全局请求映射
 #[derive(Clone, Default)]
@@ -284,27 +287,22 @@ impl TraceContext {
     /// 与请求终态原子持久化；旧记录没有此字段，不伪造历史时间线
     #[must_use]
     pub fn snapshot(&self) -> Option<Value> {
-        let state = self
+        let mut state = self
             .state
             .as_ref()?
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(json!({
-            "schemaVersion": 3, "requestId": state.request_id,
-            "startedAtUnixMs": state.started_at_ms, "totalEvents": state.sequence,
-            "droppedEvents": state.dropped_events, "maxEvents": MAX_EVENTS,
-            "captureMode": "sanitized", "events": state.events,
-            "wireDumpEnabled": tracing::enabled!(target: "request_dump", tracing::Level::INFO),
-            "wireFrames": state.wire_frames, "wireBytes": state.wire_bytes,
-            "maxBufferBytes": MAX_BUFFER_BYTES + MAX_EVIDENCE_BUFFER_BYTES, "headEvents": HEAD_EVENTS,
-            "maxEvidenceEvents": MAX_EVIDENCE_EVENTS,
-            "maxEvidenceDataBytes": MAX_EVIDENCE_DATA_BYTES,
-            "maxEvidenceBufferBytes": MAX_EVIDENCE_BUFFER_BYTES,
-            "droppedEvidenceEvents": state.dropped_evidence_events,
-            "stageCounts": state.stage_counts,
-            "stageCountOverflow": state.stage_count_overflow,
-            "snapshotBoundary": "execution_finalization",
-        }))
+        loop {
+            let snapshot = state.snapshot();
+            if snapshot.to_string().len() <= MAX_TRACE_SNAPSHOT_BYTES {
+                return Some(snapshot);
+            }
+            // 完整编码还包含计数与外层字段，超限时先淘汰普通事件并保留丢弃计数
+            // 元数据本身无法容纳时省略诊断，不能让辅助观测阻断请求终态写入
+            let index =
+                regular_eviction_index(&state).or_else(|| evidence_eviction_index(&state))?;
+            remove_event(&mut state, index);
+        }
     }
 
     fn push(&self, stage: &'static str, data: Value, coalesce: bool) {
@@ -439,32 +437,59 @@ impl TraceContext {
             if state.evidence_bytes > MAX_EVIDENCE_BUFFER_BYTES
                 || state.evidence_events > MAX_EVIDENCE_EVENTS
             {
-                if let Some(index) = state
-                    .events
-                    .iter()
-                    .position(|event| event.evidence && event.stage != "request.routed")
-                    .or_else(|| state.events.iter().position(|event| event.evidence))
-                {
+                if let Some(index) = evidence_eviction_index(&state) {
                     remove_event(&mut state, index);
                 }
                 continue;
             }
             // 相比流中间的常规事件，优先保留失败与重试决策
             // 关键事实使用独立预算，只有自身超限才会淘汰
-            let index = (HEAD_EVENTS..state.events.len().saturating_sub(8))
-                .find(|index| !state.events[*index].evidence)
-                .or_else(|| {
-                    (HEAD_EVENTS..state.events.len())
-                        .chain(0..HEAD_EVENTS.min(state.events.len()))
-                        .find(|index| !state.events[*index].evidence)
-                });
-            if let Some(index) = index {
+            if let Some(index) = regular_eviction_index(&state) {
                 remove_event(&mut state, index);
             } else {
                 break;
             }
         }
     }
+}
+
+impl TraceState {
+    fn snapshot(&self) -> Value {
+        json!({
+            "schemaVersion": 3, "requestId": self.request_id,
+            "startedAtUnixMs": self.started_at_ms, "totalEvents": self.sequence,
+            "droppedEvents": self.dropped_events, "maxEvents": MAX_EVENTS,
+            "captureMode": "sanitized", "events": self.events,
+            "wireDumpEnabled": tracing::enabled!(target: "request_dump", tracing::Level::INFO),
+            "wireFrames": self.wire_frames, "wireBytes": self.wire_bytes,
+            "maxBufferBytes": MAX_BUFFER_BYTES + MAX_EVIDENCE_BUFFER_BYTES, "headEvents": HEAD_EVENTS,
+            "maxEvidenceEvents": MAX_EVIDENCE_EVENTS,
+            "maxEvidenceDataBytes": MAX_EVIDENCE_DATA_BYTES,
+            "maxEvidenceBufferBytes": MAX_EVIDENCE_BUFFER_BYTES,
+            "droppedEvidenceEvents": self.dropped_evidence_events,
+            "stageCounts": self.stage_counts,
+            "stageCountOverflow": self.stage_count_overflow,
+            "snapshotBoundary": "execution_finalization",
+        })
+    }
+}
+
+fn regular_eviction_index(state: &TraceState) -> Option<usize> {
+    (HEAD_EVENTS..state.events.len().saturating_sub(8))
+        .find(|index| !state.events[*index].evidence)
+        .or_else(|| {
+            (HEAD_EVENTS..state.events.len())
+                .chain(0..HEAD_EVENTS.min(state.events.len()))
+                .find(|index| !state.events[*index].evidence)
+        })
+}
+
+fn evidence_eviction_index(state: &TraceState) -> Option<usize> {
+    state
+        .events
+        .iter()
+        .position(|event| event.evidence && event.stage != "request.routed")
+        .or_else(|| state.events.iter().position(|event| event.evidence))
 }
 
 fn remove_event(state: &mut TraceState, index: usize) {

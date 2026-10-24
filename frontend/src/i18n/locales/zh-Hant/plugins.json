@@ -46,7 +46,8 @@
       "noDescription": "發佈者未提供說明",
       "versions": "{count} 個版本",
       "manage": "管理 {displayName}",
-      "versionCount": "版本數"
+      "versionCount": "版本數",
+      "loading": "正在加載插件"
     },
     "configuration": {
       "fillInRequiredConfiguration": "請填寫必填配置",
@@ -69,9 +70,9 @@
       "applyAndSwitch": "應用並切換",
       "saveAndEnable": "保存並啓用",
       "saveSettings": "保存設置",
-      "keepExistingValues": "保留已有值",
-      "replaceAllValues": "替換全部值",
-      "clearAllValues": "清除全部值",
+      "keepExistingValues": "保留敏感配置",
+      "replaceAllValues": "替換全部敏感配置",
+      "clearAllValues": "清除全部敏感配置",
       "checkPluginParameters": "請檢查插件參數",
       "setRequestScopeOrCheckApplyTo": "請設置請求範圍，或勾選“應用於所有請求”",
       "invalidIdentityMappings": "請檢查客戶端認證身份映射",
@@ -169,7 +170,8 @@
       "emptyDescription": "啓用帶有管理頁面的插件後，可從此處或側欄進入",
       "configuration": "配置 {value}",
       "pages": "{count} 頁",
-      "openPage": "打開頁面"
+      "openPage": "打開頁面",
+      "loading": "正在加載擴展"
     },
     "frontendAuth": {
       "exclusiveCertification": "獨佔認證",
@@ -387,7 +389,7 @@
       "unavailable": "不可用 · {id}",
       "multipleSelectionsAllowed": "{label}（可多選）",
       "unlimitedPlaceholder": "不限（可多選）",
-      "loading": "正在加載…",
+      "loading": "正在加載",
       "isTemporarilyUnavailable": "暫時無法獲取{label}",
       "noMatches": "沒有匹配項",
       "no": "暫無{label}",
@@ -514,6 +516,7 @@
       "allServiceCalls": "所有服務調用",
       "requestToStart": "請求開始",
       "everyTry": "每次嘗試",
+      "outboundPreparation": "出站請求準備",
       "upstreamCall": "上游調用",
       "accountScheduling": "賬號調度",
       "retryDecision": "重試決策",

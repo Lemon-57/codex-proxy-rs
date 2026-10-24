@@ -472,7 +472,7 @@ async fn discard_stream_websocket(
             .discard_with_observation(tombstone_observation)
             .await;
     }
-    websocket.close().await;
+    websocket.abort_and_wait().await;
 }
 
 fn connection_observation(

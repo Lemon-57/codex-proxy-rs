@@ -12,6 +12,8 @@ import settings from './settings.json'
 import systemUpdate from './systemUpdate.json'
 import usage from './usage.json'
 
+export { zhHans as uiLocale } from '@codex-proxy/ui/locale'
+
 export default {
   ...accounts,
   ...appearance,

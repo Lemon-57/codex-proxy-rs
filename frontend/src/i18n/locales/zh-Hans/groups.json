@@ -1,7 +1,7 @@
 {
   "groups": {
     "selector": {
-      "loading": "正在加载分组...",
+      "loading": "正在加载分组",
       "empty": "暂无分组，请先在分组管理中创建"
     },
     "actions": {
@@ -24,7 +24,7 @@
       "searchAccountGroup": "搜索账号分组",
       "searchGroupName": "搜索分组名称",
       "filterByGroupStatus": "按分组状态筛选",
-      "deleteSelected": "删除选中 ({count})",
+      "deleteSelected": "删除 ({count})",
       "createGroup": "创建分组"
     },
     "editor": {

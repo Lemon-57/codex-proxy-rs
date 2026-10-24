@@ -28,7 +28,7 @@ function openView(view: PluginManagementView) {
 
 <template>
   <div class="flex h-full min-h-0 flex-col gap-4">
-    <div v-if="loading && pageViews.length === 0" class="min-h-0 flex-1" aria-busy="true" />
+    <ZEmpty v-if="loading && pageViews.length === 0" :icon="Blocks" :title="t('plugins.extensions.loading')" surface="none" class="flex-1 content-center" role="status" aria-busy="true" />
 
     <ZEmpty
       v-else-if="pageViews.length === 0"

@@ -67,7 +67,7 @@ const columns = computed(() => (defineTableColumns<(typeof rows.value)[number]>(
       <ZSelect v-model="status" :options="statusOptions" :aria-label="t('plugins.catalog.pluginStatus')" class="w-36" />
       <ZSegmented v-model="display" :options="displayOptions" :aria-label="t('plugins.catalog.pluginDisplayMode')" display="icon" class="ml-auto w-20 shrink-0" />
     </div>
-    <div v-if="loading && !plugins.length" class="min-h-0 flex-1" aria-busy="true" />
+    <ZEmpty v-if="loading && !plugins.length" :icon="Puzzle" :title="t('plugins.catalog.loading')" surface="none" class="flex-1 content-center" role="status" aria-busy="true" />
     <ZEmpty v-else-if="!filtered.length" :icon="Puzzle" :title="plugins.length ? t('plugins.catalog.noMatchingPlugins') : t('plugins.catalog.installYourFirstPlugin')" :description="plugins.length ? t('plugins.catalog.tryAnotherNameOrStatus') : t('plugins.catalog.emptyDescription')" surface="none" class="flex-1 content-center">
       <template v-if="plugins.length" #action>
         <ZButton @click="search = ''; status = 'all'">

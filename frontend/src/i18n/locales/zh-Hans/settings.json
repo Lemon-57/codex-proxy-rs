@@ -293,7 +293,7 @@
       "modelMapHelp": "将客户端请求的模型名称映射为实际使用的上游模型"
     },
     "addMapping": "添加映射",
-    "loadingModelMapping": "正在加载模型映射...",
+    "loadingModelMapping": "正在加载模型映射",
     "requestModel": "请求模型",
     "upstreamModel": "上游模型",
     "upstreamModelName": "上游模型名称",
@@ -368,7 +368,7 @@
       "backupScopeDescription": "备份范围说明",
       "contents": "保留账号、Key、设置、插件及已用额度",
       "usageRetentionHourSummary": "用量保留小时汇总",
-      "creating": "创建中...",
+      "creating": "创建中",
       "createBackup": "创建备份",
       "noBackupRecordYet": "暂无备份记录",
       "downloadBackup": "下载备份",
@@ -379,7 +379,7 @@
       "schedule": {
         "backupPlan": "备份计划",
         "description": "配置自动备份的执行时间与保留策略",
-        "saving": "保存中...",
+        "saving": "保存中",
         "enableScheduledBackup": "启用定时备份",
         "cronExpression": "Cron 表达式",
         "cronHelp": "5 段格式，例如 0 2 * * * 表示每天凌晨 2 点",
@@ -398,7 +398,7 @@
         "s3StorageConfiguration": "S3 存储配置",
         "connectionTestPassed": "已通过连接测试",
         "connectionTestHasNotPassed": "尚未通过连接测试",
-        "testing": "测试中...",
+        "testing": "测试中",
         "endpointAddress": "端点地址",
         "endpointHelp": "S3 兼容服务的 HTTPS 地址",
         "region": "区域",
@@ -412,7 +412,8 @@
         "forcePathStyle": "强制路径式访问",
         "accessKeyId": "访问密钥 ID",
         "secretAccessKey": "私有访问密钥",
-        "description": "配置 S3 兼容存储（支持 {service}）"
+        "description": "配置 S3 兼容存储（支持 {service}）",
+        "test": "测试"
       },
       "r2": {
         "cloudflareR2OnboardingGuide": "Cloudflare R2 接入指南",
@@ -422,7 +423,7 @@
         "credentialsHelp": "Access Key ID / Secret Access Key：上一步生成的 Token",
         "forcePathStyleOff": "Force Path Style：关闭",
         "completeConnectionTest": "4. 完成连接测试",
-        "testDescription": "保存配置后点击「测试连接」，系统会写入一个探针对象并校验读写权限，测试通过后 才能启用自动计划或手动创建备份，凭据只保存在服务端，不会写入浏览器",
+        "testDescription": "保存配置后点击「测试」，系统会写入一个探针对象并校验读写权限，测试通过后 才能启用自动计划或手动创建备份，凭据只保存在服务端，不会写入浏览器",
         "gotIt": "知道了",
         "bucketDescription": "在 Cloudflare Dashboard 进入 R2，创建私有存储桶（例如 {bucket}），保持关闭公共读取",
         "tokenDescription": "在「管理 API Token」创建对象存储专用 Token，仅授予目标桶的对象读取、写入、列出与删除权限",

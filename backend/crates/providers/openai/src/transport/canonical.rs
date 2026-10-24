@@ -901,8 +901,7 @@ impl CodexCanonicalDecoder {
         output: &mut Vec<GatewayEvent>,
     ) -> Result<(), ProviderError> {
         self.require_started()?;
-        let output_index = event_index(value, "output_index")?;
-        let part_index = optional_event_index(value, "content_index")?.unwrap_or_default();
+        let index = event_content_index(value)?;
         let part = value
             .get("part")
             .or_else(|| value.get("summary_part"))
@@ -912,7 +911,8 @@ impl CodexCanonicalDecoder {
             Some("summary_text" | "reasoning_text") => ContentKind::Reasoning,
             _ => return Ok(()),
         };
-        self.add_content(content_index(output_index, part_index)?, kind, output)
+        // reasoning 项已声明首段，后续 part 复用同一内容；类型冲突仍由共享登记逻辑拒绝
+        self.ensure_content(index, kind, output)
     }
 
     fn text_delta(

@@ -68,24 +68,26 @@ watch(timeRange, () => {
 </script>
 
 <template>
-  <div class="w-full">
+  <div class="@container w-full">
     <ZPageHeader :title="t('navigation.usage')" :description="t('usage.page.description')">
       <template #actions>
-        <ZDatePicker
-          v-model="timeRange"
-          type="daterange"
-          :clearable="false"
-          :editable="false"
-          :disabled-date="disabledDate"
-          single-panel
-          :aria-label="t('usage.page.dateRangeLabel')"
-          class="w-60 max-w-full"
-        />
-        <ProviderFilter
-          v-model="providerQuery"
-          :disabled="refreshingList"
-          class="shrink-0"
-        />
+        <div class="flex w-[100cqw] max-w-[100cqw] flex-wrap items-center justify-end gap-2 @min-[28rem]:w-auto">
+          <ZDatePicker
+            v-model="timeRange"
+            type="daterange"
+            :clearable="false"
+            :editable="false"
+            :disabled-date="disabledDate"
+            single-panel
+            :aria-label="t('usage.page.dateRangeLabel')"
+            class="min-w-0 w-full @min-[28rem]:w-60"
+          />
+          <ProviderFilter
+            v-model="providerQuery"
+            :disabled="refreshingList"
+            class="shrink-0"
+          />
+        </div>
       </template>
     </ZPageHeader>
 

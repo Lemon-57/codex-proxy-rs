@@ -66,6 +66,8 @@ pub struct UpstreamAdapterDeclaration {
     /// 公开请求模型的匹配范围；空集合沿用功能绑定范围
     #[serde(default)]
     pub models: Vec<String>,
+    /// 显式上游账号范围，空集合匹配所有账号，不扩大请求的账号权限
+    pub account_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

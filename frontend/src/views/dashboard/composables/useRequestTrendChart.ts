@@ -170,7 +170,7 @@ export function useRequestTrendChart(options: {
 
   function formatPrimaryAxisValue(value: number) {
     if (activeKind.value === 'latency') {
-      return value >= 1000 ? `${formatAxisNumber(value / 1000)}s` : `${Math.round(value)}ms`
+      return value >= 1000 ? `${formatAxisNumber(value / 1000)} s` : `${Math.round(value)} ms`
     }
     return formatAxisCompact(value)
   }

@@ -1,8 +1,8 @@
 import type { UiLocale } from '@codex-proxy/ui'
 import type { Locale } from './locale'
-import { en, zhHans, zhHant } from '@codex-proxy/ui/locale'
 import { computed } from 'vue'
 import { locale } from './index'
+import { uiMessages } from './messages'
 
-const messages: Record<Locale, UiLocale> = { en, 'zh-Hans': zhHans, 'zh-Hant': zhHant }
-export const uiLocale = computed(() => messages[locale.value as Locale])
+// 挂载和切换语言均等待资源就绪，组件只读取已加载的语言
+export const uiLocale = computed(() => uiMessages[locale.value as Locale] as UiLocale)

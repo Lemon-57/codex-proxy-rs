@@ -23,10 +23,10 @@ const status = defineModel<string>('status', { required: true })
 </script>
 
 <template>
-  <div class="flex w-full flex-col gap-3 sm:flex-row sm:items-center">
+  <div class="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
     <ZInput
       v-model="search"
-      class="sm:w-80"
+      class="min-w-0 sm:w-80 sm:flex-1 sm:basis-64"
       :aria-label="t('groups.filters.searchAccountGroup')"
       :placeholder="t('groups.filters.searchGroupName')"
     >
@@ -40,7 +40,7 @@ const status = defineModel<string>('status', { required: true })
       :aria-label="t('groups.filters.filterByGroupStatus')"
       class="w-40"
     />
-    <div class="flex shrink-0 items-center justify-end gap-2 sm:ml-auto">
+    <div class="flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:ml-auto">
       <ZButton
         v-if="selectedCount > 0"
         type="danger" variant="plain"
@@ -56,7 +56,7 @@ const status = defineModel<string>('status', { required: true })
         <template #icon>
           <Plus class="size-4" />
         </template>
-        {{ t('groups.filters.createGroup') }}
+        {{ t('common.actions.create') }}
       </ZButton>
     </div>
   </div>

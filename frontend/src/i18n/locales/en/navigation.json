@@ -14,6 +14,7 @@
       "open": "Open System update"
     },
     "switchLanguage": "Switch language ({value})",
+    "languageLoadFailed": "Unable to load language, reload to try again",
     "mainLabel": "Main navigation",
     "pluginsLabel": "Plugin navigation",
     "pluginManagement": "Manage",

@@ -179,7 +179,8 @@ impl CodexProvider {
                 provider_kind,
                 requested_model.map(|model| model.as_str().to_owned()),
                 account_id,
-                Box::new(move |operation, middleware_headers| {
+                Some(RequestParameters::baseline(lease.installation_id())),
+                Box::new(move |operation, middleware_headers, parameters| {
                     Box::pin(async move {
                         provider
                             .execute_selected_raw_json_endpoint(
@@ -187,8 +188,11 @@ impl CodexProvider {
                                 operation,
                                 middleware_headers,
                                 request,
-                                lease,
-                                account_selection_wait_ms,
+                                SelectedRequest {
+                                    parameters: RequestParameters::decode(parameters)?,
+                                    lease,
+                                    account_selection_wait_ms,
+                                },
                             )
                             .await
                     })
@@ -203,9 +207,13 @@ impl CodexProvider {
         operation: Operation,
         middleware_headers: Vec<MiddlewareHeader>,
         mut request: RawJsonEndpointRequest,
-        mut lease: CodexCredentialLease,
-        account_selection_wait_ms: u64,
+        selected: SelectedRequest,
     ) -> Result<ProviderStream, ProviderError> {
+        let SelectedRequest {
+            parameters,
+            mut lease,
+            account_selection_wait_ms,
+        } = selected;
         let affinity = match &operation {
             Operation::GenerateImage(image) => {
                 let model = endpoint_requested_model(image.payload());
@@ -309,6 +317,11 @@ impl CodexProvider {
         let allows_account_state_mutation = lease.allows_account_state_mutation();
         let provider_kind = ProviderKind::new(PROVIDER_NAME)
             .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
+        let outbound_middleware = context.outbound_middleware(
+            provider_kind.clone(),
+            endpoint_requested_model(payload).map(|model| model.as_str().to_owned()),
+            lease.account_id().clone(),
+        );
         let metadata = ProviderCallMetadata::for_provider_endpoint(
             provider_kind,
             lease.account_id().clone(),
@@ -324,7 +337,7 @@ impl CodexProvider {
             lease.capacity_snapshot(),
         ));
         // Standalone Provider 端点没有可证明的账号 owner；Images/Search metadata 必须按
-        // 跨账号输入收敛到当前 lease，不能沿用下游声明的账号或 installation identity
+        // 跨账号输入收敛到本次构造参数，不能沿用下游声明的账号身份
         let turn_metadata = payload
             .context()
             .get("turn_metadata")
@@ -332,17 +345,19 @@ impl CodexProvider {
             .and_then(|metadata| {
                 crate::transport::request::scope_turn_metadata(
                     metadata,
-                    lease.installation_id(),
+                    &parameters.installation_id,
                     true,
                 )
             });
         let events = cold_json_response_stream(ColdJsonResponse {
+            parameters,
             client: self
                 .client_for_request(&context)?
                 .for_account(lease.account())
                 .map_err(|error| map_client_error(error, UpstreamSendState::NotSent, false).error)?
                 .with_responses_api_base_url(lease.authentication().responses_api_base_url())
                 .with_middleware_headers(middleware_headers)
+                .with_outbound_middleware(outbound_middleware)
                 .with_privacy(context.privacy(), context.cancellation().clone()),
             response_origin: request.response_origin,
             endpoint_path: request.endpoint_path,
@@ -377,6 +392,7 @@ struct RawJsonEndpointRequest {
 }
 
 pub(super) struct ColdResponse {
+    pub(super) parameters: RequestParameters,
     pub(super) client: CodexBackendClient,
     pub(super) response_origin: Url,
     pub(super) request: CodexResponsesRequest,
@@ -396,6 +412,7 @@ pub(super) struct ColdResponse {
 }
 
 pub(super) struct ColdJsonResponse {
+    pub(super) parameters: RequestParameters,
     pub(super) client: CodexBackendClient,
     pub(super) response_origin: Url,
     pub(super) endpoint_path: &'static str,
@@ -641,7 +658,7 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
         let response = create_json_attempt(
             &request,
             &active_account,
-            request.lease.installation_id(),
+            &request.parameters.installation_id,
             &authorization,
             cookie_header.as_ref(),
             account_selection,
@@ -692,7 +709,7 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
                     .selector
                     .capture_response_cookies(
                         &active_account,
-                        &request.response_origin,
+                        response.diagnostics.response_origin.as_ref().unwrap_or(&request.response_origin),
                         &response.set_cookie_headers,
                     )
                     .await
@@ -760,6 +777,7 @@ fn image_response_metering(
 
 pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     let ColdResponse {
+        parameters,
         client,
         response_origin,
         request,
@@ -817,7 +835,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &request,
                 &request_id,
                 &active_account,
-                lease.installation_id(),
+                &parameters.installation_id,
                 &authorization,
                 cookie_header.as_ref(),
                 account_selection,
@@ -920,7 +938,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             match selector
                 .capture_response_cookies(
                     &active_account,
-                    &response_origin,
+                    response.diagnostics.response_origin.as_ref().unwrap_or(&response_origin),
                     &response.set_cookie_headers,
                 )
                 .await
@@ -1154,26 +1172,42 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 session_transport_recovery.websocket_succeeded(key);
             }
             if allows_account_state_mutation && (completed || terminal_failure.is_some()) {
+                let started = Instant::now();
                 synchronize_passive_quota(
                     &quota,
                     &active_account,
                     passive_quota_observation.rate_limits(),
                 )
                 .await;
+                trace.record("provider.quota_sync", json!({
+                    "durationMs": started.elapsed().as_millis(),
+                }));
             }
             if let Some((failure, _)) = terminal_failure.as_ref() {
+                let started = Instant::now();
                 apply_failure(&failure_context, &active_account, failure)
                 .await;
+                trace.record("provider.account_failure", json!({
+                    "durationMs": started.elapsed().as_millis(),
+                }));
             }
             attach_openai_session_update(&mut events, &mut session_capture);
             if allows_account_state_mutation && completed && terminal_failure.is_none() {
                 // 完成事实交给下游前更新账号健康，绑定已经在发送前完成
+                let started = Instant::now();
                 selector
                     .record_success(&active_account)
                     .await;
+                trace.record("provider.account_success", json!({
+                    "durationMs": started.elapsed().as_millis(),
+                }));
+                let started = Instant::now();
                 selector
                     .observe_cyber_policy_success(cyber_policy_scope.as_ref())
                     .await;
+                trace.record("provider.cyber_policy_success", json!({
+                    "durationMs": started.elapsed().as_millis(),
+                }));
             }
             if (rate_limits_changed
                 || response_model_changed

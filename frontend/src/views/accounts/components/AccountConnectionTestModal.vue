@@ -103,35 +103,27 @@ function connectionLogClass(tone: string) {
       </section>
 
       <section class="rounded-cp-card bg-cp-fill-quaternary p-4">
-        <div class="flex items-start justify-between gap-4">
-          <div class="flex min-w-0 items-start gap-3">
-            <span
-              class="inline-flex size-10 shrink-0 items-center justify-center rounded-lg"
-              :class="statusView.badge"
-            >
-              <component
-                :is="statusView.icon"
-                class="size-5"
-                :class="[statusView.iconClass, status === 'running' ? 'animate-pulse' : '']"
-              />
-            </span>
-            <div class="min-w-0">
-              <p class="m-0 text-[16px] font-heavy text-cp-text">
-                {{ statusView.label }}
-              </p>
-              <p
-                class="mt-1.5 mb-0 text-cp leading-normal font-emphasis text-cp-text-secondary"
-              >
-                {{ statusView.description }}
-              </p>
-            </div>
-          </div>
+        <div class="flex min-w-0 items-start gap-3">
           <span
-            class="inline-flex h-7 shrink-0 items-center rounded-full px-2.5 text-cp-sm font-heavy"
+            class="inline-flex size-10 shrink-0 items-center justify-center rounded-lg"
             :class="statusView.badge"
           >
-            {{ status === 'running' ? t('accounts.connectionTest.running') : statusView.label }}
+            <component
+              :is="statusView.icon"
+              class="size-5"
+              :class="[statusView.iconClass, status === 'running' ? 'animate-pulse' : '']"
+            />
           </span>
+          <div class="min-w-0">
+            <p class="m-0 text-[16px] font-heavy text-cp-text">
+              {{ statusView.label }}
+            </p>
+            <p
+              class="mt-1.5 mb-0 text-cp leading-normal font-emphasis text-cp-text-secondary"
+            >
+              {{ statusView.description }}
+            </p>
+          </div>
         </div>
 
         <div class="mt-4 grid gap-3 sm:grid-cols-3">
@@ -155,8 +147,8 @@ function connectionLogClass(tone: string) {
             <p class="m-0 text-cp-xs font-heavy text-cp-text-quaternary">
               {{ t('accounts.connectionTest.duration') }}
             </p>
-            <p class="mt-1.5 mb-0 font-mono text-cp-sm font-emphasis text-cp-text">
-              {{ durationMs !== null ? `${durationMs}ms` : '-' }}
+            <p class="mt-1.5 mb-0 font-mono text-cp-sm font-emphasis whitespace-nowrap text-cp-text">
+              {{ durationMs !== null ? `${durationMs} ms` : '-' }}
             </p>
           </div>
         </div>

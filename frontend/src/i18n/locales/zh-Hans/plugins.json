@@ -46,7 +46,8 @@
       "noDescription": "发布者未提供说明",
       "versions": "{count} 个版本",
       "manage": "管理 {displayName}",
-      "versionCount": "版本数"
+      "versionCount": "版本数",
+      "loading": "正在加载插件"
     },
     "configuration": {
       "fillInRequiredConfiguration": "请填写必填配置",
@@ -69,9 +70,9 @@
       "applyAndSwitch": "应用并切换",
       "saveAndEnable": "保存并启用",
       "saveSettings": "保存设置",
-      "keepExistingValues": "保留已有值",
-      "replaceAllValues": "替换全部值",
-      "clearAllValues": "清除全部值",
+      "keepExistingValues": "保留敏感配置",
+      "replaceAllValues": "替换全部敏感配置",
+      "clearAllValues": "清除全部敏感配置",
       "checkPluginParameters": "请检查插件参数",
       "setRequestScopeOrCheckApplyTo": "请设置请求范围，或勾选“应用于所有请求”",
       "invalidIdentityMappings": "请检查客户端认证身份映射",
@@ -169,7 +170,8 @@
       "emptyDescription": "启用带有管理页面的插件后，可从此处或侧栏进入",
       "configuration": "配置 {value}",
       "pages": "{count} 页",
-      "openPage": "打开页面"
+      "openPage": "打开页面",
+      "loading": "正在加载扩展"
     },
     "frontendAuth": {
       "exclusiveCertification": "独占认证",
@@ -387,7 +389,7 @@
       "unavailable": "不可用 · {id}",
       "multipleSelectionsAllowed": "{label}（可多选）",
       "unlimitedPlaceholder": "不限（可多选）",
-      "loading": "正在加载…",
+      "loading": "正在加载",
       "isTemporarilyUnavailable": "暂时无法获取{label}",
       "noMatches": "没有匹配项",
       "no": "暂无{label}",
@@ -514,6 +516,7 @@
       "allServiceCalls": "所有服务调用",
       "requestToStart": "请求开始",
       "everyTry": "每次尝试",
+      "outboundPreparation": "出站请求准备",
       "upstreamCall": "上游调用",
       "accountScheduling": "账号调度",
       "retryDecision": "重试决策",

@@ -118,6 +118,9 @@ function clearForm() {
     <ProxyBatchCreateFields v-else-if="!batchItems.length" v-model="batchText" v-model:prefix="batchPrefix" v-model:protocol="batchProtocol" :rows="parsed" :error="inputError" :disabled="busy" />
     <div v-else class="grid min-w-0 gap-5">
       <ProxyBatchResults :items="batchItems" :tests="batchTestItems" />
+      <p v-if="batchBusy" class="m-0 text-cp-xs text-cp-text-secondary">
+        {{ t('proxies.editor.stopHelp') }}
+      </p>
       <p v-if="batchItems.some(item => item.status === 'unknown')" class="m-0 text-cp-xs text-cp-warning-text" role="alert">
         {{ t('proxies.editor.pendingResultsHelp') }}
       </p>
@@ -131,7 +134,7 @@ function clearForm() {
           <template #icon>
             <Wifi class="size-4" />
           </template>
-          {{ t('accounts.connectionTest.title') }}
+          {{ t('proxies.actions.test') }}
         </ZButton>
         <ZButton type="primary" :loading="saving" :disabled="testingConnection || detectingLocation" @click="emit('save')">
           <template #icon>

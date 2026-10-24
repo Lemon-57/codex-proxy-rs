@@ -39,7 +39,7 @@ const boardStyle = computed<CSSProperties>(() => ({
 <template>
   <div
     ref="viewport"
-    class="relative min-h-0 overflow-hidden rounded-cp-lg bg-cp-bg-layout bg-[radial-gradient(circle,color-mix(in_srgb,var(--cp-color-text-quaternary)_24%,transparent)_1px,transparent_1px)] bg-size-[18px_18px] shadow-cp-secondary select-none"
+    class="@container/preview relative min-h-0 overflow-hidden rounded-cp-lg bg-cp-bg-layout bg-[radial-gradient(circle,color-mix(in_srgb,var(--cp-color-text-quaternary)_24%,transparent)_1px,transparent_1px)] bg-size-[18px_18px] shadow-cp-secondary select-none"
     :class="dragging ? 'cursor-grabbing' : 'cursor-grab'"
     role="application"
     tabindex="0"
@@ -60,7 +60,7 @@ const boardStyle = computed<CSSProperties>(() => ({
     </div>
 
     <div
-      class="pointer-events-none absolute top-3 left-3 z-10 inline-flex items-center gap-2 rounded-cp bg-cp-bg-container/92 px-2.5 py-2 text-[10px] font-emphasis text-cp-text-secondary shadow-cp-tertiary backdrop-blur-sm"
+      class="pointer-events-none absolute top-3 left-3 z-10 hidden items-center gap-2 rounded-cp bg-cp-bg-container/92 px-2.5 py-2 text-[10px] font-emphasis text-cp-text-secondary shadow-cp-tertiary backdrop-blur-sm @min-[36rem]/preview:inline-flex"
     >
       <Move class="size-3.5 text-cp-primary-text" />
       {{ t('appearance.preview.canvas.dragBlankSpaceToPanUseScroll') }}

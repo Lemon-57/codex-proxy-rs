@@ -2,13 +2,13 @@
 
 [返回 SDK](../README.md) · [清单声明](manifest.md#扩展项简写) · [能力与回调](capabilities.md)
 
-`upstream_adapter` v4 是现有生成请求洋葱链的终端，只挂到内置 `openai` / `xai`，不替换独立图像或压缩端点。
+`upstream_adapter` v5 是现有生成请求洋葱链的终端，只挂到内置 `openai` / `xai`，不替换独立图像或压缩端点。
 插件定义 Base URL、业务路径、请求编码和响应解析；宿主继续持有身份、ACL、选号、租约、凭据、代理、重试和账本。
 普通请求或响应加工使用 [middleware](capabilities.md#洋葱中间件)
 
 ## 声明与绑定
 
-清单声明 `upstream_adapter`、版本 `4`，以及匹配的 `inputFormats` / `outputFormats`；固定阶段 `upstream` 由作者清单规范化入口生成。
+清单声明 `upstream_adapter`、版本 `5`，以及匹配的 `inputFormats` / `outputFormats`；固定阶段 `upstream` 由作者清单规范化入口生成。
 使用 `PluginBuilder::on` 注册
 `methods::UPSTREAM_ADAPTER_REGISTER` 与 `methods::UPSTREAM_ADAPTER_EXECUTE`
 
@@ -24,10 +24,20 @@
 | `transport` | `http_json`、`http_sse` 或 `websocket` |
 | `protocol` | 请求和客户端 wire 使用的协议 |
 | `models` | 公开请求模型的精确匹配，空集合沿用绑定范围 |
+| `account_ids` | 上游账号 ID 范围，必填；空数组匹配所有账号 |
 
 实例绑定沿用 Key、账号组、Provider、模型范围，只允许一次 `upstream` 绑定和 `reject` 故障策略。
 多个声明命中时按发布顺序选择首个适配器，插件负责声明的业务含义。适配器未命中时仍使用原生上游，
 已命中但不可用时拒绝请求。安装、配置、启停和升级使用已有插件管理
+
+账号范围只收窄绑定，不能扩大 Key、分组或模型权限。宿主先排除适配器不可用或认证类型不兼容的账号，
+再沿用原调度、亲和和租约；取得账号后从同一发布代次解析适配器。不同账号可以为同一公开模型选择不同适配器，
+未匹配账号保持原生执行，重叠声明仍按发布顺序取首个匹配。
+前置账号范围已匹配的可用适配器不受后置兜底声明故障影响。
+xAI 原生编码不支持的请求仍可选择匹配的适配器账号；原生账号会在取得租约前被排除
+
+账号范围由插件注册结果提供，不改变管理端 binding 中 `accountGroupIds` 的请求作用域语义。
+停用或卸载实例会移除其绑定；维护时须先停用依赖该适配器的账号并排空请求，账号范围不提供永久依赖约束。
 
 能力、清单、进程 RPC 和宿主兼容声明分别校验各自版本，见[清单](manifest.md)。
 Provider、业务协议和传输名称不能写入宿主兼容清单的 capability / RPC 版本位置

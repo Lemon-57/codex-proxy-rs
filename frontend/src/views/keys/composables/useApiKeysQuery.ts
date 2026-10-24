@@ -4,10 +4,12 @@ import type { ApiKey } from '@/api'
 import { computed, onMounted, shallowRef, watch } from 'vue'
 import { getApiKeys } from '@/api'
 import { useRequestState } from '@/composables/useRequestState'
+import { useTableSort } from '@/composables/useTableSort'
+import { apiKeyColumns } from '../constants'
 
 export function useApiKeysQuery() {
   const searchQuery = shallowRef('')
-  const sort = shallowRef<TableSort>()
+  const sort = useTableSort(apiKeyColumns, 'api-keys')
   const page = shallowRef(1)
   const pageSize = shallowRef(20)
   const total = shallowRef(0)

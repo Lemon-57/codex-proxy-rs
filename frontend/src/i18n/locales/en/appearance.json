@@ -11,9 +11,9 @@
       "pendingChanges": "Pending changes: {count}",
       "synced": "Synced",
       "themeEditingLevel": "Theme editing level",
-      "undoDraft": "Undo draft",
-      "restoreDefault": "Restore default",
-      "saveAndApply": "Save and apply",
+      "undoDraft": "Discard",
+      "restoreDefault": "Defaults",
+      "saveAndApply": "Save",
       "saved": "Saved",
       "themeEditor": "Theme editor",
       "themeTokenEditingPanel": "Theme token editor",
@@ -39,7 +39,7 @@
         "requestToday": "Requests today",
         "recentlyUsed": "Last used",
         "justNow": "Just now",
-        "hoursAgo": "2 hours ago",
+        "hoursAgo": "2 h ago",
         "componentOverview": "Component overview",
         "description": "Inspect component states, data density, and overlays together",
         "currentThemeSemanticColor": "Current theme semantic color",
@@ -114,8 +114,8 @@
         "demoKey": "Demo Key",
         "requestHealthTimeline": "Request a health timeline",
         "validRequestAvailability": "Valid request availability",
-        "todaySToken": "Today's tokens",
-        "hours": "5 hours",
+        "todaySToken": "Tokens",
+        "hours": "5 h",
         "requests": "08-23 {value}:00–{value2}:00 · Requests: {count}",
         "times": "Times",
         "dailyLimit": "Daily limit"
@@ -132,7 +132,9 @@
         "recovery": "Recovery 100%",
         "enlargeArtboard": "Enlarge artboard",
         "adaptToArtboard": "Adapt to artboard"
-      }
+      },
+      "open": "Preview",
+      "edit": "Edit"
     },
     "componentTokens": {
       "cardsAndContainers": "Cards and Containers",

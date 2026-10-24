@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use gateway_admin::{
     model::observability as admin_observability, ports::store::ObservabilityStore as _,
 };
-use gateway_core::diagnostics::TraceContext;
+use gateway_core::diagnostics::{MAX_TRACE_SNAPSHOT_BYTES, TraceContext};
 use gateway_core::engine::{
     ExecutionOutcome, ExecutionStore, ModelRequestFailureObservation,
     ModelRequestFinalization as CoreModelRequestFinalization, ModelRequestId,
@@ -1429,54 +1429,100 @@ async fn seed_running_request(pool: &sqlx::PgPool, id: &str) -> Result<(), sqlx:
 }
 
 #[tokio::test]
-async fn diagnostic_trace_is_finalized_atomically_and_available_for_failed_request_details() {
+async fn diagnostic_trace_pressure_preserves_terminal_outcomes_and_usage() {
     let Some(database) = TestDatabase::create("diagnostic_trace").await else {
         return;
     };
-    seed_running_request(&database.pool, "req_diagnostic_failed")
-        .await
-        .unwrap();
     let store = PgExecutionStore::new(database.pool.clone());
-    let mut finalization = successful_core_finalization("req_diagnostic_failed");
-    finalization.outcome = ExecutionOutcome::Failed;
-    finalization.client_status_code = Some(502);
-    let diagnostic = gateway_core::error::ProviderDiagnostic::new(
-        "OpenAI WebSocket receive idle timeout after 300s",
-    )
-    .with_classification("receive", "receive_idle_timeout");
-    let provider_error = gateway_core::error::ProviderError::new(
-        gateway_core::error::ProviderErrorKind::Timeout,
-        UpstreamSendState::Ambiguous,
-    )
-    .with_diagnostic(diagnostic);
-    finalization.error = Some(GatewayError::from_provider(&provider_error));
-    let trace = serde_json::json!({"schemaVersion": 1, "requestId": "req_diagnostic_failed", "events": [
-        {"attemptIndex": 1, "stage": "attempt.failed", "data": {"diagnostic": {
-            "stage": "receive", "code": "receive_idle_timeout", "message": "OpenAI WebSocket receive idle timeout after 300s"
-        }}},
-    ]});
-    finalization.diagnostic_trace_json = Some(trace.to_string());
-    ExecutionStore::finalize_model_request(&store, finalization)
-        .await
-        .unwrap();
-    let persisted: (String, serde_json::Value, String) = sqlx::query_as(
-        "select outcome, diagnostic_trace_json, error_message from model_request_observations where id = 'req_diagnostic_failed'"
-    ).fetch_one(&database.pool).await.unwrap();
-    assert_eq!(
-        persisted,
-        (
-            "failed".to_owned(),
-            trace.clone(),
-            "OpenAI WebSocket receive idle timeout after 300s".to_owned()
-        )
-    );
     let repository = super::observability_repository(&database.pool);
-    let detail = repository
-        .usage_record_detail("req_diagnostic_failed")
+    for (id, outcome, expected_outcome) in [
+        (
+            "req_diagnostic_success",
+            ExecutionOutcome::Succeeded,
+            "succeeded",
+        ),
+        ("req_diagnostic_failed", ExecutionOutcome::Failed, "failed"),
+    ] {
+        seed_running_request(&database.pool, id).await.unwrap();
+        let mut finalization = successful_core_finalization(id);
+        finalization.outcome = outcome;
+        finalization.usage.input_tokens = Some(100_000);
+        finalization.usage.output_tokens = Some(2000);
+        finalization.usage.total_tokens = Some(102_000);
+        finalization.cost = CalculatedCost::from_usd_ticks(10_000_000_000)
+            .unwrap()
+            .into_estimate();
+        finalization.timings.first_token_ms = Some(120);
+        finalization.timings.latency_ms = Some(42_000);
+        let trace = TraceContext::new(id);
+        trace.record("request.routed", json!({"scope": "all"}));
+        for stage in ["provider.request.input", "provider.request.outbound"] {
+            trace.record_evidence(stage, json!({"hashes": "a".repeat(6000)}));
+        }
+        for index in 0..500 {
+            trace.record(
+                "stream.sample",
+                json!({"index": index, "detail": "x".repeat(2000)}),
+            );
+        }
+        let error_message = if outcome == ExecutionOutcome::Failed {
+            finalization.client_status_code = Some(502);
+            let message = "OpenAI WebSocket receive idle timeout after 300s";
+            let provider_error = gateway_core::error::ProviderError::new(
+                gateway_core::error::ProviderErrorKind::Timeout,
+                UpstreamSendState::Ambiguous,
+            )
+            .with_diagnostic(
+                gateway_core::error::ProviderDiagnostic::new(message)
+                    .with_classification("receive", "receive_idle_timeout"),
+            );
+            trace.record_provider_failure(&provider_error);
+            finalization.error = Some(GatewayError::from_provider(&provider_error));
+            Some(message)
+        } else {
+            None
+        };
+        trace.record("request.finished", json!({"outcome": expected_outcome}));
+        let snapshot = trace.snapshot().unwrap();
+        let encoded = snapshot.to_string();
+        assert!(encoded.len() > 64 * 1024);
+        assert!(encoded.len() <= MAX_TRACE_SNAPSHOT_BYTES);
+        assert!(snapshot["droppedEvents"].as_u64().unwrap() > 0);
+        finalization.diagnostic_trace_json = Some(encoded);
+        ExecutionStore::finalize_model_request(&store, finalization)
+            .await
+            .expect("trace pressure must not discard the terminal result");
+        let persisted: Value = sqlx::query_scalar(
+            "select jsonb_build_object(
+               'outcome', outcome, 'input', input_tokens, 'output', output_tokens,
+               'cost', cost_amount::text, 'firstToken', first_token_ms,
+               'latency', latency_ms, 'error', error_message)
+             from model_request_observations where id = $1",
+        )
+        .bind(id)
+        .fetch_one(&database.pool)
         .await
         .unwrap();
-    assert_eq!(detail.trace, Some(trace));
-    assert!(detail.related_requests.is_empty());
+        assert_eq!(
+            persisted,
+            json!({
+                "outcome": expected_outcome, "input": 100_000, "output": 2000,
+                "cost": "1.0000000000", "firstToken": 120, "latency": 42_000,
+                "error": error_message,
+            })
+        );
+        let detail = repository.usage_record_detail(id).await.unwrap();
+        assert_eq!(detail.trace, Some(snapshot));
+        assert!(detail.related_requests.is_empty());
+    }
+    assert_eq!(
+        store
+            .recover_expired_model_requests(Utc::now() + Duration::minutes(20))
+            .await
+            .unwrap()
+            .requests,
+        0,
+    );
     database.close().await;
 }
 
@@ -1784,7 +1830,7 @@ async fn zero_attempt_finalization_rejects_sent_or_missing_attempt_facts_atomica
     for invalid_trace in [
         "not JSON".to_owned(),
         "[]".to_owned(),
-        json!({"data": "x".repeat(65_536)}).to_string(),
+        json!({"data": "x".repeat(MAX_TRACE_SNAPSHOT_BYTES)}).to_string(),
     ] {
         let mut finalization = early_failure(&request);
         finalization.diagnostic_trace_json = Some(invalid_trace);

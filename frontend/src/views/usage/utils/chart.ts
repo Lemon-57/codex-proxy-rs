@@ -104,7 +104,7 @@ export function usageTooltipContent(
   lines: string[],
 ) {
   const title = escapeTooltip(label)
-  return `<div style="margin:0 0 7px;padding:0 0 7px;border-bottom:1px solid ${theme.divider};color:${theme.textPrimary};font-family:var(--font-mono);font-size:11px;font-weight:750;line-height:1.2">${title}</div><div style="line-height:1.55">${lines.join('<br/>')}</div>`
+  return `<div style="margin:0 0 7px;padding:0 0 7px;color:${theme.textPrimary};font-family:var(--font-mono);font-size:11px;font-weight:750;line-height:1.2">${title}</div><div style="line-height:1.55">${lines.join('<br/>')}</div>`
 }
 
 export function usageTooltipItem(label: string, value: string, color: string) {
@@ -173,8 +173,8 @@ export function formatDurationAxis(value: number) {
   if (!Number.isFinite(value))
     return '—'
   if (value < 1_000)
-    return `${Math.round(value)}ms`
-  return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}s`
+    return `${Math.round(value)} ms`
+  return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)} s`
 }
 
 export function formatUsdAxis(value: number) {

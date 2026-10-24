@@ -34,7 +34,7 @@ const search = defineModel<string>('search', { required: true })
       </ZInput>
     </div>
 
-    <div class="flex shrink-0 items-center justify-end gap-2 md:ml-auto">
+    <div class="flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2 md:ml-auto">
       <ZButton
         v-if="selectedCount > 0"
         type="danger" variant="plain"
@@ -50,7 +50,7 @@ const search = defineModel<string>('search', { required: true })
         <template #icon>
           <Plus class="size-4" />
         </template>
-        {{ t('keys.filters.createApiKey') }}
+        {{ t('common.actions.create') }}
       </ZButton>
     </div>
   </div>

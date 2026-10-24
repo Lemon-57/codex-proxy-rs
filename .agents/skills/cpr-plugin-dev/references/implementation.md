@@ -1,7 +1,7 @@
 # 清单与处理器实现
 
-仅在编写或排查插件清单、Rust 处理器时读取，涉及 Rust 时使用[开发入口](../../cpr-dev-guide/SKILL.md)的 Rust 分支
-选择能力时只读 SDK 的[能力与方法](../../../../backend/crates/gateway-plugin/sdk/docs/capabilities.md#能力与方法)及所需能力章节
+开发、排查或审查插件清单、Rust 处理器时完整读取，先完成[插件入口](../SKILL.md#先读职责边界)的边界判断，涉及 Rust 时执行[开发入口](../../cpr-dev-guide/SKILL.md)的 Rust 分支
+使用能力前读取 SDK 的[能力与方法](../../../../backend/crates/gateway-plugin/sdk/docs/capabilities.md#能力与方法)及所用能力章节，已有实现的修复与审查也核对合同
 
 ## 清单与处理器
 

@@ -66,7 +66,7 @@ const locationPending = computed(() => testItems.value.filter(item => item.statu
             <span class="max-w-full truncate" :title="row.item.name">{{ row.item.name }}</span>
             <ProxyRegion v-if="row.test?.record" :proxy="row.test.record" class="max-w-full" />
             <span v-if="row.test?.record?.lastTest" class="min-w-0 break-all font-mono">
-              {{ row.test.record.lastTest.latencyMs }} ms<span v-if="row.test.record.lastTest.exitIpv4"> · IPv4 {{ row.test.record.lastTest.exitIpv4 }}</span><span v-if="row.test.record.lastTest.exitIpv6"> · IPv6 {{ row.test.record.lastTest.exitIpv6 }}</span>
+              <span class="whitespace-nowrap">{{ row.test.record.lastTest.latencyMs }} ms</span><span v-if="row.test.record.lastTest.exitIpv4"> · IPv4 {{ row.test.record.lastTest.exitIpv4 }}</span><span v-if="row.test.record.lastTest.exitIpv6"> · IPv6 {{ row.test.record.lastTest.exitIpv6 }}</span>
             </span>
           </div>
           <span v-if="row.message" class="col-span-2 text-cp-xs leading-relaxed wrap-anywhere" :class="row.result.status === 'succeeded' ? 'text-cp-warning-text' : proxyBatchStates[row.result.status].tone">{{ row.message }}</span>

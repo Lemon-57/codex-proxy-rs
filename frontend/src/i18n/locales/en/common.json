@@ -44,7 +44,7 @@
       "available": "Available",
       "unavailable": "Unavailable",
       "enabled": "Enabled",
-      "loading": "Loading…",
+      "loading": "Loading",
       "running": "Running",
       "completed": "Completed",
       "rateLimited": "Rate limited"
@@ -73,7 +73,7 @@
       "unknownAuth": "Unknown authentication type"
     },
     "location": {
-      "resolving": "Resolving exit location…",
+      "resolving": "Resolving exit location",
       "detect": "Resolve exit location and fill in the form",
       "countryCode": "Country code",
       "countryCodePlaceholder": "Enter a two-letter country code",
@@ -127,9 +127,9 @@
     },
     "time": {
       "justNow": "Just now",
-      "minutesAgo": "{count} minute ago | {count} minutes ago",
-      "hoursAgo": "{count} hour ago | {count} hours ago",
-      "daysAgo": "{count} day ago | {count} days ago"
+      "minutesAgo": "{count} min ago",
+      "hoursAgo": "{count} h ago",
+      "daysAgo": "{count} d ago"
     },
     "units": {
       "tokens": "Tokens"

@@ -152,6 +152,11 @@ impl Execution {
         if invocation.operation.protocol() != declaration.protocol
             || invocation.metadata.provider().as_str() != declaration.provider.as_str()
             || invocation.metadata.provider_account_id() != invocation.account.account_id()
+            || (!declaration.account_ids.is_empty()
+                && !declaration
+                    .account_ids
+                    .iter()
+                    .any(|id| id == invocation.account.account_id().as_str()))
             || !declaration
                 .authentication_kinds
                 .iter()

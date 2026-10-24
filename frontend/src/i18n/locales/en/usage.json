@@ -11,8 +11,8 @@
         "validRequest": "Valid request"
       },
       "validRequestsAvailability": "{time}, {label}, valid requests: {count}, availability: {reliabilityDisplay}",
-      "hours": "hours",
-      "day": "day",
+      "hours": "h",
+      "day": "d",
       "serviceSuccessRate": "Service success",
       "notCompleted": "Incomplete",
       "requestVolume": "Requests",
@@ -21,7 +21,7 @@
       "description": "Request outcomes · {granularityText}",
       "completionRate": "Completion",
       "abnormalEnd": "Abnormal",
-      "loading": "Loading requests…",
+      "loading": "Loading requests",
       "empty": "No requests in this range"
     },
     "billing": {
@@ -70,7 +70,7 @@
       "title": "Performance",
       "description": "Latency, throughput, scheduling",
       "performanceIndicators": "Performance indicators",
-      "loading": "Loading performance…",
+      "loading": "Loading performance",
       "noTtftSamples": "No TTFT samples in this range",
       "noThroughput": "No throughput samples in this range",
       "noScheduling": "No scheduling or capacity samples in this range",
@@ -128,9 +128,9 @@
       "mappedModel": "Model sent upstream after gateway mapping: {secondary}",
       "returnedModel": "Upstream response model: {returned} (matches the mapped request model)",
       "returnedModelHelp": "Model returned by upstream: {returned}",
-      "firstOutputWaiting": "First output waiting",
-      "reasoningToText": "Reasoning to the text",
-      "firstOneIsOutputToText": "The first one is output to the text",
+      "firstOutputWaiting": "First output",
+      "reasoningToText": "Reasoning → Text",
+      "firstOneIsOutputToText": "First output → Text",
       "textToCompletion": "Text to completion",
       "completedAfterFirstOutput": "Completed after first output",
       "admissionDecision": "Admission decision",
@@ -154,8 +154,8 @@
     "usage": "Usage",
     "averageTtft": "Average TTFT",
     "budget": {
-      "todaySQuota": "Daily quota",
-      "weeklyQuota": "Weekly quota",
+      "todaySQuota": "Daily",
+      "weeklyQuota": "Weekly",
       "quotaOverview": "Quota",
       "noLimit": "No limit",
       "remaining": "Remaining / {value}",
@@ -246,8 +246,9 @@
       "failureRate": "Failure rate: {rate}",
       "retryRate": "Retry rate: {rate}",
       "retries": "Retries: {count}",
-      "loading": "Loading diagnostics…",
-      "empty": "No diagnostics in this range"
+      "loading": "Loading diagnostics",
+      "empty": "No diagnostics in this range",
+      "download": "Download"
     },
     "cost": {
       "savings": "Savings",
@@ -263,8 +264,11 @@
       "tierPremium": "Tier premium",
       "perSuccessfulRequest": "Cost/success",
       "costCoverage": "Cost coverage",
-      "loading": "Loading costs…",
-      "empty": "No cost or cache savings data in this range"
+      "loading": "Loading costs",
+      "empty": "No cost or cache savings data in this range",
+      "premium": "Premium",
+      "coverage": "Coverage",
+      "perSuccessfulRequestHelp": "Cost per successful request"
     },
     "error": {
       "noDetails": "No detailed error message was recorded",

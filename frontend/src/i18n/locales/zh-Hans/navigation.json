@@ -14,6 +14,7 @@
       "open": "打开系统更新"
     },
     "switchLanguage": "切换语言（{value}）",
+    "languageLoadFailed": "语言加载失败，请刷新重试",
     "mainLabel": "主导航",
     "pluginsLabel": "插件导航",
     "pluginManagement": "插件管理",

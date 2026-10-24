@@ -20,6 +20,7 @@ mod analytics_buckets;
 mod analytics_reset;
 mod backup;
 mod backup_export;
+mod client_budget_buffer;
 mod client_budgets;
 mod client_keys;
 mod connection;

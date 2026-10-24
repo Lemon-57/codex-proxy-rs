@@ -7,9 +7,26 @@ use provider_openai::transport::{
 };
 
 mod breaker;
+mod cleanup;
 mod diagnostics;
 mod fingerprint;
 mod metadata;
+
+#[test]
+fn outbound_websocket_diagnostics_do_not_expose_target_credentials() {
+    let connection = CodexWebSocketConnection::new(
+        "wss://user:password@upstream.example/responses?access_token=secret",
+        vec![("authorization".into(), "Bearer credential".into())],
+    );
+    assert_eq!(
+        connection.opening_audit_snapshot().request_line,
+        "GET /responses HTTP/1.1"
+    );
+    let debug = format!("{connection:?}");
+    for value in ["password", "access_token", "secret", "credential"] {
+        assert!(!debug.contains(value));
+    }
+}
 
 fn rate_limit_event(used_percent: u64) -> String {
     json!({
@@ -1979,10 +1996,13 @@ async fn codex_backend_client_stream_should_cancel_while_inbound_is_backpressure
         timeout(Duration::from_secs(1), async {
             loop {
                 match websocket.next().await {
-                    Some(Ok(Message::Close(_))) => return,
+                    None
+                    | Some(Ok(Message::Close(_)))
+                    | Some(Err(tungstenite::Error::Protocol(
+                        tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+                    ))) => return,
                     Some(Ok(_)) => continue,
-                    Some(Err(error)) => panic!("websocket close should be graceful: {error}"),
-                    None => panic!("websocket ended without a close frame"),
+                    Some(Err(error)) => panic!("unexpected websocket cleanup error: {error}"),
                 }
             }
         })

@@ -46,18 +46,22 @@ watch(hasAttention, (value) => {
           {{ t('accounts.importTasks.created', { createdAtDisplay: task.createdAtDisplay }) }}
         </p>
       </div>
-      <ZButton
-        v-if="!task.finishedAt"
-        size="small"
-        :loading="stopping"
-        :disabled="task.stopRequested || task.counts.pending === 0"
-        @click="emit('stop')"
-      >
-        <template #icon>
-          <Square class="size-3 text-cp-error" />
-        </template>
-        {{ task.stopRequested || task.counts.pending === 0 ? t('accounts.importTasks.waitForCurrentEntryToEnd') : t('accounts.importTasks.stopUnstartedEntries') }}
-      </ZButton>
+      <div v-if="!task.finishedAt" class="grid max-w-full justify-items-end gap-1.5">
+        <ZButton
+          size="small"
+          :loading="stopping"
+          :disabled="task.stopRequested || task.counts.pending === 0"
+          @click="emit('stop')"
+        >
+          <template #icon>
+            <Square class="size-3 text-cp-error" />
+          </template>
+          {{ task.stopRequested || task.counts.pending === 0 ? t('accounts.importTasks.waitForCurrentEntryToEnd') : t('accounts.importTasks.stopUnstartedEntries') }}
+        </ZButton>
+        <p v-if="task.counts.pending > 0 || task.stopRequested" class="m-0 max-w-64 text-right text-cp-xs text-cp-text-secondary">
+          {{ t('accounts.importTasks.stopHelp') }}
+        </p>
+      </div>
       <ZButton v-else size="small" type="primary" variant="plain" @click="emit('viewAccounts')">
         {{ t('accounts.importTasks.viewAccount') }} <ArrowUpRight class="size-3.5" />
       </ZButton>

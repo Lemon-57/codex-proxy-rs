@@ -59,9 +59,9 @@ function quotaWindowCode(windowSeconds: number | null, role: AccountQuotaWindow[
     const hourSeconds = 60 * 60
 
     if (windowSeconds >= daySeconds && windowSeconds % daySeconds === 0)
-      return `${windowSeconds / daySeconds}D`
+      return `${windowSeconds / daySeconds} d`
     if (windowSeconds >= hourSeconds && windowSeconds % hourSeconds === 0)
-      return `${windowSeconds / hourSeconds}H`
+      return `${windowSeconds / hourSeconds} h`
   }
 
   switch (role) {
@@ -116,7 +116,7 @@ function quotaWindowCode(windowSeconds: number | null, role: AccountQuotaWindow[
         <article v-for="item in detailItems" :key="item.key">
           <div class="grid grid-cols-[32px_minmax(0,1fr)_auto] items-center gap-2.5">
             <span
-              class="grid h-5 w-8 place-items-center rounded-sm bg-cp-blue-container-strong font-mono text-[9px] leading-none font-heavy tracking-[0.04em] text-cp-blue-on-container"
+              class="grid h-5 w-8 place-items-center rounded-sm bg-cp-blue-container-strong font-mono text-[9px] leading-none font-heavy tracking-[0.04em] whitespace-nowrap text-cp-blue-on-container"
             >
               {{ item.code }}
             </span>

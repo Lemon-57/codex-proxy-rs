@@ -141,6 +141,24 @@ impl GrokAccountSessionSelector {
                     })
                     .collect()
             };
+            let accounts = accounts
+                .into_iter()
+                .filter(|account| {
+                    request.upstream_context.as_ref().is_none_or(|context| {
+                        context
+                            .upstream_adapter_for_account(
+                                &self.provider_kind,
+                                request.upstream_model(),
+                                account.id(),
+                            )
+                            .is_ok_and(|adapter| {
+                                adapter.map_or(!request.adapter_required, |adapter| {
+                                    adapter.supports_authentication(account.authentication_kind())
+                                })
+                            })
+                    })
+                })
+                .collect::<Vec<_>>();
             let catalog_eligible = if diagnostic {
                 accounts
             } else {

@@ -247,7 +247,8 @@
       "retryRate": "重試率 {rate}",
       "retries": "重試 {count}",
       "loading": "正在加載診斷數據",
-      "empty": "當前範圍暫無診斷數據"
+      "empty": "當前範圍暫無診斷數據",
+      "download": "下載"
     },
     "cost": {
       "savings": "節省",
@@ -264,7 +265,10 @@
       "perSuccessfulRequest": "每次成功請求",
       "costCoverage": "費用覆蓋",
       "loading": "正在加載費用數據",
-      "empty": "當前範圍暫無費用或緩存節省數據"
+      "empty": "當前範圍暫無費用或緩存節省數據",
+      "premium": "溢價",
+      "coverage": "覆蓋率",
+      "perSuccessfulRequestHelp": "每次成功請求的費用"
     },
     "error": {
       "noDetails": "未記錄具體錯誤消息",

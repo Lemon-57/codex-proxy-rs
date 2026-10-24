@@ -247,7 +247,8 @@
       "retryRate": "重试率 {rate}",
       "retries": "重试 {count}",
       "loading": "正在加载诊断数据",
-      "empty": "当前范围暂无诊断数据"
+      "empty": "当前范围暂无诊断数据",
+      "download": "下载"
     },
     "cost": {
       "savings": "节省",
@@ -264,7 +265,10 @@
       "perSuccessfulRequest": "每次成功请求",
       "costCoverage": "费用覆盖",
       "loading": "正在加载费用数据",
-      "empty": "当前范围暂无费用或缓存节省数据"
+      "empty": "当前范围暂无费用或缓存节省数据",
+      "premium": "溢价",
+      "coverage": "覆盖率",
+      "perSuccessfulRequestHelp": "每次成功请求的费用"
     },
     "error": {
       "noDetails": "未记录具体错误消息",

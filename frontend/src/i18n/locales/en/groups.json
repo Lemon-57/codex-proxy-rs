@@ -1,7 +1,7 @@
 {
   "groups": {
     "selector": {
-      "loading": "Loading groups…",
+      "loading": "Loading groups",
       "empty": "No groups available, create one in Account groups"
     },
     "actions": {
@@ -24,22 +24,22 @@
       "searchAccountGroup": "Search account group",
       "searchGroupName": "Search group name",
       "filterByGroupStatus": "Filter by group status",
-      "deleteSelected": "Delete selected ({count})",
+      "deleteSelected": "Delete ({count})",
       "createGroup": "Create group"
     },
     "editor": {
       "editDescription": "Edit group details and request permissions",
       "createDescription": "After creating the group, add accounts to it in Accounts",
-      "groupName": "Group name",
+      "groupName": "Name",
       "forExampleProductionAccount": "For example: production account",
-      "groupColor": "Group color",
+      "groupColor": "Color",
       "selectGroupColor": "Select group color",
       "fastMode": "Fast mode",
       "imageGeneration": "Image generation",
       "descriptionOptional": "Description (optional)",
       "groupDescription": "Group description",
       "describePurposeOfThisGroup": "Describe the purpose of this group",
-      "saveGroup": "Save group"
+      "saveGroup": "Save"
     },
     "metrics": {
       "restricted": "Restricted",

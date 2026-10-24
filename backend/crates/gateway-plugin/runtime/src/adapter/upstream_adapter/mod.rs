@@ -1,4 +1,4 @@
-//! 将插件上游适配贡献编译为可按请求选择的执行计划
+//! 将插件上游适配贡献编译为按请求与账号范围解析的执行计划
 
 mod event;
 mod execution;
@@ -10,9 +10,13 @@ pub(crate) mod target;
 use std::{fmt, sync::Arc};
 
 use gateway_core::{
+    account::ProviderAccountId,
     engine::{
         AttemptContext,
-        upstream_adapter::{UpstreamAdapter, UpstreamAdapterInvocation, UpstreamAdapterPlan},
+        upstream_adapter::{
+            UpstreamAdapter, UpstreamAdapterInvocation, UpstreamAdapterPlan,
+            UpstreamAdapterSelection,
+        },
     },
     error::{ProviderError, ProviderErrorKind},
     identity::ProviderKind,
@@ -58,6 +62,13 @@ impl UpstreamAdapter for PluginUpstreamAdapter {
         self.declaration.transport.as_str()
     }
 
+    fn supports_authentication(&self, kind: &str) -> bool {
+        self.declaration
+            .authentication_kinds
+            .iter()
+            .any(|candidate| candidate == kind)
+    }
+
     fn execute(
         self: Arc<Self>,
         invocation: UpstreamAdapterInvocation,
@@ -91,7 +102,8 @@ impl UpstreamAdapterPlan for PluginUpstreamAdapterPlan {
         context: &AttemptContext,
         provider: &ProviderKind,
         model: &UpstreamModelId,
-    ) -> Result<Option<Arc<dyn UpstreamAdapter>>, ProviderError> {
+        account: Option<&ProviderAccountId>,
+    ) -> Result<UpstreamAdapterSelection, ProviderError> {
         let model = context
             .requested_model()
             .map_or(model.as_str(), |model| model.as_str());
@@ -115,13 +127,29 @@ impl UpstreamAdapterPlan for PluginUpstreamAdapterPlan {
                         .iter()
                         .any(|candidate| candidate == model))
             {
+                if !adapter.declaration.account_ids.is_empty() {
+                    let Some(account) = account else {
+                        // 后置声明只覆盖未命中此账号范围的候选，不能提前以其故障拒绝整个请求
+                        return Ok(UpstreamAdapterSelection::PendingAccount);
+                    };
+                    if !adapter
+                        .declaration
+                        .account_ids
+                        .iter()
+                        .any(|id| id == account.as_str())
+                    {
+                        continue;
+                    }
+                }
                 if !adapter.session.is_ready() {
                     return Err(unavailable());
                 }
-                return Ok(Some(Arc::clone(adapter) as Arc<dyn UpstreamAdapter>));
+                return Ok(UpstreamAdapterSelection::Adapter(
+                    Arc::clone(adapter) as Arc<dyn UpstreamAdapter>
+                ));
             }
         }
-        Ok(None)
+        Ok(UpstreamAdapterSelection::Native)
     }
 }
 

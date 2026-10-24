@@ -29,7 +29,7 @@
       "unavailableCount": "Unavailable: {value}"
     },
     "activeAccounts": {
-      "todayTokens": "Today’s tokens",
+      "todayTokens": "Tokens",
       "title": "Active account usage",
       "sortByRecent": "Sorted by last used",
       "empty": "No recent account requests",
@@ -41,8 +41,8 @@
       "action": "Refresh overview",
       "failed": "Refresh failed, showing the last available statistics",
       "unavailable": "Statistics temporarily unavailable, try again later",
-      "lastUpdated": "Refreshes every 30 s, last refreshed {updatedAt}",
-      "waiting": "Refreshes every 30 s, waiting for the first update",
+      "lastUpdated": "Refreshes every 30 seconds, last refreshed {updatedAt}",
+      "waiting": "Refreshes every 30 seconds, waiting for the first update",
       "interval": "Refreshes every 30 s"
     },
     "metrics": {

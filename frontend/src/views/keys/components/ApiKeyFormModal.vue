@@ -149,7 +149,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
         <ZFormItem :label="t('keys.editor.requestsPerMinuteRpm')">
           <ZInput
             :model-value="form.requestsPerMinute" type="number"
-            :aria-label="t('keys.editor.requestsPerMinuteRpm')"
+            :aria-label="t('keys.editor.requestsPerMinute')"
             min="0"
             step="1"
             :placeholder="t('common.values.unlimited')"

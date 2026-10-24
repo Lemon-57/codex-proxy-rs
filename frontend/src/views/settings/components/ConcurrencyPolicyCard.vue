@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ZCard, ZForm, ZFormItem, ZIconButton, ZInput, ZPopover } from '@codex-proxy/ui'
 
-import { CircleAlert, Gauge } from '@lucide/vue'
+import { CircleAlert } from '@lucide/vue'
 
 import { useI18n } from 'vue-i18n'
 
@@ -28,11 +28,7 @@ const openaiGuardianReservedConcurrency = defineModel<string>('openaiGuardianRes
           min="0"
           max="4294967295"
           step="1"
-        >
-          <template #prefix>
-            <Gauge class="size-4" />
-          </template>
-        </ZInput>
+        />
       </ZFormItem>
 
       <ZFormItem :label="t('settings.concurrency.keyQueueCapacity')" :description="t('settings.concurrency.keyQueueHelp')">

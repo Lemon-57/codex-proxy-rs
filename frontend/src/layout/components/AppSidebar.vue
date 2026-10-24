@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { PluginManagementView } from '@/api'
 
-import { ZIconButton, ZMotionIcon, ZScrollbar } from '@codex-proxy/ui'
+import { ZIconButton, ZMotionIcon, ZPopover, ZScrollbar } from '@codex-proxy/ui'
 
 import {
   ArrowUpCircle,
@@ -440,43 +440,47 @@ onBeforeUnmount(() => {
           </span>
           <template v-for="item in navItems" :key="item.label">
             <div v-if="item.path === '/plugins'" class="relative z-10 grid min-w-0">
-              <button
-                type="button"
-                class="inline-flex h-11.5 cursor-pointer items-center rounded-cp border-0 bg-transparent text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cp-control-outline"
-                :class="[
-                  isCollapsed ? 'w-11.5 justify-center' : 'w-full gap-3 px-4',
-                  isActive(item.path)
-                    ? navFeedbackMuted
-                      ? 'font-bold text-cp-text transition-none'
-                      : 'font-bold text-cp-text transition-colors duration-200'
-                    : navFeedbackMuted
-                      ? 'font-semibold text-cp-text-secondary transition-none'
-                      : 'font-semibold text-cp-text-secondary transition-colors duration-200 hover:bg-cp-fill-quaternary hover:text-cp-text',
-                ]"
-                :aria-expanded="isCollapsed ? undefined : pluginGroupExpanded"
-                :aria-controls="isCollapsed ? undefined : pluginMenuId"
-                :aria-label="isCollapsed ? item.label : undefined"
-                :title="isCollapsed ? item.label : undefined"
-                @click="togglePluginGroup"
-              >
-                <component :is="item.icon" class="shrink-0" :size="20" />
-                <span
-                  class="sidebar-label min-w-0 flex-1 overflow-hidden whitespace-nowrap text-left transition-[opacity,transform] duration-200"
-                  :class="isCollapsed ? 'hidden' : 'w-auto'"
-                >
-                  {{ item.label }}
-                </span>
-                <span
-                  v-if="!isCollapsed"
-                  class="sidebar-label inline-flex size-4 shrink-0"
-                  aria-hidden="true"
-                >
-                  <ChevronDown
-                    class="size-4 transition-transform duration-200 motion-reduce:transition-none"
-                    :class="pluginGroupExpanded ? undefined : '-rotate-90'"
-                  />
-                </span>
-              </button>
+              <ZPopover trigger="hover" placement="right" role="tooltip" :disabled="!isCollapsed" :enterable="false" class="w-full">
+                <template #reference="{ close }">
+                  <button
+                    type="button"
+                    class="inline-flex h-11.5 cursor-pointer items-center rounded-cp border-0 bg-transparent text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cp-control-outline"
+                    :class="[
+                      isCollapsed ? 'w-11.5 justify-center' : 'w-full gap-3 px-4',
+                      isActive(item.path)
+                        ? navFeedbackMuted
+                          ? 'font-bold text-cp-text transition-none'
+                          : 'font-bold text-cp-text transition-colors duration-200'
+                        : navFeedbackMuted
+                          ? 'font-semibold text-cp-text-secondary transition-none'
+                          : 'font-semibold text-cp-text-secondary transition-colors duration-200 hover:bg-cp-fill-quaternary hover:text-cp-text',
+                    ]"
+                    :aria-expanded="isCollapsed ? undefined : pluginGroupExpanded"
+                    :aria-controls="isCollapsed ? undefined : pluginMenuId"
+                    :aria-label="isCollapsed ? item.label : undefined"
+                    @click="close(); togglePluginGroup()"
+                  >
+                    <component :is="item.icon" class="shrink-0" :size="20" />
+                    <span
+                      class="sidebar-label min-w-0 flex-1 overflow-hidden whitespace-nowrap text-left transition-[opacity,transform] duration-200"
+                      :class="isCollapsed ? 'hidden' : 'w-auto'"
+                    >
+                      {{ item.label }}
+                    </span>
+                    <span
+                      v-if="!isCollapsed"
+                      class="sidebar-label inline-flex size-4 shrink-0"
+                      aria-hidden="true"
+                    >
+                      <ChevronDown
+                        class="size-4 transition-transform duration-200 motion-reduce:transition-none"
+                        :class="pluginGroupExpanded ? undefined : '-rotate-90'"
+                      />
+                    </span>
+                  </button>
+                </template>
+                <span class="block px-3 py-2 text-cp-sm whitespace-nowrap">{{ item.label }}</span>
+              </ZPopover>
 
               <div
                 :id="pluginMenuId"
@@ -525,30 +529,35 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <button
-              v-else
-              type="button"
-              class="relative z-10 inline-flex h-11.5 cursor-pointer items-center rounded-cp border-0 text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cp-control-outline"
-              :class="[
-                isCollapsed ? 'w-11.5 justify-center' : 'w-full gap-3 px-4',
-                isActive(item.path)
-                  ? navFeedbackMuted
-                    ? 'bg-transparent font-bold text-cp-text transition-none'
-                    : 'bg-transparent font-bold text-cp-text transition-colors duration-200'
-                  : navFeedbackMuted
-                    ? 'bg-transparent font-semibold text-cp-text-secondary transition-none'
-                    : 'bg-transparent font-semibold text-cp-text-secondary transition-colors duration-200 hover:bg-cp-fill-quaternary hover:text-cp-text',
-              ]"
-              @click="navigate(item.path)"
-            >
-              <component :is="item.icon" class="shrink-0" :size="20" />
-              <span
-                class="sidebar-label overflow-hidden whitespace-nowrap transition-[opacity,transform] duration-200"
-                :class="isCollapsed ? 'pointer-events-none w-0' : 'w-auto'"
-              >
-                {{ item.label }}
-              </span>
-            </button>
+            <ZPopover v-else trigger="hover" placement="right" role="tooltip" :disabled="!isCollapsed" :enterable="false" class="relative z-10 w-full">
+              <template #reference="{ close }">
+                <button
+                  type="button"
+                  class="relative z-10 inline-flex h-11.5 cursor-pointer items-center rounded-cp border-0 text-sm leading-[1.15] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cp-control-outline"
+                  :class="[
+                    isCollapsed ? 'w-11.5 justify-center' : 'w-full gap-3 px-4',
+                    isActive(item.path)
+                      ? navFeedbackMuted
+                        ? 'bg-transparent font-bold text-cp-text transition-none'
+                        : 'bg-transparent font-bold text-cp-text transition-colors duration-200'
+                      : navFeedbackMuted
+                        ? 'bg-transparent font-semibold text-cp-text-secondary transition-none'
+                        : 'bg-transparent font-semibold text-cp-text-secondary transition-colors duration-200 hover:bg-cp-fill-quaternary hover:text-cp-text',
+                  ]"
+                  :aria-label="isCollapsed ? item.label : undefined"
+                  @click="close(); navigate(item.path)"
+                >
+                  <component :is="item.icon" class="shrink-0" :size="20" />
+                  <span
+                    class="sidebar-label overflow-hidden whitespace-nowrap transition-[opacity,transform] duration-200"
+                    :class="isCollapsed ? 'pointer-events-none w-0' : 'w-auto'"
+                  >
+                    {{ item.label }}
+                  </span>
+                </button>
+              </template>
+              <span class="block px-3 py-2 text-cp-sm whitespace-nowrap">{{ item.label }}</span>
+            </ZPopover>
           </template>
         </nav>
       </div>

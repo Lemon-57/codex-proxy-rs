@@ -41,9 +41,9 @@
       "action": "刷新概覽",
       "failed": "刷新失敗，顯示上次統計",
       "unavailable": "統計暫不可用，請稍後重試",
-      "lastUpdated": "自動刷新 30s，最近刷新 {updatedAt}",
-      "waiting": "自動刷新 30s，等待首次刷新",
-      "interval": "自動刷新 30s"
+      "lastUpdated": "自動刷新 30 秒，最近刷新 {updatedAt}",
+      "waiting": "自動刷新 30 秒，等待首次刷新",
+      "interval": "自動刷新 30 秒"
     },
     "metrics": {
       "title": "核心指標",

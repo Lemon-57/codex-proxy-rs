@@ -132,7 +132,9 @@
         "recovery": "恢复 100%",
         "enlargeArtboard": "放大画板",
         "adaptToArtboard": "适应画板"
-      }
+      },
+      "open": "预览",
+      "edit": "编辑"
     },
     "componentTokens": {
       "cardsAndContainers": "卡片与容器",

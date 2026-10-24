@@ -5,7 +5,7 @@ use super::{
     pump::run_pump,
     state::{ConnectionCommand, ConnectionStats},
 };
-use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
+use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, close_code};
 use futures::{Sink, Stream};
 use gateway_core::{
     engine::middleware::{FrozenMiddlewarePlan, MiddlewareHeader},
@@ -142,7 +142,7 @@ impl ResponsesWebSocketConnection {
     /// pump 已关闭、写入超时或 transport 失败时返回稳定错误
     pub async fn send_text(
         &mut self,
-        payload: String,
+        payload: impl Into<Utf8Bytes>,
         context: WriteContext,
     ) -> Result<WriteOutcome, ConnectionWriteError> {
         self.send(Message::Text(payload.into()), context).await

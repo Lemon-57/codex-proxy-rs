@@ -4,7 +4,7 @@
       "description": "Save or merge the configuration below and then restart Codex",
       "platform": "Platform",
       "toggleWebSocket": "Switch WebSocket configuration",
-      "importTo": "Import to",
+      "importTo": "Import",
       "selectImportTool": "Choose a tool to import into",
       "ccSwitchDescription": "Manage AI client configurations",
       "viewOnGitHub": "View {name} on GitHub",
@@ -20,7 +20,8 @@
       "disableKey": "Disable",
       "enableKey": "Enable",
       "deleteKey": "Delete",
-      "deletedApiKeyDeletedApiKeys": "Deleted {count} API key | Deleted {count} API keys"
+      "deletedApiKeyDeletedApiKeys": "Deleted {count} API key | Deleted {count} API keys",
+      "configure": "Configure"
     },
     "day": "Day",
     "dailyUsage": "Daily usage",
@@ -51,7 +52,7 @@
       "apiKeyFilteringAndOperations": "API key filtering and operations",
       "searchPlaceholder": "Search by name or label",
       "searchLabel": "Search API keys by name or label",
-      "deleteSelected": "Delete selected ({count})",
+      "deleteSelected": "Delete ({count})",
       "createApiKey": "Create API key"
     },
     "editor": {
@@ -66,8 +67,8 @@
       "dailyLimitUsd": "Daily limit (USD)",
       "weeklyLimit": "Weekly limit",
       "weeklyLimitUsd": "Weekly limit (USD)",
-      "maximumConcurrency": "Maximum concurrency",
-      "requestsPerMinuteRpm": "Requests per minute (RPM)",
+      "maximumConcurrency": "Concurrency",
+      "requestsPerMinuteRpm": "RPM",
       "updated": "API key updated",
       "created": "API key created",
       "validation": {

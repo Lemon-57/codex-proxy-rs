@@ -891,7 +891,7 @@ impl StreamingExecutionBody {
                 }
                 continue;
             }
-            // 已提交的流在确认 Core 终结后才交付成功终态，不能先输出 completed 再报结算失败
+            // 已提交的流先确认 Core 终结，避免后续 EOF 验证推翻已交付的成功终态
             if self.awaiting_terminal_eof && self.committed {
                 self.verify_terminal_eof().await?;
                 encoded.push_back(done_frame());

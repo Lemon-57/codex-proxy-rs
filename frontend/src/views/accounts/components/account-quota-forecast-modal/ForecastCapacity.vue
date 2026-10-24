@@ -55,7 +55,7 @@ const metrics = computed(() => [
     </div>
 
     <div class="grid gap-2">
-      <div class="flex justify-between text-cp-xs text-cp-text-secondary">
+      <div class="flex flex-wrap justify-between gap-x-4 gap-y-1 text-cp-xs text-cp-text-secondary">
         <span>{{ t('accounts.quotaForecast.alreadyRecordedThisCycle') }}</span>
         <span>{{ forecast.extrapolated ? t('accounts.quotaForecast.equivalentCapacityOverDays', { targetDays: forecast.targetDays }) : t('accounts.quotaForecast.projectedTotal') }}</span>
       </div>

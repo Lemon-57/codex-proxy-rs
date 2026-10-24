@@ -65,7 +65,7 @@ function updateStorage<Key extends keyof StorageForm>(key: Key, value: StorageFo
             <CircleCheck v-if="verified" class="size-4 text-cp-success-text" />
             <CircleAlert v-else class="size-4 text-cp-warning-text" />
           </template>
-          {{ testing ? t('settings.backup.storage.testing') : t('accounts.connectionTest.title') }}
+          {{ testing ? t('settings.backup.storage.testing') : t('settings.backup.storage.test') }}
         </ZButton>
         <ZButton type="primary" :loading="saving" :disabled="disabled" @click="emit('save')">
           <template #icon>

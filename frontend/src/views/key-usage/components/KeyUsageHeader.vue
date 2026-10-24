@@ -52,7 +52,7 @@ async function logout() {
         <AppLanguageMenu size="default" variant="solid" />
         <ZButton :loading="configuring" @click="$emit('configure')">
           <Terminal class="size-4" />
-          {{ t('usage.header.keyConfiguration') }}
+          {{ t('keys.actions.configure') }}
         </ZButton>
         <ZSelect v-model="period" :aria-label="t('usage.header.statisticsTimeRange')" class="w-29" :options="[{ label: t('usage.header.today'), value: 'today' }, { label: t('usage.header.lastDays'), value: '7d' }, { label: t('usage.header.lastThirtyDays'), value: '30d' }]" />
         <ZSelect v-model="refreshInterval" :aria-label="t('usage.header.automaticRefreshFrequency')" class="w-30" :options="[{ label: t('usage.header.refreshEveryS'), value: '30' }, { label: t('usage.header.refreshInterval'), value: '60' }, { label: t('usage.header.pauseRefresh'), value: '0' }]" />

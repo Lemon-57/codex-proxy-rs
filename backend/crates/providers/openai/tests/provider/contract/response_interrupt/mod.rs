@@ -1,5 +1,7 @@
 //! 验证未知控制帧和迟到中断使用原连接，并在复用时撤销旧执行控制权
 
+mod cleanup;
+
 use super::*;
 use gateway_core::engine::response_control::{ResponseControl, ResponseControlUnavailable};
 

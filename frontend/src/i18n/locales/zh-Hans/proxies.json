@@ -115,15 +115,16 @@
       "affectedAccounts": "将更新 {count} 个关联账号的出口",
       "pendingResultsHelp": "待确认项可能已保存，继续添加前请刷新核对",
       "saveAction": "保存代理",
-      "waitForCurrentOperationToEnd": "等待当前操作结束",
-      "stopSubsequentOperations": "停止后续操作",
+      "waitForCurrentOperationToEnd": "收尾中",
+      "stopSubsequentOperations": "停止后续",
       "testing": "正在测试",
       "adding": "正在添加",
       "editItemsNotAdded": "修改未添加项",
       "testAddedProxies": "测试已添加的 {count} 条",
       "testAfterAdding": "添加后测试",
       "add": "添加 {count} 条",
-      "addProxy": "添加代理"
+      "addProxy": "添加代理",
+      "stopHelp": "停止后仍会完成当前操作"
     },
     "region": {
       "connectionFailed": "连接失败",

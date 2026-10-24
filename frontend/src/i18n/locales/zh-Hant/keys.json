@@ -20,7 +20,8 @@
       "disableKey": "停用",
       "enableKey": "啓用",
       "deleteKey": "刪除",
-      "deletedApiKeyDeletedApiKeys": "已刪除 {count} 個 API Key"
+      "deletedApiKeyDeletedApiKeys": "已刪除 {count} 個 API Key",
+      "configure": "配置"
     },
     "day": "日",
     "dailyUsage": "日用量",
@@ -51,7 +52,7 @@
       "apiKeyFilteringAndOperations": "API Key 篩選與操作",
       "searchPlaceholder": "搜索名稱或標籤",
       "searchLabel": "搜索 API Key 名稱或標籤",
-      "deleteSelected": "刪除選中 ({count})",
+      "deleteSelected": "刪除 ({count})",
       "createApiKey": "創建 API Key"
     },
     "editor": {

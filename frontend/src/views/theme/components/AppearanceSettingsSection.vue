@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ZButton, ZInput, ZPageHeader, ZScrollbar, ZSegmented } from '@codex-proxy/ui'
-import { Check, RotateCcw, Save, Search, Undo2 } from '@lucide/vue'
+import { Check, Eye, Pencil, RotateCcw, Save, Search, Undo2 } from '@lucide/vue'
 
-import { computed } from 'vue'
+import { computed, shallowRef } from 'vue'
 
 import { useI18n } from 'vue-i18n'
 
@@ -14,6 +14,7 @@ import ThemeEditorPreview from './ThemeEditorPreview.vue'
 import ThemeGlobalTokenPanel from './ThemeGlobalTokenPanel.vue'
 
 const { t } = useI18n({ useScope: 'global' })
+const mobilePreviewOpen = shallowRef(false)
 
 const {
   draft,
@@ -49,6 +50,7 @@ const scopeOptions = computed(() => ([
 
 function switchScope(value: string) {
   scope.value = value === 'component' ? 'component' : 'global'
+  mobilePreviewOpen.value = false
 }
 
 function saveTheme(event: MouseEvent) {
@@ -61,7 +63,7 @@ function saveTheme(event: MouseEvent) {
 </script>
 
 <template>
-  <div class="flex min-h-0 w-full flex-col">
+  <div class="@container flex min-h-0 min-w-0 w-full flex-col">
     <ZPageHeader :title="t('navigation.appearance')">
       <template #description>
         <span class="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -77,7 +79,7 @@ function saveTheme(event: MouseEvent) {
       </template>
 
       <template #actions>
-        <div class="flex flex-wrap items-center justify-end gap-2">
+        <div class="flex max-w-[100cqw] flex-wrap items-center justify-end gap-2">
           <ZSegmented
             :model-value="scope"
             :aria-label="t('appearance.settings.themeEditingLevel')"
@@ -85,6 +87,13 @@ function saveTheme(event: MouseEvent) {
             size="small"
             @update:model-value="switchScope"
           />
+          <ZButton size="small" class="min-[768px]:hidden" @click="mobilePreviewOpen = !mobilePreviewOpen">
+            <template #icon>
+              <Pencil v-if="mobilePreviewOpen" class="size-3.5" />
+              <Eye v-else class="size-3.5" />
+            </template>
+            {{ mobilePreviewOpen ? t('appearance.preview.edit') : t('appearance.preview.open') }}
+          </ZButton>
           <ZButton size="small" variant="text" :disabled="!dirty" @click="resetDraft">
             <template #icon>
               <Undo2 class="size-3.5" />
@@ -116,7 +125,8 @@ function saveTheme(event: MouseEvent) {
         class="theme-workbench-body grid min-h-180 gap-3 xl:min-h-0 xl:flex-1 xl:overflow-hidden xl:grid-cols-[370px_minmax(0,1fr)]"
       >
         <aside
-          class="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 overflow-hidden rounded-cp-lg bg-cp-bg-container pt-3 pr-0 pb-3 pl-3 shadow-cp-secondary"
+          class="h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3 overflow-hidden rounded-cp-lg bg-cp-bg-container pt-3 pr-0 pb-3 pl-3 shadow-cp-secondary min-[768px]:grid"
+          :class="mobilePreviewOpen ? 'hidden' : 'grid'"
           :aria-label="t('appearance.settings.themeTokenEditingPanel')"
         >
           <ZInput
@@ -160,7 +170,7 @@ function saveTheme(event: MouseEvent) {
           </ZScrollbar>
         </aside>
 
-        <div class="hidden min-h-0 min-[768px]:block">
+        <div class="min-h-0 min-[768px]:block" :class="mobilePreviewOpen ? 'block' : 'hidden'">
           <ThemeEditorPreview v-model="preview" class="h-full" :theme="previewTheme" :style="previewStyle" />
         </div>
       </div>

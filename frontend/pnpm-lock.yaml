@@ -195,7 +195,7 @@ importers:
         specifier: 1.0.1
         version: 1.0.1(vue@3.5.44(typescript@6.0.3))
       '@codex-proxy/ui':
-        specifier: github:zyycn/codex-proxy-ui#8177ba741376564f229aef50da8e76d29e4a5282
+        specifier: github:zyycn/codex-proxy-ui#v0.6.0
         version: https://codeload.github.com/zyycn/codex-proxy-ui/tar.gz/8177ba741376564f229aef50da8e76d29e4a5282(axios@1.20.0(debug@4.4.3))(change-case@5.4.4)(vite@8.3.4(@types/node@26.6.5)(jiti@2.7.0)(yaml@2.9.0))(vue@3.5.44(typescript@6.0.3))
       '@fontsource-variable/inter':
         specifier: ^5.3.0

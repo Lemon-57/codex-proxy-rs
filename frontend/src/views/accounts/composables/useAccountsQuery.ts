@@ -4,6 +4,8 @@ import type { Account } from '@/api'
 import { computed, onMounted, shallowRef, watch } from 'vue'
 import { getAccounts } from '@/api'
 import { usePagedQuery } from '@/composables/usePagedQuery'
+import { useTableSort } from '@/composables/useTableSort'
+import { accountColumns } from '../constants'
 
 export function useAccountsQuery() {
   const searchQuery = shallowRef('')
@@ -15,7 +17,7 @@ export function useAccountsQuery() {
   const providerQuery = shallowRef('')
   const statusQuery = shallowRef('')
   const groupQuery = shallowRef('')
-  const sort = shallowRef<TableSort>()
+  const sort = useTableSort(accountColumns, 'accounts')
   const accountSummary = shallowRef({
     total: 0,
     normal: 0,

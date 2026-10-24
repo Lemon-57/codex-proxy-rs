@@ -1,6 +1,8 @@
 //! 验证 Codex SSE 转换保留协议事件并提取模型和用量事实
 
-use gateway_core::event::{ContentKind, FinishReason, GatewayEvent, ProviderEvent};
+use gateway_core::event::{
+    ContentKind, EventSequenceValidator, FinishReason, GatewayEvent, ProviderEvent,
+};
 
 use provider_openai::transport::canonical::{
     CodexCanonicalDecoder, CodexCanonicalError, CodexCanonicalFailure, CodexCanonicalOutcome,
@@ -699,6 +701,139 @@ fn decoder_should_normalize_text_usage_and_completion() {
         GatewayEvent::Completed(meta)
             if meta.finish_reason() == Some(FinishReason::Stop)
     ));
+}
+
+#[test]
+fn reasoning_parts_share_item_registration_and_preserve_wire() {
+    for websocket in [false, true] {
+        for (family, index_field, part_type) in [
+            ("reasoning_summary", "summary_index", "summary_text"),
+            ("reasoning", "content_index", "reasoning_text"),
+        ] {
+            let trace = gateway_core::diagnostics::TraceContext::new("req_reasoning_parts");
+            let mut decoder = CodexCanonicalDecoder::new("test-model")
+                .with_trace(trace.clone())
+                .with_raw_sse_passthrough();
+            let mut frames = vec![
+                json!({"type":"response.created", "response":{"id":"resp_parts", "model":"test-model"}}),
+                json!({"type":"response.output_item.added", "output_index":0,
+                    "item":{"id":"rs_parts", "type":"reasoning", "summary":[]}}),
+            ];
+            for (index, text) in [(0, "first"), (1, "second")] {
+                frames.extend([
+                    json!({"type":format!("response.{family}_part.added"), "item_id":"rs_parts",
+                        "output_index":0, (index_field):index, "part":{"type":part_type, "text":""}}),
+                    json!({"type":format!("response.{family}_text.delta"), "item_id":"rs_parts",
+                        "output_index":0, (index_field):index, "delta":text}),
+                    json!({"type":format!("response.{family}_part.done"), "item_id":"rs_parts",
+                        "output_index":0, (index_field):index, "part":{"type":part_type, "text":text}}),
+                ]);
+            }
+            frames.push(json!({"type":"response.completed", "response":{
+                "id":"resp_parts", "model":"test-model", "status":"completed"}}));
+            let mut all_events = Vec::new();
+            for frame in &frames {
+                let raw = if websocket {
+                    frame.to_string()
+                } else {
+                    format!(
+                        "event: {}\ndata: {frame}\n\n",
+                        frame["type"].as_str().unwrap()
+                    )
+                };
+                let events = if websocket {
+                    decoder.push_websocket(&raw)
+                } else {
+                    decoder.push(raw.as_bytes())
+                }
+                .expect("reasoning event remains deliverable");
+                let wire = events
+                    .iter()
+                    .filter_map(ProviderEvent::wire_event)
+                    .collect::<Vec<_>>();
+                assert_eq!(wire.len(), 1);
+                let delivered = if websocket {
+                    wire[0].raw_websocket_message().map(str::as_bytes)
+                } else {
+                    wire[0].raw_sse_frame().map(AsRef::as_ref)
+                };
+                assert_eq!(delivered, Some(raw.as_bytes()));
+                if frame["type"] == format!("response.{family}_part.added") {
+                    let added = canonical_facts(&events)
+                        .into_iter()
+                        .filter_map(|fact| match fact {
+                            GatewayEvent::ContentAdded(item) => Some((item.index(), item.kind())),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let expected = if frame[index_field] == 0 {
+                        vec![]
+                    } else {
+                        vec![(1, ContentKind::Reasoning)]
+                    };
+                    assert_eq!(added, expected, "each part is registered before its delta");
+                }
+                all_events.extend(events);
+            }
+            let facts = canonical_facts(&all_events);
+            let mut validator = EventSequenceValidator::new();
+            for fact in &facts {
+                validator
+                    .observe(fact)
+                    .expect("valid canonical event sequence");
+            }
+            validator.finish().expect("completed canonical sequence");
+            let reasoning = facts
+                .iter()
+                .filter_map(|fact| match fact {
+                    GatewayEvent::ReasoningDelta(delta) => {
+                        Some((delta.content_index, delta.text.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reasoning, [(0, "first"), (1, "second")]);
+            assert!(
+                trace.snapshot().unwrap()["stageCounts"]["provider.response.parse_gap"].is_null()
+            );
+        }
+    }
+}
+
+#[test]
+fn reasoning_part_type_conflict_preserves_registered_content_and_wire() {
+    let trace = gateway_core::diagnostics::TraceContext::new("req_part_conflict");
+    let mut decoder = CodexCanonicalDecoder::new("test-model").with_trace(trace.clone());
+    let frames = [
+        json!({"type":"response.created", "response":{"id":"resp_conflict", "model":"test-model"}}),
+        json!({"type":"response.output_item.added", "output_index":0, "item":{"type":"reasoning"}}),
+        json!({"type":"response.content_part.added", "output_index":0, "content_index":0,
+            "part":{"type":"output_text", "text":""}}),
+        json!({"type":"response.reasoning_summary_text.delta", "output_index":0, "summary_index":0, "delta":"reasoning"}),
+    ];
+    let mut all_events = Vec::new();
+    for frame in &frames {
+        let raw = frame.to_string();
+        let events = decoder
+            .push_websocket(&raw)
+            .expect("wire survives projection conflict");
+        let wire = events
+            .iter()
+            .filter_map(ProviderEvent::wire_event)
+            .collect::<Vec<_>>();
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].raw_websocket_message(), Some(raw.as_str()));
+        all_events.extend(events);
+    }
+    let facts = canonical_facts(&all_events);
+    assert!(
+        matches!(facts.as_slice(), [GatewayEvent::Started(_), GatewayEvent::ContentAdded(item), GatewayEvent::ReasoningDelta(delta)]
+        if item.kind() == ContentKind::Reasoning && delta.text == "reasoning")
+    );
+    assert_eq!(
+        trace.snapshot().unwrap()["stageCounts"]["provider.response.parse_gap"],
+        1
+    );
 }
 
 #[test]

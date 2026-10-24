@@ -232,7 +232,7 @@ function costAmount(value: string | null, pointIndex: number) {
     as="article"
     :title="t('usage.cost.costEfficiency')"
     :description="t('usage.cost.description')"
-    class="min-h-90 xl:h-full"
+    class="@container/cost min-h-90 xl:h-full"
   >
     <template #actions>
       <ZSegmented v-model="activeView" :aria-label="t('usage.cost.costView')" :options="viewOptions" :disabled="loading" />
@@ -240,34 +240,34 @@ function costAmount(value: string | null, pointIndex: number) {
 
     <template #body>
       <div class="grid min-h-66 gap-3">
-        <div v-if="hasData" class="grid grid-cols-5 gap-1 rounded-xl bg-cp-fill-quaternary/45 p-2">
+        <div v-if="hasData" class="grid grid-cols-2 gap-x-1 gap-y-3 rounded-xl bg-cp-fill-quaternary/45 p-2 @min-[24rem]/cost:grid-cols-3 @min-[40rem]/cost:grid-cols-5">
           <div class="grid min-w-0 gap-1 px-1.5">
-            <span class="truncate text-[10px] font-bold text-cp-text-quaternary">{{ t('usage.cost.actualCost') }}</span>
-            <strong class="truncate font-mono text-cp-sm font-heavy tabular-nums text-cp-text" :title="formatUsd(cost.estimatedCost)">
+            <span class="text-[10px] font-bold text-cp-text-quaternary" :title="t('usage.billing.totalCost')">{{ t('usage.cost.actualCost') }}</span>
+            <strong class="wrap-anywhere font-mono text-cp-sm font-heavy tabular-nums text-cp-text" :title="formatUsd(cost.estimatedCost)">
               {{ formatUsd(cost.estimatedCost) }}
             </strong>
           </div>
           <div class="grid min-w-0 gap-1 px-1.5">
-            <span class="truncate text-[10px] font-bold text-cp-text-quaternary">{{ t('usage.cost.cacheSavings') }}</span>
-            <strong class="truncate font-mono text-cp-sm font-heavy tabular-nums text-cp-green-text" :title="formatUsd(cost.cacheSavings)">
+            <span class="text-[10px] font-bold text-cp-text-quaternary" :title="t('usage.cost.cacheSavings')">{{ t('usage.cost.savings') }}</span>
+            <strong class="wrap-anywhere font-mono text-cp-sm font-heavy tabular-nums text-cp-green-text" :title="formatUsd(cost.cacheSavings)">
               {{ formatUsd(cost.cacheSavings) }}
             </strong>
           </div>
           <div class="grid min-w-0 gap-1 px-1.5">
-            <span class="truncate text-[10px] font-bold text-cp-text-quaternary">{{ t('usage.cost.tierPremium') }}</span>
-            <strong class="truncate font-mono text-cp-sm font-heavy tabular-nums text-cp-orange-text" :title="formatUsd(cost.tierPremium)">
+            <span class="text-[10px] font-bold text-cp-text-quaternary" :title="t('usage.cost.tierPremium')">{{ t('usage.cost.premium') }}</span>
+            <strong class="wrap-anywhere font-mono text-cp-sm font-heavy tabular-nums text-cp-orange-text" :title="formatUsd(cost.tierPremium)">
               {{ formatUsd(cost.tierPremium) }}
             </strong>
           </div>
           <div class="grid min-w-0 gap-1 px-1.5">
-            <span class="truncate text-[10px] font-bold text-cp-text-quaternary">{{ t('usage.cost.perSuccessfulRequest') }}</span>
-            <strong class="truncate font-mono text-cp-sm font-heavy tabular-nums text-cp-text" :title="formatUsd(cost.costPerSuccessfulRequest, true)">
+            <span class="text-[10px] font-bold text-cp-text-quaternary" :title="t('usage.cost.perSuccessfulRequestHelp')">{{ t('usage.cost.perSuccessfulRequest') }}</span>
+            <strong class="wrap-anywhere font-mono text-cp-sm font-heavy tabular-nums text-cp-text" :title="formatUsd(cost.costPerSuccessfulRequest, true)">
               {{ formatUsd(cost.costPerSuccessfulRequest, true) }}
             </strong>
           </div>
           <div class="grid min-w-0 gap-1 px-1.5">
-            <span class="truncate text-[10px] font-bold text-cp-text-quaternary">{{ t('usage.cost.costCoverage') }}</span>
-            <strong class="truncate font-mono text-cp-sm font-heavy tabular-nums text-cp-text">
+            <span class="text-[10px] font-bold text-cp-text-quaternary" :title="t('usage.cost.costCoverage')">{{ t('usage.cost.coverage') }}</span>
+            <strong class="wrap-anywhere font-mono text-cp-sm font-heavy tabular-nums text-cp-text">
               {{ formatPercent(coverageRate) }}
             </strong>
           </div>

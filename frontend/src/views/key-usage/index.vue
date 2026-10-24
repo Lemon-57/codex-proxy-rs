@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { ZInput, ZScrollbar, ZSelect } from '@codex-proxy/ui'
+import { ZInput, ZScrollbar } from '@codex-proxy/ui'
 import { Search } from '@lucide/vue'
-import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ApiKeyConfigModal from '@/components/ApiKeyConfigModal.vue'
 import RequestHealthTimelineCard from '@/components/usage/RequestHealthTimelineCard.vue'
@@ -19,7 +18,6 @@ const { t } = useI18n({ useScope: 'global' })
 const { period, model, kind, refreshInterval, overview, overviewLoading, overviewError, refreshing, recordsStale, records, refresh, changePageSize, changePage } = useKeyUsage()
 const { items, currentPage, pageSize, total, loading: recordsLoading, error: recordsError } = records
 const { showConfig, configKey, configuring, apiBaseUrl, openConfig, copyConfig } = useKeyConfig()
-const fieldOptions = computed(() => [{ value: 'model', label: t('usage.fields.model') }])
 </script>
 
 <template>
@@ -30,9 +28,9 @@ const fieldOptions = computed(() => [{ value: 'model', label: t('usage.fields.mo
           <KeyUsageHeader v-model:period="period" v-model:refresh-interval="refreshInterval" :name="overview?.key.name" :prefix="overview?.key.prefix" :refreshing="refreshing || overviewLoading" :configuring="configuring" @refresh="refresh" @configure="openConfig" />
           <div class="flex flex-wrap items-center justify-between gap-3">
             <span v-if="overview" class="text-cp-sm text-cp-text-tertiary">{{ t('usage.page.updated', { asOfDisplay: overview.asOfDisplay }) }}</span>
-            <div class="ml-auto grid w-full min-w-0 grid-cols-[8rem_minmax(0,1fr)] gap-2 sm:w-md sm:flex-none">
-              <ZSelect model-value="model" :options="fieldOptions" :aria-label="t('usage.filters.fieldLabel')" />
-              <ZInput v-model="model" class="w-full" :placeholder="t('usage.filters.enterFilterValue')" :aria-label="t('usage.filters.valueLabel')" :maxlength="128">
+            <div class="ml-auto flex w-full min-w-0 items-center gap-3 sm:w-md sm:flex-none">
+              <span id="key-usage-model-label" class="shrink-0 text-cp-sm text-cp-text-secondary">{{ t('usage.fields.model') }}</span>
+              <ZInput id="key-usage-model" v-model="model" class="min-w-0 flex-1" :placeholder="t('usage.filters.enterFilterValue')" aria-labelledby="key-usage-model-label" :maxlength="128">
                 <template #prefix>
                   <Search class="size-4.5 text-cp-text-tertiary" />
                 </template>

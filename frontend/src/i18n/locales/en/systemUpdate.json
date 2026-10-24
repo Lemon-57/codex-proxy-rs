@@ -21,7 +21,7 @@
         "label": "Experimental",
         "description": "Current experimental release line only"
       },
-      "loading": "Loading the current release channel…",
+      "loading": "Loading the current release channel",
       "label": "Update channel",
       "help": "About update channels",
       "description": "This selection applies to the current check only, reopening uses the installed version's channel and does not install or downgrade automatically"
@@ -46,17 +46,17 @@
     "application": "Application updates",
     "releasePage": "Release page",
     "status": {
-      "checkingVersion": "Checking for updates…",
+      "checkingVersion": "Checking for updates",
       "lastFailed": "Last operation failed",
-      "updating": "Updating…",
+      "updating": "Updating",
       "restarting": "Restarting",
-      "checking": "Checking…",
+      "checking": "Checking",
       "restartRequired": "Restart required",
       "available": "Update available",
       "upToDate": "No updates available",
       "notChecked": "Not checked",
-      "retrying": "Update status is temporarily unavailable, retrying…",
-      "confirmingStart": "Checking whether the update has started…"
+      "retrying": "Update status is temporarily unavailable, retrying",
+      "confirmingStart": "Checking whether the update has started"
     },
     "targetVersion": "Target version v{version}",
     "releaseNotes": "Release notes",

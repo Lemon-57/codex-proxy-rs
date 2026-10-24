@@ -44,7 +44,7 @@
       "usageRate": "使用率",
       "moreGroups": "另有 {count} 个额度组，可展开账号查看",
       "windows": {
-        "fiveHour": "5h 额度",
+        "fiveHour": "5 h 额度",
         "daily": "日额度",
         "weekly": "周额度",
         "monthly": "月额度",
@@ -66,7 +66,6 @@
       "loadingModels": "加载模型中",
       "modelPlaceholder": "选择上游模型",
       "noModels": "上游没有返回模型",
-      "running": "检测中",
       "completedAt": "完成时间",
       "events": {
         "title": "事件轨迹",
@@ -179,10 +178,11 @@
       "searchLabel": "搜索账号",
       "statusLabel": "按账号状态筛选",
       "groupLabel": "按账号分组筛选",
-      "deleteSelected": "删除选中 ({count})",
-      "exportSelected": "导出选中 ({count})",
+      "deleteSelected": "删除 ({count})",
+      "exportSelected": "导出 ({count})",
       "importTasks": "导入任务",
-      "importAccount": "导入账号"
+      "importAccount": "导入账号",
+      "editSelected": "编辑 ({count})"
     },
     "modelAccess": {
       "reserve": "保留",
@@ -195,7 +195,7 @@
       "searchOrEnterIdAndPressEnter": "搜索或输入 ID，回车添加",
       "selectModel": "选择模型",
       "notInCurrentModelCatalog": "{id}（当前目录未返回）",
-      "loadingModel": "加载模型中…",
+      "loadingModel": "加载模型中",
       "noMatchingModels": "无匹配模型",
       "noModels": "暂无模型",
       "modelListLoadingFailed": "模型列表加载失败",
@@ -359,8 +359,8 @@
       "needProcessing": "需处理",
       "importTaskDetails": "导入任务详情",
       "created": "{createdAtDisplay} 创建",
-      "waitForCurrentEntryToEnd": "等待当前条目结束",
-      "stopUnstartedEntries": "停止未开始条目",
+      "waitForCurrentEntryToEnd": "收尾中",
+      "stopUnstartedEntries": "停止后续",
       "viewAccount": "查看账号",
       "entryProgress": "条目进度",
       "accountsImported": "已入库 {importedAccounts} 个账号",
@@ -397,7 +397,8 @@
       "thisArticleIsNotImplemented": "本条未执行",
       "entryFailed": "本条导入未成功",
       "checkAccountList": "请检查账号列表，确认是否已入库",
-      "progressReadingFailedTryAgain": "进度读取失败，请重试"
+      "progressReadingFailedTryAgain": "进度读取失败，请重试",
+      "stopHelp": "停止后仍会完成当前条目"
     },
     "profile": {
       "activity": {
@@ -539,7 +540,7 @@
       "refreshCredits": "刷新主动重置卡",
       "resetCardLoadingFailed": "重置卡加载失败",
       "refreshRequired": "请刷新重试",
-      "queryingAvailableResetTimes": "正在查询可用重置次数…",
+      "queryingAvailableResetTimes": "正在查询可用重置次数",
       "useResetCredit": "使用重置：{title}，{expiry}",
       "useReset": "使用重置",
       "noResetCardAvailableYet": "暂无可用重置卡",

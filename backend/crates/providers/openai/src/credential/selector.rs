@@ -165,6 +165,7 @@ impl<'a> CodexSelectionModel<'a> {
 }
 
 struct CredentialSelectionInput<'a> {
+    managed_upstream: bool,
     requires_websocket: bool,
     requires_oauth: bool,
     request_url: &'a Url,
@@ -350,6 +351,7 @@ impl CodexCredentialSelector {
         request: &SelectCodexCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            managed_upstream: false,
             requires_websocket: false,
             requires_oauth: false,
             request_url: request.request_url,
@@ -375,6 +377,7 @@ impl CodexCredentialSelector {
         guardian: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            managed_upstream: true,
             requires_websocket,
             requires_oauth: false,
             request_url: request.request_url,
@@ -450,6 +453,7 @@ impl CodexCredentialSelector {
         request: &SelectCodexProviderEndpointCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            managed_upstream: false,
             requires_websocket: false,
             requires_oauth: request.requires_oauth,
             request_url: request.request_url,
@@ -506,6 +510,13 @@ impl CodexCredentialSelector {
         model: CodexSelectionModel<'_>,
         follow_only: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        let adapter_model = match model {
+            CodexSelectionModel::Requested(model) if request.managed_upstream => Some(
+                gateway_core::routing::UpstreamModelId::new(model)
+                    .map_err(|_| CredentialSelectionError::NoEligibleCredential)?,
+            ),
+            _ => None,
+        };
         let diagnostic = request.attempt.is_diagnostic_required_account();
         let binding_key = request.session_affinity_key.filter(|_| !diagnostic);
         let affinity_mode = request
@@ -633,7 +644,26 @@ impl CodexCredentialSelector {
                 .collect::<Vec<_>>();
             let mut eligible = Vec::with_capacity(accounts.len());
             for account in accounts {
+                let adapter = if let Some(model) = adapter_model.as_ref() {
+                    match request.attempt.upstream_adapter_for_account(
+                        &self.provider_kind,
+                        model,
+                        account.id(),
+                    ) {
+                        Ok(adapter) => adapter,
+                        // 已匹配但不可用的适配器不能回退到该账号的原生目标
+                        Err(_) => continue,
+                    }
+                } else {
+                    None
+                };
+                if adapter.as_ref().is_some_and(|adapter| {
+                    !adapter.supports_authentication(account.authentication_kind())
+                }) {
+                    continue;
+                }
                 if request.requires_websocket
+                    && adapter.is_none()
                     && pinned_account.as_ref().is_none_or(|id| id == account.id())
                 {
                     let runtime = match self.repository.reload_selected_credential(&account).await {
