@@ -44,7 +44,7 @@
       "usageRate": "使用率",
       "moreGroups": "另有 {count} 個額度組，可展開賬號查看",
       "windows": {
-        "fiveHour": "5 h 額度",
+        "fiveHour": "5小時額度",
         "daily": "日額度",
         "weekly": "周額度",
         "monthly": "月額度",

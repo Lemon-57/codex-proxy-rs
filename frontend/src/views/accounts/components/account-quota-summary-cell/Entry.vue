@@ -59,9 +59,9 @@ function quotaWindowCode(windowSeconds: number | null, role: AccountQuotaWindow[
     const hourSeconds = 60 * 60
 
     if (windowSeconds >= daySeconds && windowSeconds % daySeconds === 0)
-      return `${windowSeconds / daySeconds} d`
+      return `${windowSeconds / daySeconds}D`
     if (windowSeconds >= hourSeconds && windowSeconds % hourSeconds === 0)
-      return `${windowSeconds / hourSeconds} h`
+      return `${windowSeconds / hourSeconds}H`
   }
 
   switch (role) {

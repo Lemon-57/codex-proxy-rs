@@ -618,7 +618,7 @@ async fn attempt_middleware_can_change_reasoning_before_native_encoding() {
 }
 
 #[tokio::test]
-async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriting_it() {
+async fn responses_bill_sent_model_and_preserve_returned_model() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
     let server = MockServer::start().await;
@@ -655,7 +655,6 @@ async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriti
         )
         .await
         .unwrap();
-    let mut observed = None;
     let mut returned = None;
     let mut costs = Vec::new();
     while let Some(event) = stream.next().await {
@@ -664,9 +663,6 @@ async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriti
             if let GatewayEvent::CalculatedCost(cost) = fact {
                 costs.push(cost.total().amount().scaled());
             }
-        }
-        if let Some(observation) = event.response_observation() {
-            observed = observation.upstream_response_model().map(str::to_owned);
         }
         if let Some(wire) = event.wire_event()
             && wire.data().get("type").and_then(Value::as_str) == Some("response.completed")
@@ -681,12 +677,11 @@ async fn responses_bill_sent_model_and_observe_unpriced_response_without_rewriti
     let requests = server.received_requests().await.expect("upstream requests");
     assert_eq!(captured_request_body(&requests[0])["model"], "gpt-5.4");
     assert_eq!(costs, vec![3_437_500]);
-    assert_eq!(observed.as_deref(), Some("gpt-6-sol"));
-    assert_eq!(returned, observed);
+    assert_eq!(returned.as_deref(), Some("gpt-6-sol"));
 }
 
 #[tokio::test]
-async fn websocket_bills_sent_model_and_observes_internal_model_report() {
+async fn websocket_bills_sent_model_and_preserves_response_metadata() {
     for metadata_type in ["response.metadata", "codex.response.metadata"] {
         let store = Arc::new(MemoryAccountStore::default());
         create_account(&store, "acct_provider_contract").await;
@@ -729,7 +724,6 @@ async fn websocket_bills_sent_model_and_observes_internal_model_report() {
             )
             .await
             .expect("provider stream");
-        let mut observed = None;
         let mut returned = None;
         let mut costs = Vec::new();
         while let Some(event) = stream.next().await {
@@ -738,9 +732,6 @@ async fn websocket_bills_sent_model_and_observes_internal_model_report() {
                 if let GatewayEvent::CalculatedCost(cost) = fact {
                     costs.push(cost.total().amount().scaled());
                 }
-            }
-            if let Some(observation) = event.response_observation() {
-                observed = observation.upstream_response_model().map(str::to_owned);
             }
             if let Some(wire) = event.wire_event()
                 && wire.data().get("type").and_then(Value::as_str) == Some("response.completed")
@@ -754,11 +745,6 @@ async fn websocket_bills_sent_model_and_observes_internal_model_report() {
         }
         server.await.expect("server task");
         assert_eq!(costs, vec![3_437_500]);
-        assert_eq!(
-            observed.as_deref(),
-            Some("gpt-server-report"),
-            "{metadata_type}"
-        );
         assert_eq!(returned.as_deref(), Some("gpt-6-astra"));
     }
 }
@@ -4116,10 +4102,6 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
                     );
                 }
                 assert_eq!(metadata["upstreamStatus"], 200);
-                assert_eq!(
-                    metadata["upstreamReportedModel"],
-                    "gpt-reported-by-upstream"
-                );
                 assert!(metadata["requestSummary"].is_object());
                 assert!(metadata["upstreamTraceHeaders"].is_array());
                 first_decision = metadata

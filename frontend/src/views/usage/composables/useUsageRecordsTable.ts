@@ -282,7 +282,7 @@ function emptyInsights() {
 function emptyOverview() {
   const overview: LoadingAnalytics<Awaited<ReturnType<typeof getUsageRecordInsightsOverview>>> = {
     analytics: null,
-    granularity: '1d',
+    granularity: '',
     health: {
       totalRequests: 0,
       successRequests: 0,

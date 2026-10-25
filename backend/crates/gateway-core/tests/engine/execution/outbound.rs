@@ -103,8 +103,7 @@ impl Provider for PreparingProvider {
                 provider,
                 model,
                 account,
-                None,
-                Box::new(move |_, _, _| {
+                Box::new(move |_, _| {
                     Box::pin(async move {
                         let events = futures::stream::once(async move {
                             Err::<ProviderEvent, _>(

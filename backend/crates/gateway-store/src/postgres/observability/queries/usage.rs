@@ -146,7 +146,7 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             mr.provider_account_plan_type_snapshot as provider_account_plan_type,
             mr.provider_account_authentication_kind_snapshot
               as provider_account_authentication_kind,
-            mr.upstream_model_id, mr.upstream_transport, mr.upstream_response_model, mr.service_tier,
+            mr.upstream_model_id, mr.upstream_transport, mr.service_tier,
             mr.input_tokens, mr.output_tokens, mr.cached_input_tokens, mr.cache_write_input_tokens,
             mr.reasoning_output_tokens, mr.image_input_tokens, mr.image_output_tokens,
             mr.total_tokens, mr.billing_snapshot_json, mr.cost_source, mr.cost_amount::text, mr.cost_currency,
@@ -171,7 +171,7 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
             mr.provider_account_authentication_kind_snapshot
               as provider_account_authentication_kind,
             mr.upstream_model_id, mr.upstream_transport, mr.http_version, mr.websocket_pool,
-            mr.service_tier, mr.upstream_response_model, mr.provider_observation_json, mr.diagnostic_trace_json,
+            mr.service_tier, mr.provider_observation_json, mr.diagnostic_trace_json,
             mr.attempt_count, mr.upstream_send_state, mr.downstream_committed_at,
             mr.outcome, mr.client_status_code, mr.upstream_status_code,
             mr.client_response_id, mr.upstream_request_id, mr.upstream_response_id,

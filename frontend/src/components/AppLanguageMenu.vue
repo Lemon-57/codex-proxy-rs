@@ -2,7 +2,7 @@
 import type { IconButtonProps } from '@codex-proxy/ui'
 import type { Locale } from '@/i18n/locale'
 import { ZIconButton, ZMenuItem, ZPopover } from '@codex-proxy/ui'
-import { Check, Languages } from '@lucide/vue'
+import { Check, Languages, LoaderCircle } from '@lucide/vue'
 import chineseFlag from 'circle-flags/flags/cn.svg?url&no-inline'
 import englishFlag from 'circle-flags/flags/us.svg?url&no-inline'
 import { computed, shallowRef, useTemplateRef } from 'vue'
@@ -61,7 +61,8 @@ async function selectLocale(value: Locale, close: () => void) {
           v-for="option in localeOptions"
           :key="option.value"
           :aria-pressed="option.value === locale"
-          :loading="pendingLocale === option.value"
+          :disabled="pendingLocale === option.value"
+          :aria-busy="pendingLocale === option.value || undefined"
           class="aria-pressed:bg-cp-control-item-bg-active aria-pressed:text-cp-primary-text aria-pressed:hover:bg-cp-control-item-bg-active"
           @click="selectLocale(option.value, close)"
         >
@@ -70,7 +71,10 @@ async function selectLocale(value: Locale, close: () => void) {
           </template>
           <span class="flex items-center justify-between gap-3">
             <span :lang="option.value">{{ option.label }}</span>
-            <Check v-if="option.value === locale" class="size-4 shrink-0" aria-hidden="true" />
+            <span class="inline-grid size-4 shrink-0 place-items-center" aria-hidden="true">
+              <LoaderCircle v-if="pendingLocale === option.value" class="size-4 animate-spin motion-reduce:animate-none" />
+              <Check v-else-if="option.value === locale" class="size-4" />
+            </span>
           </span>
         </ZMenuItem>
       </div>

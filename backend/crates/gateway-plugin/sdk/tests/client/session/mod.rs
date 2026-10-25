@@ -391,7 +391,6 @@ fn middleware_context(id: u64) -> CallContext {
 
 pub(super) fn middleware_request() -> MiddlewareRequestHead {
     MiddlewareRequestHead {
-        provider_parameters: None,
         settings_sources: serde_json::Value::Null,
         settings: serde_json::Value::Null,
         client_key_id: "fixture-key".into(),

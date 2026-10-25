@@ -622,10 +622,7 @@ impl CodexBackendClient {
         let mut key = CodexWebSocketPoolKey::new(&self.base_url, account_id, conversation_id)
             .with_egress_key(&self.egress_key)
             .with_outbound_proxy(self.outbound_proxy.as_ref())
-            .with_connection_profile(format!(
-                "{connection_profile}\0{}",
-                context.installation_id.unwrap_or_default(),
-            ));
+            .with_connection_profile(connection_profile);
         if let Some(connection_id) = request.downstream_websocket_connection_id.as_deref() {
             key = key.with_downstream_connection_id(connection_id);
         }

@@ -6,7 +6,7 @@ import { t } from '@/i18n'
 import { formatProviderLabel } from '@/utils/providers'
 
 export const usageDataColumns = computed(() => ([
-  { key: 'model', label: t('usage.fields.model'), kind: 'custom', size: 'xl' },
+  { key: 'model', label: t('usage.fields.model'), kind: 'custom', size: 'lg' },
   { key: 'reasoningEffort', label: t('usage.fields.reasoningEffort'), kind: 'status', size: 'md', align: 'left' },
   { key: 'route', label: t('usage.fields.endpoint'), kind: 'mono' },
   { key: 'upstreamTransport', label: t('usage.fields.upstream'), kind: 'status', size: 'md' },

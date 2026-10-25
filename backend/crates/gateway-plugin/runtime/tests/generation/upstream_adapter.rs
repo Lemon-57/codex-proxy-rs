@@ -667,7 +667,7 @@ async fn adapter_preserves_observation_updates_and_measures_only_real_output() {
         {"event":{"facts":[{"type":"started","id":"response-one","model":"native-model"},
             {"type":"content_added","index":0,"kind":"reasoning"}]},
          "observation":{"transport":"http_sse","http_version":"HTTP/2","status_code":200,
-            "request_id":"upstream-494","upstream_response_model":"real-model",
+            "request_id":"upstream-494",
             "client_headers":[{"name":"x-bytes","value":[255]},{"name":"x-bytes","value":[254]}],
             "provider_metadata":"{ \"future\": 1e3 }","timings":{"connect_ms":5,"headers_ms":8}}},
         {"event":{"facts":[{"type":"reasoning_delta","index":0,"text":""}]}},
@@ -711,7 +711,6 @@ async fn adapter_preserves_observation_updates_and_measures_only_real_output() {
     assert_eq!(last.status_code(), Some(200));
     assert_eq!(last.http_version().unwrap().as_str(), "HTTP/2");
     assert_eq!(last.request_id().unwrap().as_str(), "upstream-494");
-    assert_eq!(last.upstream_response_model(), Some("real-model"));
     assert_eq!(last.service_tier(), Some("priority"));
     assert_eq!(
         last.provider_metadata().unwrap().as_json(),
@@ -1359,7 +1358,7 @@ async fn cancelling_adapter_body_closes_pending_websocket_and_releases_selected_
 }
 
 #[tokio::test]
-async fn usage_without_response_model_still_uses_native_account_pricing() {
+async fn upstream_adapter_usage_uses_native_account_pricing() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_string("{}"))

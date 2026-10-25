@@ -85,7 +85,6 @@ const modelRouteItems = computed(() => [
     mono: true,
   },
   { label: t('usage.request.storageModel'), value: props.record?.model, mono: true },
-  { label: t('usage.request.upstreamReturnModel'), value: props.record?.upstreamResponseModel, mono: true },
 ])
 
 const clientUpstreamItems = computed(() => [

@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   backend-security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -38,7 +38,7 @@ jobs:
           cargo-audit audit --file backend/Cargo.lock
 
   frontend-security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Checkout

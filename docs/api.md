@@ -316,8 +316,8 @@ Responses 也不透传 `x-stainless-*`、`Origin`、`Referer`、`sec-ch-ua*` 和
 Images 的 `x-codex-image-turn-id` 和 Desktop 自动 Git 上下文的 `clientUserMessageId`。
 输入项元数据保持不变。Search 的会话 `id` 按同一安装身份域映射，只替换该值的原始字节，其余正文保持不变。
 `prompt_cache_key` 同样按安装身份映射，保留同一身份内的缓存共享关系；未提供时不补造。
-受信任插件可通过 attempt 构造参数选择本次安装身份；参数只影响出站构造，不改变实际选号与计费归属，
-详见 [SDK 请求构造参数](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#模型请求与-attempt)。
+受信任插件可读取原始请求，自行生成身份并在 `outbound` 改写完整请求与关联字段；宿主不重新派生或补回业务字段，
+实际选号与计费归属保持不变，详见 [SDK 出站请求准备](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#上游出站准备)。
 续接 response ID、历史 item/call ID、业务正文和未知扩展不参与映射，
 该处理减少显式追踪标识的跨账号复用，不保证会话内容或业务 metadata 无法关联
 
@@ -475,7 +475,7 @@ Images 排除已知为 Free 套餐的 OAuth 账号；套餐缺失或未知时不
 
 `/v1/alpha/search` 使用相同的 OpenAI Provider 原生端点边界：模型不映射，正文除会话 `id` 的账号归一及显式请求策略外原样转发，
 Provider 旁路读取请求中的 `model`，按[账号模型限制](#账号模型限制)选号。
-`x-codex-turn-metadata` 在移除客户端账号身份并按本次构造参数重写 installation ID 后转发；上游账号
+`x-codex-turn-metadata` 在移除客户端账号身份并按选中账号重写 installation ID 后转发；上游账号
 Authorization、Cookie、account ID、originator 和 User-Agent 均由代理安全重建。
 Images 与 Search 保留通过现有过滤规则的普通业务请求头及多值字节；Responses 原连接的 turn state
 不随独立端点转发，turn metadata 仍由所属端点按当前账号处理。
@@ -2112,12 +2112,7 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 详情不出现在 Key 用量接口和普通错误信封中；[诊断导出](#诊断与恢复关联)在服务端重新脱敏后包含已存详情。
 记录仍受异步观测写入与保留周期约束
 
-管理端请求列表与详情分别保留 `requestedModel`（客户端请求）、`upstreamModel`（网关发送）与
-`upstreamResponseModel`（上游返回）。返回模型缺失时为 `null`，不使用请求或映射模型补齐。
-OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内报告可覆盖初始响应头），
-没有报告时采用正文明确声明的 `response.model`；xAI 采用原始正文声明。正文模型以终态优先，
-缺少终态声明时保留首次声明。这些值仅表示上游报告，不作为模型真实性证明，也不参与路由、
-聚合或本地计价模型选择。没有保存上游模型报告的记录保持未知
+管理端请求列表与详情保留 `requestedModel`（客户端请求）与 `upstreamModel`（网关发送）
 
 请求明细的 `clientApiKeyName`、`accountName` 按字面量包含匹配请求保存的历史名称快照，区分大小写，
 不解析为 ID，也不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理

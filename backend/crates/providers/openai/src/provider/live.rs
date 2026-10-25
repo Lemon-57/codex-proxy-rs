@@ -280,8 +280,7 @@ impl CodexProvider {
                 provider_kind,
                 Some(upstream_model.as_str().to_owned()),
                 account_id,
-                Some(RequestParameters::baseline(lease.installation_id())),
-                Box::new(move |operation, middleware_headers, parameters| {
+                Box::new(move |operation, middleware_headers| {
                     Box::pin(async move {
                         provider
                             .execute_selected_live_call(
@@ -289,11 +288,8 @@ impl CodexProvider {
                                 operation,
                                 upstream_model,
                                 middleware_headers,
-                                SelectedRequest {
-                                    parameters: RequestParameters::decode(parameters)?,
-                                    lease,
-                                    account_selection_wait_ms,
-                                },
+                                lease,
+                                account_selection_wait_ms,
                             )
                             .await
                     })
@@ -308,13 +304,9 @@ impl CodexProvider {
         operation: Operation,
         upstream_model: UpstreamModelId,
         middleware_headers: Vec<MiddlewareHeader>,
-        selected: SelectedRequest,
+        mut lease: CodexCredentialLease,
+        account_selection_wait_ms: u64,
     ) -> Result<ProviderStream, ProviderError> {
-        let SelectedRequest {
-            parameters,
-            mut lease,
-            account_selection_wait_ms,
-        } = selected;
         let Operation::ProviderHttp(request) = operation else {
             return Err(provider_error(
                 ProviderErrorKind::InvalidRequest,
@@ -374,7 +366,6 @@ impl CodexProvider {
             .cloned()
             .collect::<Vec<_>>();
         let events = cold_live_call_stream(ColdLiveCall {
-            parameters,
             client: self
                 .client_for_request(&context)?
                 .for_account(lease.account())
@@ -407,7 +398,6 @@ impl CodexProvider {
 }
 
 struct ColdLiveCall {
-    parameters: RequestParameters,
     client: CodexBackendClient,
     registry: Arc<CodexLiveRegistry>,
     response_origin: Url,
@@ -452,7 +442,7 @@ fn cold_live_call_stream(request: ColdLiveCall) -> EventStream {
             authorization.expose_secret(),
             active_account.upstream_account_id(),
             &request_id,
-            Some(&request.parameters.installation_id),
+            Some(request.lease.installation_id()),
         );
         request_context.trace = Some(&trace);
         request_context.account_selection = CodexAccountSelectionTelemetry::new(

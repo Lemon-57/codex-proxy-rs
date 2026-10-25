@@ -179,8 +179,7 @@ impl CodexProvider {
                 provider_kind,
                 requested_model.map(|model| model.as_str().to_owned()),
                 account_id,
-                Some(RequestParameters::baseline(lease.installation_id())),
-                Box::new(move |operation, middleware_headers, parameters| {
+                Box::new(move |operation, middleware_headers| {
                     Box::pin(async move {
                         provider
                             .execute_selected_raw_json_endpoint(
@@ -188,11 +187,8 @@ impl CodexProvider {
                                 operation,
                                 middleware_headers,
                                 request,
-                                SelectedRequest {
-                                    parameters: RequestParameters::decode(parameters)?,
-                                    lease,
-                                    account_selection_wait_ms,
-                                },
+                                lease,
+                                account_selection_wait_ms,
                             )
                             .await
                     })
@@ -207,13 +203,9 @@ impl CodexProvider {
         operation: Operation,
         middleware_headers: Vec<MiddlewareHeader>,
         mut request: RawJsonEndpointRequest,
-        selected: SelectedRequest,
+        mut lease: CodexCredentialLease,
+        account_selection_wait_ms: u64,
     ) -> Result<ProviderStream, ProviderError> {
-        let SelectedRequest {
-            parameters,
-            mut lease,
-            account_selection_wait_ms,
-        } = selected;
         let affinity = match &operation {
             Operation::GenerateImage(image) => {
                 let model = endpoint_requested_model(image.payload());
@@ -337,7 +329,7 @@ impl CodexProvider {
             lease.capacity_snapshot(),
         ));
         // Standalone Provider 端点没有可证明的账号 owner；Images/Search metadata 必须按
-        // 跨账号输入收敛到本次构造参数，不能沿用下游声明的账号身份
+        // 跨账号输入收敛到当前 lease，不能沿用下游声明的账号或 installation identity
         let turn_metadata = payload
             .context()
             .get("turn_metadata")
@@ -345,12 +337,11 @@ impl CodexProvider {
             .and_then(|metadata| {
                 crate::transport::request::scope_turn_metadata(
                     metadata,
-                    &parameters.installation_id,
+                    lease.installation_id(),
                     true,
                 )
             });
         let events = cold_json_response_stream(ColdJsonResponse {
-            parameters,
             client: self
                 .client_for_request(&context)?
                 .for_account(lease.account())
@@ -392,7 +383,6 @@ struct RawJsonEndpointRequest {
 }
 
 pub(super) struct ColdResponse {
-    pub(super) parameters: RequestParameters,
     pub(super) client: CodexBackendClient,
     pub(super) response_origin: Url,
     pub(super) request: CodexResponsesRequest,
@@ -412,7 +402,6 @@ pub(super) struct ColdResponse {
 }
 
 pub(super) struct ColdJsonResponse {
-    pub(super) parameters: RequestParameters,
     pub(super) client: CodexBackendClient,
     pub(super) response_origin: Url,
     pub(super) endpoint_path: &'static str,
@@ -658,7 +647,7 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
         let response = create_json_attempt(
             &request,
             &active_account,
-            &request.parameters.installation_id,
+            request.lease.installation_id(),
             &authorization,
             cookie_header.as_ref(),
             account_selection,
@@ -777,7 +766,6 @@ fn image_response_metering(
 
 pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     let ColdResponse {
-        parameters,
         client,
         response_origin,
         request,
@@ -835,7 +823,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &request,
                 &request_id,
                 &active_account,
-                &parameters.installation_id,
+                lease.installation_id(),
                 &authorization,
                 cookie_header.as_ref(),
                 account_selection,
@@ -980,7 +968,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let mut decoder = CodexCanonicalDecoder::new(upstream_model.as_str())
             .with_trace(trace.clone())
             .with_pricing(context.pricing().get("openai").and_then(|models| models.get(upstream_model.as_str())).cloned())
-            .with_reported_model(response.response_metadata.effective_model.as_deref())
             .with_requested_service_tier(request.service_tier())
             .with_request_tool_pricing(upstream_model.as_str(), request.tools())
             .with_raw_sse_passthrough();
@@ -1039,7 +1026,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         response_metadata_updates.as_ref(),
                         &mut session_capture,
                         &mut observation_state,
-                        &mut decoder,
                     )
                     .await;
                     let observation_event = if rate_limits_changed || metadata_merge.is_some()
@@ -1117,12 +1103,9 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 response_metadata_updates.as_ref(),
                 &mut session_capture,
                 &mut observation_state,
-                &mut decoder,
             )
             .await;
             let metadata_changed = metadata_merge.unwrap_or(false);
-            let response_model_changed = observation_state
-                .observe_upstream_response_model(decoder.response_model());
             let service_tier_changed = observation_state
                 .observe_upstream_service_tier(decoder.response_service_tier());
             let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
@@ -1210,7 +1193,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 }));
             }
             if (rate_limits_changed
-                || response_model_changed
                 || service_tier_changed
                 || timing_changed
                 || metadata_changed
@@ -1280,8 +1262,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             )
         });
         let timing_signals = decoder.take_timing_signals();
-        let response_model_changed = observation_state
-            .observe_upstream_response_model(decoder.response_model());
         let service_tier_changed = observation_state
             .observe_upstream_service_tier(decoder.response_service_tier());
         let output_timing_changed = observation_state
@@ -1316,7 +1296,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             response_metadata_updates.as_ref(),
             &mut session_capture,
             &mut observation_state,
-            &mut decoder,
         )
         .await
         .unwrap_or(false);
@@ -1342,8 +1321,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 .observe_cyber_policy_success(cyber_policy_scope.as_ref())
                 .await;
         }
-        if (response_model_changed
-            || service_tier_changed
+        if (service_tier_changed
             || timing_changed
             || rate_limits_changed
             || metadata_changed
@@ -1385,26 +1363,10 @@ async fn merge_response_metadata_updates(
     updates: Option<&CodexResponseMetadataUpdates>,
     session_capture: &mut Option<OpenAiSessionCapture>,
     observation_state: &mut OpenAiResponseObservationState,
-    decoder: &mut CodexCanonicalDecoder,
 ) -> Option<bool> {
-    let updates = updates?;
-    let mut pending = updates.lock().await;
-    let turn_state = pending.turn_state.take();
-    let reported_model = pending.reported_model.clone();
-    drop(pending);
-    if turn_state.is_none() && reported_model.is_none() {
-        return None;
+    let turn_state = updates?.lock().await.turn_state.take()?;
+    if let Some(capture) = session_capture.as_mut() {
+        capture.turn_state = Some(turn_state.clone());
     }
-    let mut changed = false;
-    if let Some(turn_state) = turn_state {
-        if let Some(capture) = session_capture.as_mut() {
-            capture.turn_state = Some(turn_state.clone());
-        }
-        changed |= observation_state.merge_client_header("x-codex-turn-state", &turn_state);
-    }
-    if let Some(model) = reported_model {
-        decoder.observe_reported_model(&model);
-        changed |= observation_state.observe_upstream_response_model(decoder.response_model());
-    }
-    Some(changed)
+    Some(observation_state.merge_client_header("x-codex-turn-state", &turn_state))
 }

@@ -28,14 +28,11 @@ const { showConfig, configKey, configuring, apiBaseUrl, openConfig, copyConfig }
           <KeyUsageHeader v-model:period="period" v-model:refresh-interval="refreshInterval" :name="overview?.key.name" :prefix="overview?.key.prefix" :refreshing="refreshing || overviewLoading" :configuring="configuring" @refresh="refresh" @configure="openConfig" />
           <div class="flex flex-wrap items-center justify-between gap-3">
             <span v-if="overview" class="text-cp-sm text-cp-text-tertiary">{{ t('usage.page.updated', { asOfDisplay: overview.asOfDisplay }) }}</span>
-            <div class="ml-auto flex w-full min-w-0 items-center gap-3 sm:w-md sm:flex-none">
-              <span id="key-usage-model-label" class="shrink-0 text-cp-sm text-cp-text-secondary">{{ t('usage.fields.model') }}</span>
-              <ZInput id="key-usage-model" v-model="model" class="min-w-0 flex-1" :placeholder="t('usage.filters.enterFilterValue')" aria-labelledby="key-usage-model-label" :maxlength="128">
-                <template #prefix>
-                  <Search class="size-4.5 text-cp-text-tertiary" />
-                </template>
-              </ZInput>
-            </div>
+            <ZInput id="key-usage-model" v-model="model" class="ml-auto w-full min-w-0 sm:w-md sm:flex-none" :placeholder="t('usage.filters.modelPlaceholder')" :aria-label="t('usage.filters.modelPlaceholder')" :maxlength="128">
+              <template #prefix>
+                <Search class="size-4.5 text-cp-text-tertiary" />
+              </template>
+            </ZInput>
           </div>
         </div>
         <p v-if="overviewError" role="alert" class="m-0 rounded-cp-lg bg-cp-error-container px-4 py-3 text-cp-sm text-cp-error-text">

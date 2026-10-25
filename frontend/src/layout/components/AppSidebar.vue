@@ -440,7 +440,7 @@ onBeforeUnmount(() => {
           </span>
           <template v-for="item in navItems" :key="item.label">
             <div v-if="item.path === '/plugins'" class="relative z-10 grid min-w-0">
-              <ZPopover trigger="hover" placement="right" role="tooltip" :disabled="!isCollapsed" :enterable="false" class="w-full">
+              <ZPopover trigger="hover" placement="right" role="tooltip" :show-after="800" :disabled="!isCollapsed" :enterable="false" class="w-full">
                 <template #reference="{ close }">
                   <button
                     type="button"
@@ -529,7 +529,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <ZPopover v-else trigger="hover" placement="right" role="tooltip" :disabled="!isCollapsed" :enterable="false" class="relative z-10 w-full">
+            <ZPopover v-else trigger="hover" placement="right" role="tooltip" :show-after="800" :disabled="!isCollapsed" :enterable="false" class="relative z-10 w-full">
               <template #reference="{ close }">
                 <button
                   type="button"

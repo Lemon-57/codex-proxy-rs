@@ -455,7 +455,6 @@ fn wire_observation(observation: &RequestObservation) -> RequestCompleted {
         upstream_model: observation
             .upstream_model()
             .map(|model| model.as_str().to_owned()),
-        response_model: observation.response_model().map(str::to_owned),
         service_tier: observation.service_tier().map(str::to_owned),
         requested_model: observation
             .requested_model()

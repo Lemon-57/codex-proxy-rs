@@ -104,7 +104,6 @@ impl fmt::Debug for MiddlewareHeader {
 #[derive(Clone, PartialEq, Eq)]
 pub struct MiddlewareRequest {
     settings: Option<RequestSettings>,
-    provider_parameters: Option<serde_json::Map<String, serde_json::Value>>,
     protocol: String,
     headers: Vec<MiddlewareHeader>,
     body: Bytes,
@@ -126,7 +125,6 @@ impl MiddlewareRequest {
         let protocol = protocol.into();
         Self {
             settings: None,
-            provider_parameters: None,
             original_protocol: protocol.clone(),
             original_body: body.clone(),
             capabilities: None,
@@ -145,27 +143,6 @@ impl MiddlewareRequest {
     #[must_use]
     pub fn settings(&self) -> Option<&RequestSettings> {
         self.settings.as_ref()
-    }
-
-    /// Provider 提供的本次构造参数；Core 不解释其中的业务字段
-    #[must_use]
-    pub fn provider_parameters(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
-        self.provider_parameters.as_ref()
-    }
-
-    #[must_use]
-    pub fn with_provider_parameters(
-        mut self,
-        parameters: serde_json::Map<String, serde_json::Value>,
-    ) -> Self {
-        self.provider_parameters = Some(parameters);
-        self
-    }
-
-    pub fn take_provider_parameters(
-        &mut self,
-    ) -> Option<serde_json::Map<String, serde_json::Value>> {
-        self.provider_parameters.take()
     }
 
     #[must_use]

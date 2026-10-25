@@ -61,6 +61,10 @@ const granularityText = computed(() => {
   return labels[props.granularity] ?? props.granularity
 })
 
+const description = computed(() => props.loading || !granularityText.value
+  ? t('usage.health.description')
+  : t('usage.health.descriptionWithGranularity', { granularityText: granularityText.value }))
+
 const chartOption = computed<EChartsOption>(() => {
   const theme = palette.value
   const chartPoints = points.value
@@ -165,7 +169,7 @@ function formatTooltip(params: unknown) {
   <ZCard
     as="article"
     :title="t('usage.health.title')"
-    :description="t('usage.health.description', { granularityText })"
+    :description="description"
     class="min-h-90 xl:h-full"
   >
     <template #body>

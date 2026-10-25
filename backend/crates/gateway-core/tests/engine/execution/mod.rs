@@ -2282,7 +2282,6 @@ impl Provider for ObservationProvider {
                     gateway_core::event::ProviderResponseObservation::new(
                         UpstreamTransport::new("http_sse").unwrap(),
                     )
-                    .with_upstream_response_model_if_valid("gpt-reported")
                     .with_service_tier_if_valid("priority"),
                 );
                 Ok(ProviderStream::new(
@@ -2615,7 +2614,6 @@ fn final_observation_is_emitted_once_for_success_rejection_and_detached_cancella
                     .map(UpstreamModelId::as_str),
                 Some("gpt-start")
             );
-            assert_eq!(observations[0].response_model(), Some("gpt-reported"));
             assert_eq!(observations[0].service_tier(), Some("priority"));
             assert_eq!(
                 observations[0].outcome(),

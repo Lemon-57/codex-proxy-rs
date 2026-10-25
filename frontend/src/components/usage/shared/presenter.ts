@@ -10,7 +10,7 @@ export type UsagePerformanceRecord = Pick<UsageCommonRecord, 'latencyDetails' | 
   tokenDetails: Pick<UsageListRecord['tokenDetails'], 'outputTokens'> | null
 }
 
-export type UsageModelRecord = Pick<UsageCommonRecord, 'model'> & Partial<Pick<UsageCommonRecord, 'requestedModel' | 'upstreamModel' | 'upstreamResponseModel'>>
+export type UsageModelRecord = Pick<UsageCommonRecord, 'model'> & Partial<Pick<UsageCommonRecord, 'requestedModel' | 'upstreamModel'>>
 export type UsageReasoningRecord = Pick<UsageCommonRecord, 'reasoningEffort'> & Partial<Pick<UsageCommonRecord, 'reasoningPreset' | 'subagentKind'>>
 
 interface UsageTimingItem {
@@ -93,27 +93,7 @@ export function usageModelDisplay(record: UsageModelRecord) {
         ? storedModel
         : ''
 
-  const responseModel = record.upstreamResponseModel || ''
-  const returned = responseModel && responseModel !== primary ? responseModel : ''
-  const routes = []
-  if (secondary && secondary !== returned) {
-    routes.push({
-      model: secondary,
-      kind: 'mapped' as const,
-      description: t('usage.status.mappedModel', { secondary }),
-    })
-  }
-  if (returned) {
-    routes.push({
-      model: returned,
-      kind: 'returned' as const,
-      description: returned === secondary
-        ? t('usage.status.returnedModel', { returned })
-        : t('usage.status.returnedModelHelp', { returned }),
-    })
-  }
-
-  return { primary, secondary, routes }
+  return { primary, secondary }
 }
 
 export function usagePerformanceDetails(record: UsagePerformanceRecord) {

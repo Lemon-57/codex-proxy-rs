@@ -98,7 +98,6 @@ pub(super) async fn invoke(
         scope,
     )?;
     let head = MiddlewareRequestHead {
-        provider_parameters: invocation.provider_parameters(),
         settings_sources: invocation.settings_sources(),
         settings: invocation
             .settings()

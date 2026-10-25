@@ -545,19 +545,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     call.request.head.settings = settings.clone();
                 }
             }
-            if mode == "parameters" {
-                assert_eq!(
-                    serde_json::to_value(&call.request.head.provider_parameters).unwrap(),
-                    configuration["expected_parameters"],
-                );
-                if let Some(parameters) = configuration.get("parameters") {
-                    call.request.head.provider_parameters = if parameters.is_null() {
-                        None
-                    } else {
-                        Some(parameters.as_object().unwrap().clone())
-                    };
-                }
-            }
             if mode == "inspect" && !call.request.body.is_empty() {
                 // 读取和解析只能作用于副本，不能把解析结果写回未改写的正文
                 assert!(serde_json::from_slice::<serde_json::Value>(&call.request.body).is_ok());

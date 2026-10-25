@@ -9,8 +9,8 @@ use gateway_core::account::{
     AccountModelAccess, AccountModelAccessMode, FastMode, ProviderAccountId, ProviderAccountStore,
 };
 use gateway_core::engine::middleware::{
-    MiddlewareContext, MiddlewareError, MiddlewareNext, MiddlewarePlan, MiddlewareRequest,
-    MiddlewareResponse,
+    MiddlewareContext, MiddlewareError, MiddlewareHeader, MiddlewareNext, MiddlewarePlan,
+    MiddlewareRequest, MiddlewareResponse,
 };
 use gateway_core::engine::provider::{Provider, ProviderRequest};
 use gateway_core::lifecycle::CancellationToken;
@@ -202,28 +202,8 @@ async fn live_bootstrap_preserves_model_through_middleware_and_metadata() {
     upstream.verify().await;
 }
 
-#[derive(Debug)]
-struct ParametersMiddleware;
-
-impl MiddlewarePlan for ParametersMiddleware {
-    fn handle(
-        &self,
-        _context: MiddlewareContext,
-        request: MiddlewareRequest,
-        next: MiddlewareNext,
-    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
-        assert!(request.provider_parameters().unwrap()["installation_id"].is_string());
-        next.run(
-            request.with_provider_parameters(serde_json::Map::from_iter([(
-                "installation_id".into(),
-                json!("live-plugin-installation"),
-            )])),
-        )
-    }
-}
-
 #[tokio::test]
-async fn live_create_uses_request_parameters_without_changing_call_ownership() {
+async fn live_create_uses_outbound_rewrite_without_changing_call_ownership() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, ACCOUNT).await;
     let server = MockServer::start().await;
@@ -247,11 +227,16 @@ async fn live_create_uses_request_parameters_without_changing_call_ownership() {
     let mut stream = provider
         .execute(
             request,
-            context_with_middleware(
-                "req_live_parameters",
-                Arc::new(ParametersMiddleware),
-                FastMode::Default,
-            ),
+            super::contract::outbound_context("req_live_outbound", |request| {
+                request
+                    .headers
+                    .retain(|header| header.name() != "x-codex-turn-metadata");
+                request.headers.push(MiddlewareHeader::new(
+                    "x-codex-turn-metadata",
+                    Bytes::from(json!({"installation_id":"live-plugin-installation"}).to_string()),
+                ));
+                Ok(())
+            }),
         )
         .await
         .unwrap();

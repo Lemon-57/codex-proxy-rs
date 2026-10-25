@@ -402,7 +402,12 @@ Ping 的自动 Pong 与关闭握手属于底层 WebSocket 协议事实；插件�
 所有外层处理结束后，Provider 才把结果交给 transport 发送。插件错误、非法传输值或正文超限在原生发送前结束，
 不自动跳过、重放或切换传输；取消、请求截止与回调资源沿用当前 attempt
 
+身份策略可在 `request` / `attempt` 读取原始输入，以真实 Key 与账号标识调用私有状态服务维护映射，
+再在 `outbound` 自行改写完整请求中的身份及关联字段。UUID 生成、并发创建、持久化、会话与缓存标识派生均由插件负责；
+通用中间件层不解释 installation ID、device ID 等策略字段，也不在插件输出后重新派生业务字段
+
 WebSocket 的 `body` 是准备发送的一条完整 UTF-8 文本消息，`headers` 和 `uri` 是候选 opening。
+新响应链按出站改写产生的 URI / 握手头差异分区，精确续接仍使用持有原响应链的连接。
 复用连接时不能改写已发生的握手；宿主不为插件主动重连、重放消息或重建续接。
 插件需要握手身份与消息内容一致时，应结合实际连接与续接语义选择改写
 
@@ -428,17 +433,6 @@ attempt 中间件在此基线上继续改写，终端不再应用 Fast 策略。
 request 与 attempt 阶段通过 `append_header` 添加的请求头会进入上游请求，不适合存放插件内部标记或仅供下游读取的信息。
 OpenAI 与 xAI 的上游 headers 先由账号和画像生成，插件同名字段覆盖基线，同名多值按插件顺序保留；不存在按认证、Cookie 或会话名称划分的保护列表。
 实际账号租约、凭据版本与计费归属仍记录真实选中事实，不随插件修改 header 名称而伪造
-
-attempt 的 `request.head.provider_parameters` 携带 Provider 提供的本次构造参数；没有该能力的执行不提供此对象。
-OpenAI 原生 Responses、Images、Search 与 Live 创建请求提供 `installation_id` 字符串，默认取自选中账号，
-用于原生安装身份、已有 turn metadata 身份字段及会话、缓存关联标识的派生。独立 `upstream_adapter` 自行构造其请求。
-
-插件直接修改此对象，SDK 在值改变时提交完整替换；空对象明确删除全部参数，将原本存在的对象设为 `None` 同样提交空对象。
-线协议的 `next.provider_parameters` 省略时保留原值，显式 `null` 或非对象类型拒绝。
-后续插件读取前层结果，Core / Runtime 不解释业务字段、不深合并；缺失必需字段或类型错误在发送前失败且禁止重试，不补回账号默认身份。
-
-身份选择、Key 与账号配对、UUID 生成与持久化由插件负责，可复用已有状态服务；参数不写回账号凭据、全局设置或真实计费事实。
-WS 新响应链按构造身份区分连接，精确续接仍使用实际持有该响应链的原连接；Live sideband / hangup 不继承创建请求的临时参数
 
 request 阶段 `request.head.settings` 是本次调用的有效设置对象，包含 `runtime`、`fast_mode`、`client_limits` 和 `timeout_ms`。
 `fast_mode` 使用 `default`、`enabled`、`disabled` 三态，具体档位语义见[账号分组](../../../../../docs/api.md#6-账号分组)。

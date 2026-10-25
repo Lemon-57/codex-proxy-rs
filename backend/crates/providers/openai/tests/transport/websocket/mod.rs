@@ -993,10 +993,6 @@ async fn websocket_execute_response_create_request_should_capture_internal_metad
     server.await.unwrap();
 
     assert_eq!(response.turn_state.as_deref(), Some("turn-from-metadata"));
-    assert_eq!(
-        response.reported_model.as_deref(),
-        Some("gpt-internal-report")
-    );
     assert!(!response.body.contains("codex.rate_limits"));
     assert!(response.body.contains("response.metadata"));
     assert!(response.body.contains("event: response.completed"));
@@ -1132,11 +1128,6 @@ async fn reused_websocket_should_not_leak_turn_state_into_the_next_response() {
             .websocket_pool_decision
             .is_some_and(WebSocketPoolDecision::is_reuse)
     );
-    assert_eq!(
-        first.reported_model.as_deref(),
-        Some("first-response-model")
-    );
-    assert_eq!(second.reported_model, None);
     assert_eq!(second.turn_state, None);
     assert!(
         second
