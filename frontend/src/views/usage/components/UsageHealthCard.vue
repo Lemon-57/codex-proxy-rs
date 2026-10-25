@@ -9,7 +9,7 @@ import { use } from 'echarts/core'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseChart from '@/components/charts/BaseChart.vue'
-import { tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
+import { chartTooltipContent, tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
 import { healthEligibleRequestCount } from '@/components/usage/shared/health'
 import { useChartPalette } from '@/composables/useChartPalette'
 
@@ -20,7 +20,6 @@ import {
   usageGapAwareLineSeries,
   usageLegend,
   usageTooltip,
-  usageTooltipContent,
   usageTooltipItem,
   usageValueAxis,
 } from '../utils/chart'
@@ -149,7 +148,7 @@ function formatTooltip(params: unknown) {
   const successRate = serviceSuccessRate(point)
   const theme = palette.value
 
-  return usageTooltipContent(theme, point.label, [
+  return chartTooltipContent(point.label, [
     usageTooltipItem(t('usage.health.requestVolume'), formatCompactNumber(requestCount(point)), theme.textSecondary),
     usageTooltipItem(t('common.status.success'), formatCompactNumber(point.successRequests), theme.success),
     usageTooltipItem(t('usage.health.point.serviceFailed'), formatCompactNumber(point.failedRequests), theme.danger),

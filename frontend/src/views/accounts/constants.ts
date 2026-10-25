@@ -42,7 +42,7 @@ export const accountColumns = computed(() => (defineTableColumns<Account>([
     align: 'center',
     formatter: value => formatProviderLabel(typeof value === 'string' ? value : null),
   },
-  { key: 'status', label: t('common.fields.status'), kind: 'status', align: 'left', sortable: true },
+  { key: 'status', label: t('common.fields.status'), kind: 'status', align: 'center', sortable: true },
   { key: 'planType', label: t('accounts.profile.subscription.label'), kind: 'status', size: 'sm', sortable: true },
   { key: 'usage', label: t('usage.usage'), kind: 'custom', size: '2xl', sortable: true },
   { key: 'groups', label: t('accounts.fields.accountGrouping'), kind: 'status', size: 'sm' },

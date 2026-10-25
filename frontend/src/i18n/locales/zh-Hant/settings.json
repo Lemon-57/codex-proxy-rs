@@ -640,6 +640,12 @@
       "description": "配置網關調度、上游與定價，管理訪問安全、歷史保留與備份",
       "sectionsLabel": "設置分區",
       "undoAllBasicSettingsChanges": "撤銷全部基礎設置更改",
+      "unsavedChanges": {
+        "title": "有未儲存的更改",
+        "description": "離開後，未儲存的設定更改將遺失",
+        "leave": "放棄並離開",
+        "stay": "繼續編輯"
+      },
       "saveChanges": "保存基礎設置",
       "settingsLoadingFailed": "設置加載失敗",
       "reload": "重新加載",

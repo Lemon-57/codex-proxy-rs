@@ -53,7 +53,7 @@ export function useApiKeyEditor(options: {
   }
 
   function requestSave() {
-    if (!validateForm() || savingKey.value)
+    if (savingKey.value)
       return
     if (form.value.groupIds.length === 0) {
       showAllAccountsConfirm.value = true
@@ -68,7 +68,7 @@ export function useApiKeyEditor(options: {
   }
 
   async function save() {
-    if (!validateForm() || savingKey.value)
+    if (savingKey.value)
       return
 
     await savingKeyAction.run(
@@ -115,34 +115,6 @@ export function useApiKeyEditor(options: {
       },
       { onError: () => void options.reload() },
     )
-  }
-
-  function validateForm() {
-    for (const [label, value] of [[t('keys.editor.dailyLimit'), form.value.dailyLimitUsd], [t('keys.editor.weeklyLimit'), form.value.weeklyLimitUsd]]) {
-      if (value.trim() && !/^\d{1,10}(?:\.\d{1,10})?$/.test(value.trim())) {
-        ZNotification.warning({ message: t('keys.editor.validation.amount', { label }) })
-        return false
-      }
-    }
-    if (!form.value.name.trim()) {
-      ZNotification.warning({ message: t('keys.editor.enterApiKeyName') })
-      return false
-    }
-    if (!editingKey.value && form.value.customKey && !/^[\x21-\x7E]+$/.test(form.value.customKey)) {
-      ZNotification.warning({ message: t('keys.editor.invalidKey') })
-      return false
-    }
-    for (const [label, value] of [
-      [t('keys.editor.maximumConcurrency'), form.value.maxConcurrency],
-      [t('keys.editor.requestsPerMinute'), form.value.requestsPerMinute],
-    ] as const) {
-      const parsed = Number(value)
-      if (!Number.isSafeInteger(parsed) || parsed < 0) {
-        ZNotification.warning({ message: t('keys.editor.validation.integer', { label }) })
-        return false
-      }
-    }
-    return true
   }
 
   function clearCustomKey() {

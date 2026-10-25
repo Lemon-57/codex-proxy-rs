@@ -93,18 +93,9 @@ export function usageTooltip(
 ) {
   return {
     trigger: 'axis' as const,
-    ...chartTooltipStyle(theme, { axisPointer: true }),
+    ...chartTooltipStyle(theme, { axisPointer: true, fontWeight: 600 }),
     formatter,
   }
-}
-
-export function usageTooltipContent(
-  theme: UsageChartPalette,
-  label: string,
-  lines: string[],
-) {
-  const title = escapeTooltip(label)
-  return `<div style="margin:0 0 7px;padding:0 0 7px;color:${theme.textPrimary};font-family:var(--font-mono);font-size:11px;font-weight:750;line-height:1.2">${title}</div><div style="line-height:1.55">${lines.join('<br/>')}</div>`
 }
 
 export function usageTooltipItem(label: string, value: string, color: string) {

@@ -5,10 +5,11 @@ import type { AccountGroupRef } from '@/api'
 import { ZButton, ZDialog, ZForm, ZFormItem, ZInput } from '@codex-proxy/ui'
 import { DollarSign, KeyRound } from '@lucide/vue'
 
-import { computed } from 'vue'
+import { computed, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
 import ProviderRequestProfilesEditor from '@/components/client-profile/ProviderRequestProfilesEditor.vue'
+import { useApiKeyFormRules } from '../composables/useApiKeyFormRules'
 
 const props = defineProps<{
   groups: AccountGroupRef[]
@@ -27,6 +28,16 @@ const { t } = useI18n({ useScope: 'global' })
 const open = defineModel<boolean>({ default: false })
 const form = defineModel<ApiKeyFormValue>('form', { required: true })
 const title = computed(() => props.editing ? t('keys.actions.editKey') : t('keys.filters.createApiKey'))
+const formRef = useTemplateRef<InstanceType<typeof ZForm>>('formElement')
+const rules = useApiKeyFormRules()
+
+watch(open, () => formRef.value?.clearValidate())
+
+async function requestSave() {
+  if (props.saving || !await formRef.value?.validate().catch(() => false))
+    return
+  emit('save')
+}
 
 function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFormValue[Key]) {
   form.value = { ...form.value, [key]: value }
@@ -47,8 +58,8 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
       <KeyRound class="text-cp-text" :size="20" aria-hidden="true" />
     </template>
 
-    <ZForm class="grid gap-6">
-      <ZFormItem :label="t('common.fields.name')" required>
+    <ZForm ref="formElement" :model="form" :rules="rules" scroll-to-error focus-on-error novalidate class="grid gap-6" @submit="requestSave">
+      <ZFormItem prop="name" :label="t('common.fields.name')">
         <ZInput
           :model-value="form.name" :aria-label="t('common.fields.name')"
           :placeholder="t('keys.editor.namePlaceholder')"
@@ -69,6 +80,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
 
         <ZFormItem
           v-if="!editing"
+          prop="customKey"
           :label="t('keys.editor.customKeyOptional')"
         >
           <ZInput
@@ -102,7 +114,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
       </ZFormItem>
 
       <div class="grid gap-6 sm:grid-cols-2">
-        <ZFormItem :label="t('keys.editor.dailyLimit')">
+        <ZFormItem prop="dailyLimitUsd" :label="t('keys.editor.dailyLimit')">
           <ZInput
             :model-value="form.dailyLimitUsd" type="number"
             min="0"
@@ -117,7 +129,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
             </template>
           </ZInput>
         </ZFormItem>
-        <ZFormItem :label="t('keys.editor.weeklyLimit')">
+        <ZFormItem prop="weeklyLimitUsd" :label="t('keys.editor.weeklyLimit')">
           <ZInput
             :model-value="form.weeklyLimitUsd" type="number"
             min="0"
@@ -135,7 +147,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
       </div>
 
       <div class="grid gap-6 sm:grid-cols-2">
-        <ZFormItem :label="t('keys.editor.maximumConcurrency')">
+        <ZFormItem prop="maxConcurrency" :label="t('keys.editor.maximumConcurrency')">
           <ZInput
             :model-value="form.maxConcurrency" type="number"
             :aria-label="t('keys.editor.maximumConcurrency')"
@@ -146,7 +158,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
             @update:model-value="updateForm('maxConcurrency', $event)"
           />
         </ZFormItem>
-        <ZFormItem :label="t('keys.editor.requestsPerMinuteRpm')">
+        <ZFormItem prop="requestsPerMinute" :label="t('keys.editor.requestsPerMinuteRpm')">
           <ZInput
             :model-value="form.requestsPerMinute" type="number"
             :aria-label="t('keys.editor.requestsPerMinute')"
@@ -167,8 +179,7 @@ function updateForm<Key extends keyof ApiKeyFormValue>(key: Key, value: ApiKeyFo
       <ZButton
         type="primary"
         :loading="saving"
-        :disabled="!form.name.trim()"
-        @click="emit('save')"
+        @click="requestSave"
       >
         {{ editing ? t('common.actions.save') : t('common.actions.create') }}
       </ZButton>

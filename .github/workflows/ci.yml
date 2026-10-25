@@ -129,16 +129,6 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ steps.toolchains.outputs.rust }}
-      - name: Check dependency pins
-        run: |
-          ui_revision="$(git -C modules/ui rev-parse HEAD)"
-          for lockfile in frontend/pnpm-lock.yaml modules/plugins/examples/workbench/frontend/pnpm-lock.yaml; do
-            locked_revision="$(sed -nE 's@.*codeload.github.com/zyycn/codex-proxy-ui/tar.gz/([a-f0-9]{40}).*@\1@p' "$lockfile" | sort -u)"
-            if [ "$locked_revision" != "$ui_revision" ]; then
-              echo "::error file=$lockfile::UI dependency must match modules/ui ($ui_revision)"
-              exit 1
-            fi
-          done
       - name: Install development dependencies
         run: |
           pnpm --dir modules/ui install --frozen-lockfile

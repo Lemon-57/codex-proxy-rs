@@ -58,6 +58,7 @@ const groupOptions = computed(() => [
     >
       <ZInput
         v-model="search"
+        :aria-label="t('accounts.filters.searchLabel')"
         :placeholder="t('accounts.filters.searchLabel')"
         class="col-span-2 min-w-0 sm:col-span-3 xl:w-80 xl:flex-none"
       >

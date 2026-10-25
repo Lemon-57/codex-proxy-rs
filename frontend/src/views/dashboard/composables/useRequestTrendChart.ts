@@ -5,7 +5,7 @@ import type { DashboardTrendMetric } from '@/api'
 import { usePreferredReducedMotion } from '@vueuse/core'
 import { computed, shallowRef, watch } from 'vue'
 import { sampleGapBridgeSeries } from '@/components/charts/timeSeriesGap'
-import { chartTooltipStyle, tooltipIndex } from '@/components/charts/tooltip'
+import { chartTooltipContent, chartTooltipStyle, tooltipIndex } from '@/components/charts/tooltip'
 
 import { useChartPalette } from '@/composables/useChartPalette'
 import { t } from '@/i18n'
@@ -189,8 +189,7 @@ export function useRequestTrendChart(options: {
     const title = point?.label ?? ''
 
     if (activeKind.value === 'usage') {
-      return [
-        title,
+      return chartTooltipContent(title, [
         tooltipItem(t('dashboard.metrics.inputTokens'), point?.inputTokens, trendColor('inputTokens')),
         tooltipItem(t('dashboard.metrics.outputTokens'), point?.outputTokens, trendColor('outputTokens')),
         tooltipItem(
@@ -204,9 +203,7 @@ export function useRequestTrendChart(options: {
           trendColor('cachedInputTokens'),
         ),
         tooltipItem(t('dashboard.metrics.requests'), point?.requests, palette.value.textSecondary),
-      ]
-        .filter(Boolean)
-        .join('<br/>')
+      ])
     }
 
     const lines = rows.map((row) => {
@@ -216,7 +213,7 @@ export function useRequestTrendChart(options: {
       const marker = tooltipValue(row, 'marker')
       return `${marker}${name}: ${tooltipDisplayValue(point, metric, value)}`
     })
-    return [title, ...lines].filter(Boolean).join('<br/>')
+    return chartTooltipContent(title, lines)
   }
 
   function tooltipDisplayValue(point: TrendPoint | undefined, metric: string, value: string) {

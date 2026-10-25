@@ -640,6 +640,12 @@
       "description": "Manage scheduling, upstreams, pricing, security, history retention, and backups",
       "sectionsLabel": "Settings sections",
       "undoAllBasicSettingsChanges": "Undo all basic settings changes",
+      "unsavedChanges": {
+        "title": "Unsaved changes",
+        "description": "Your unsaved settings changes will be lost if you leave",
+        "leave": "Discard and leave",
+        "stay": "Keep editing"
+      },
       "saveChanges": "Save",
       "settingsLoadingFailed": "Settings loading failed",
       "reload": "Reload",

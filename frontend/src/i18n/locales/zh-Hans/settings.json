@@ -640,6 +640,12 @@
       "description": "配置网关调度、上游与定价，管理访问安全、历史保留与备份",
       "sectionsLabel": "设置分区",
       "undoAllBasicSettingsChanges": "撤销全部基础设置更改",
+      "unsavedChanges": {
+        "title": "有未保存的更改",
+        "description": "离开后，未保存的设置更改将丢失",
+        "leave": "放弃并离开",
+        "stay": "继续编辑"
+      },
       "saveChanges": "保存基础设置",
       "settingsLoadingFailed": "设置加载失败",
       "reload": "重新加载",

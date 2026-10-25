@@ -4,10 +4,10 @@ import type { ResolvedTheme, ThemeColorPreset, ThemeColorPresetId, ThemeMode, Th
 import type { ThemeEditorDraft, ThemeEditorGlobalCategory } from '../composables/useThemeEditor'
 import { ZSegmented } from '@codex-proxy/ui'
 
-import { resolveTheme, THEME_COLOR_PRESETS } from '@codex-proxy/ui/theme'
+import { resolveThemeSeedTokens, THEME_COLOR_PRESETS } from '@codex-proxy/ui/theme'
 import { Check, ChevronDown, Laptop, Moon, Sun } from '@lucide/vue'
 
-import { computed } from 'vue'
+import { computed, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { uiLocale } from '@/i18n/ui'
 
@@ -41,6 +41,7 @@ const emit = defineEmits<{
 const { t } = useI18n({ useScope: 'global' })
 
 const category = defineModel<ThemeEditorGlobalCategory>('category', { required: true })
+const derivedOpen = shallowRef(false)
 
 const localizedPresets = computed(() => THEME_COLOR_PRESETS.map(preset => ({ ...preset, ...uiLocale.value.theme[preset.id] })))
 const colorPresets = THEME_COLOR_PRESETS.map(preset => preset.seed)
@@ -58,9 +59,9 @@ const presetSwatchesById = new Map(
   THEME_COLOR_PRESETS.map(preset => [
     preset.id,
     [
-      resolveTheme('light', preset.id, preset.seed).seedTokens.colorBgBase,
+      resolveThemeSeedTokens('light', preset.seed, undefined, preset.appearance?.light).colorBgBase,
       preset.seed,
-      resolveTheme('dark', preset.id, preset.seed).seedTokens.colorBgBase,
+      resolveThemeSeedTokens('dark', preset.seed, undefined, preset.appearance?.dark).colorBgBase,
     ],
   ]),
 )
@@ -226,14 +227,19 @@ function presetSwatches(preset: ThemeColorPreset) {
         />
       </section>
 
-      <details v-if="derivedTokens.length > 0" class="group rounded-cp-lg bg-cp-bg-container shadow-cp-tertiary">
+      <details
+        v-if="derivedTokens.length > 0"
+        :open="derivedOpen"
+        class="group rounded-cp-lg bg-cp-bg-container shadow-cp-tertiary"
+        @toggle="derivedOpen = ($event.target as HTMLDetailsElement).open"
+      >
         <summary
           class="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3 text-cp-sm font-bold text-cp-text"
         >
           {{ t('appearance.globalTokens.derivedVariablesMapAliasToken') }}
           <ChevronDown class="size-3.5 transition-transform duration-150 group-open:rotate-180" />
         </summary>
-        <div class="grid gap-1 px-2 pb-2">
+        <div v-if="derivedOpen" class="grid gap-1 px-2 pb-2">
           <div
             v-for="[name, value] in derivedTokens"
             :key="name"

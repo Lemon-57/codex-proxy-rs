@@ -114,7 +114,7 @@ pnpm --dir modules/plugins/examples/workbench/frontend build:source
 ```
 
 `build:source` 用各项目的 `tsconfig.source.json` 检查源码类型，管理端构建到 `frontend/node_modules/.vite/source-dist`，示例构建到其前端项目的 `.vite/source-dist`，不改写正式依赖、锁文件或 `dist`。
-源码联调 CI 显式检出子模块、核对 UI 提交锁定并验证这两个命令
+源码联调 CI 显式检出子模块，分别按锁文件安装依赖，验证这两个命令并确认联调未改写正式依赖和锁文件
 
 ### 本地 SDK 验证
 
@@ -145,7 +145,7 @@ pnpm --dir modules/plugins/examples/workbench/frontend build:source
 1. 在要修改的子模块内先创建分支，例如 `git -C modules/ui switch -c feat/select`。初次初始化的子模块通常处于 detached HEAD
 2. 在子模块运行自身检查，并在宿主根目录运行所需联调检查
 3. 分别提交、推送并合并组件库或插件 PR。宿主只记录子模块提交号，不能替代子仓库的提交与推送
-4. UI 更新后，将管理端和插件页面的 UI 依赖同步到同一固定标签或提交，重新生成各自锁文件，再更新宿主的子模块指针；CI 会核对三处是否一致
+4. 管理端与插件页面按需升级 UI 依赖，各自固定标签或提交并维护锁文件，无需与 `modules/ui` 同步版本
 5. 提交宿主改动及 `modules/ui`、`modules/plugins` 指针。指针必须指向远程可取得的提交，不能只存在于开发机
 
 更新子模块指针不会自动升级消费方依赖。正式依赖不能写成开发机路径或浮动分支；SDK 仍由插件仓库固定到包含所需合同的宿主提交
