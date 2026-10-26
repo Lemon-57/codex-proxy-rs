@@ -68,7 +68,10 @@ const {
 } = useAccountsQuery()
 
 async function reloadAccountsAndSuppliers() {
-  await Promise.all([loadAccounts(), loadSupplierOptions()])
+  await Promise.all([
+    loadAccounts(),
+    loadSupplierOptions(),
+  ])
 }
 
 const {
@@ -78,7 +81,10 @@ const {
 } = useAccountGroupCatalog()
 
 const importTasks = useAccountImportTasks({
-  reload: () => Promise.all([reloadAccountsAndSuppliers(), loadGroups()]),
+  reload: () => Promise.all([
+    reloadAccountsAndSuppliers(),
+    loadGroups(),
+  ]),
 })
 const {
   open: showImportTasks,
@@ -131,7 +137,10 @@ const {
   onImportTaskCreated: importTasks.created,
   accounts,
   selectedIds,
-  reload: () => Promise.all([reloadAccountsAndSuppliers(), loadGroups()]),
+  reload: () => Promise.all([
+    reloadAccountsAndSuppliers(),
+    loadGroups(),
+  ]),
   replaceAccount,
 })
 

@@ -231,7 +231,10 @@ PostgreSQL/Redis 启动密码。日常校验使用 `config --quiet`
 | 代理位置 | “代理管理”；优先于全局位置，全局关闭时仍可独立生效 |
 
 位置覆盖只影响 OpenAI 请求中受支持的位置与时区信息，不改变上下文日期、真实出口 IP、epoch 时间戳或系统时区。
-`openai.residency` 是独立的部署约束。身份与位置字段见 [运行设置 API](../docs/api.md#8-运行设置)。
+`openai.residency` 和 `openai.account_routing_override` 是独立于客户端身份的启动配置，
+分别指定 `x-openai-internal-codex-residency` 和 `x-openai-account-routing-override` 请求头。
+两项均为可选字符串，填写值原样发送，不校验地域或路由枚举；省略或设为 `null` 时删除对应的下游请求头且不补发。
+示例配置均填写 `us`，修改后重启应用生效。身份与位置字段见 [运行设置 API](../docs/api.md#8-运行设置)
 后台账号操作使用 Provider 自己的官方画像；发布资料刷新不改写用户选择或 `config.yaml`
 
 ### 批量维护代理
@@ -389,7 +392,7 @@ V2 远程压缩通过 Responses 接口发送 `compaction_trigger`，网关和上
 
 模板启用原生生图。Codex 可在任务需要图片时调用 `image_gen.imagegen`，
 再通过代理的 Images 接口生成或编辑图片；也可以在需求中明确要求生成并使用图片。
-需要支持该能力的客户端、支持图片输入的对话模型，以及有生图权限和额度的 OpenAI 账号。
+需要支持该能力的客户端、支持图片输入的对话模型，以及有生图权限和额度的 Codex 账号。
 代理不会增加上游权限，xAI 账号不能承接这些 Images 请求
 
 生图不要求开启 WebSocket。要启用客户端 WebSocket，把当前 Provider 的
@@ -397,7 +400,7 @@ V2 远程压缩通过 Responses 接口发送 `compaction_trigger`，网关和上
 
 客户端到代理、代理到上游是两段独立连接。客户端关闭 WebSocket 后，
 服务端仍可能用 WebSocket 访问上游；客户端开关不控制服务端连接池和 HTTP 回退策略。
-OpenAI OAuth 账号的上游传输方式默认 WS；固定为 SSE 的账号不承接必须依赖 WS 的预热及连接内续接。
+Codex OAuth 账号的上游传输方式默认 WS；固定为 SSE 的账号不承接必须依赖 WS 的预热及连接内续接。
 仅使用这类账号时，客户端保持 `supports_websockets = false`，避免先尝试 WS 再回退
 
 ### 时区与客户端环境信息

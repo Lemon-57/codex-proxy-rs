@@ -283,7 +283,7 @@
       "requestId": "請求 ID",
       "upstreamRequestId": "上游請求 ID",
       "responseId": "響應 ID",
-      "clientKeyId": "客戶端 Key ID",
+      "clientKeyId": "API密鑰 ID",
       "errorCode": "錯誤碼",
       "failureClassification": "失敗分類",
       "duration": "耗時",

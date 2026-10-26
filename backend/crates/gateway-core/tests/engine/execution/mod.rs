@@ -1,5 +1,6 @@
 //! 执行服务的准入、预算、请求记录与终结行为测试
 
+mod identity;
 mod outbound;
 use gateway_core::routing::extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference};
 
@@ -12,6 +13,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use gateway_core::engine::authentication::ClientIdentityPort;
 use gateway_core::engine::budget::{ClientBudgetCharge, ClientBudgetError, ClientBudgetPort};
 use gateway_core::error::GatewayError;
 
@@ -1215,9 +1217,7 @@ fn plugin_origin_scope() -> gateway_core::engine::extensions::ExtensionCallScope
 
 #[test]
 fn explicit_key_model_execution_preserves_http_origin_and_leaves_background_origin_unknown() {
-    use gateway_core::engine::nested::{
-        BoundModelExecutionBinding, BoundModelExecutionRequest, NestedModelExecutionPort,
-    };
+    use gateway_core::engine::nested::{BoundModelExecutionRequest, NestedModelExecutionPort};
     block_on(async {
         for has_origin in [true, false] {
             let store = Arc::new(TrackingExecutionStore::default());
@@ -1234,11 +1234,17 @@ fn explicit_key_model_execution_preserves_http_origin_and_leaves_background_orig
                 Arc::new(crate::RecordingDiagnostics::default()),
             );
             let input = request(&service, ClientTransport::InternalPlugin);
-            let context = NestedModelExecutionPort::bind(
+            let client = ClientIdentityPort::resolve_client(
                 &service,
-                BoundModelExecutionBinding {
-                    settings: None,
-                    client_key_id: ClientApiKeyId::new("key_start_test").unwrap(),
+                ClientApiKeyId::new("key_start_test").unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut started = NestedModelExecutionPort::start_bound(
+                &service,
+                BoundModelExecutionRequest {
+                    client,
                     initiating_plugin_instance_id: "origin-fixture".into(),
                     cancellation: Default::default(),
                     extension_scope: if has_origin {
@@ -1246,14 +1252,6 @@ fn explicit_key_model_execution_preserves_http_origin_and_leaves_background_orig
                     } else {
                         Default::default()
                     },
-                },
-            )
-            .await
-            .unwrap();
-            let mut started = NestedModelExecutionPort::start_bound(
-                &service,
-                BoundModelExecutionRequest {
-                    context: context.clone(),
                     public_model: input.public_model,
                     operation: input.operation,
                     metadata: input.metadata,

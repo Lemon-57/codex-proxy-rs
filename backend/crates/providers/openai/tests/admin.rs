@@ -2446,7 +2446,7 @@ mod errors {
     #[tokio::test]
     async fn manual_refresh_preserves_banned_evidence_without_promoting_401_to_terminal() {
         for (status, kind, message) in [
-            (400, Kind::Invalid, "OpenAI 账号已被停用，请检查账号状态"),
+            (400, Kind::Invalid, "Codex 账号已被停用，请检查账号状态"),
             (
                 401,
                 Kind::BadGateway,

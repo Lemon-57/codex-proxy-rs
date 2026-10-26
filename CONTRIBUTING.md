@@ -228,7 +228,7 @@ git diff --check
 
 ## 自动检查与合并条件
 
-[CI](.github/workflows/ci.yml) 按变更范围调用质量检查，Markdown 不触发后端、前端、容器和源码联调任务，工作流语法检查独立执行
+[CI](.github/workflows/ci.yml) 按变更范围调用质量检查，Markdown 不触发后端、前端和容器任务，工作流语法检查独立执行
 
 后端 CI 使用 nextest 执行 `main` 集成测试，默认 Redis 密码模式执行完整测试集，ACL 用户模式复用同一批构建产物执行 Store 的 Redis 测试；本地验证命令见 [架构文档](docs/architecture.md#验证命令)
 

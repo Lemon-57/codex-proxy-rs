@@ -440,7 +440,6 @@ async fn start_session<H: PluginHandler + 'static>(
                 maximum_callbacks: 4,
                 maximum_buffered_stream_chunks: 16,
                 handshake_timeout: Duration::from_secs(1),
-                maximum_call_timeout: Duration::from_secs(2),
             },
         )
         .await?
@@ -473,6 +472,7 @@ async fn start_session<H: PluginHandler + 'static>(
             message: Message::Ready {
                 protocol_version: PROTOCOL_VERSION,
                 ref incarnation,
+                ..
             },
             ref payload,
         } if incarnation == "test-incarnation" && payload.is_empty()
@@ -519,10 +519,25 @@ async fn send_call(
 }
 
 async fn receive(host: &mut HostPeer) -> Frame {
-    tokio::time::timeout(Duration::from_secs(1), read_frame(&mut host.reader))
-        .await
-        .expect("plugin response timed out")
-        .expect("plugin response frame must be valid")
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let frame = read_frame(&mut host.reader).await?;
+            match frame.message {
+                Message::Suspend { .. } | Message::CallbackConsumed { .. } => {}
+                Message::Resume { id, epoch } => {
+                    write_frame(
+                        &mut host.writer,
+                        &Frame::control(Message::Resumed { id, epoch }),
+                    )
+                    .await?;
+                }
+                _ => return Ok::<_, gateway_plugin_sdk::FrameError>(frame),
+            }
+        }
+    })
+    .await
+    .expect("plugin response timed out")
+    .expect("plugin response frame must be valid")
 }
 
 fn unwrap_result(frame: Frame, expected_id: u64) -> (Value, Vec<u8>) {

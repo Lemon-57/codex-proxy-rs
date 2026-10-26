@@ -75,6 +75,8 @@ pnpm --dir frontend dev
 | `modules/ui` | `codex-proxy-ui`，共用组件与主题 |
 | `modules/plugins` | `codex-proxy-plugins`，官方插件示例 |
 
+各仓库的常规 CI 验证自身代码和锁定依赖。源码模式用于按需联调，运行前确认所选版本或提交组合及其公开合同兼容
+
 ### 检出与安装
 
 首次检出可同时下载子模块：
@@ -114,7 +116,6 @@ pnpm --dir modules/plugins/examples/workbench/frontend build:source
 ```
 
 `build:source` 用各项目的 `tsconfig.source.json` 检查源码类型，管理端构建到 `frontend/node_modules/.vite/source-dist`，示例构建到其前端项目的 `.vite/source-dist`，不改写正式依赖、锁文件或 `dist`。
-源码联调 CI 显式检出子模块，分别按锁文件安装依赖，验证这两个命令并确认联调未改写正式依赖和锁文件
 
 ### 本地 SDK 验证
 

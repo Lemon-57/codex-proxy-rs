@@ -70,7 +70,9 @@ export function useAccountsQuery() {
     try {
       const firstPage = await getAccounts({ page: 1, pageSize: 200 })
       const pages = await Promise.all(
-        Array.from({ length: Math.max(0, firstPage.page.totalPages - 1) }, (_, index) => getAccounts({ page: index + 2, pageSize: 200 })),
+        Array.from({
+          length: Math.max(0, firstPage.page.totalPages - 1),
+        }, (_, index) => getAccounts({ page: index + 2, pageSize: 200 })),
       )
       const values = new Set(
         [firstPage, ...pages]
@@ -91,7 +93,9 @@ export function useAccountsQuery() {
   async function replaceAccount(updated: Account) {
     // 先取消旧查询并应用接口返回的账号，避免旧响应覆盖最新行数据。
     query.invalidate()
-    query.items.value = query.items.value.map(account => account.id === updated.id ? updated : account)
+    query.items.value = query.items.value.map(account => account.id === updated.id
+      ? updated
+      : account)
 
     // 筛选、排序、概览和末页回退仍由回读校准，但不触发整表加载。
     if (!await query.execute({ background: true }))
@@ -106,7 +110,12 @@ export function useAccountsQuery() {
     onCleanup(() => clearTimeout(timer))
   })
 
-  watch([providerQuery, statusQuery, groupQuery, planTypeQuery], () => {
+  watch([
+    providerQuery,
+    statusQuery,
+    groupQuery,
+    planTypeQuery,
+  ], () => {
     void query.reloadFromStart()
   })
 

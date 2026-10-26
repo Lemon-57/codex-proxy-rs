@@ -283,7 +283,7 @@
       "requestId": "请求 ID",
       "upstreamRequestId": "上游请求 ID",
       "responseId": "响应 ID",
-      "clientKeyId": "客户端 Key ID",
+      "clientKeyId": "API密钥 ID",
       "errorCode": "错误码",
       "failureClassification": "失败分类",
       "duration": "耗时",

@@ -37,7 +37,9 @@ const forecastOpen = shallowRef(false)
 const hasForecast = computed(() => props.account.authenticationKind !== 'api_key')
 const hasPersonalInfo = computed(() => props.account.capabilities.profile || props.account.capabilities.subscription)
 const hasActions = computed(() => hasPersonalInfo.value || hasForecast.value || props.account.capabilities.quotaRefresh || props.account.capabilities.resetCredits)
-const lastRefreshed = computed(() => t('accounts.quota.lastRefreshed', { refreshedAtDisplay: formatRelativeTime(props.account.quota.refreshedAtRelative) }))
+const lastRefreshed = computed(() => t('accounts.quota.lastRefreshed', {
+  refreshedAtDisplay: formatRelativeTime(props.account.quota.refreshedAtRelative),
+}))
 watch(hasPersonalInfo, (available) => {
   if (!available)
     profileOpen.value = false
@@ -54,7 +56,7 @@ watch(hasPersonalInfo, (available) => {
         v-if="account.capabilities.quota || quotaEntries.length > 0"
         class="col-span-2 row-start-2 m-0 flex min-w-0 items-center gap-1.5 text-cp-xs font-emphasis text-cp-text-secondary"
       >
-        <span class="shrink-0 whitespace-nowrap">{{ t('accounts.quota.quota', { provider: account.provider === 'openai' ? 'Codex' : formatProviderLabel(account.provider) }) }}</span>
+        <span class="shrink-0 whitespace-nowrap">{{ t('accounts.quota.quota', { provider: formatProviderLabel(account.provider) }) }}</span>
         <template v-if="account.planType">
           <span class="shrink-0">·</span>
           <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" class="shrink-0" />

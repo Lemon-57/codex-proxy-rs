@@ -195,6 +195,7 @@
       "searchOrEnterIdAndPressEnter": "Search or enter ID and press Enter to add",
       "selectModel": "Select model",
       "notInCurrentModelCatalog": "{id} (not in the current model catalog)",
+      "modelCatalogMissingHint": "The current upstream catalog does not list this model, your selection has been kept",
       "loadingModel": "Loading model",
       "noMatchingModels": "No matching models",
       "noModels": "No models",
