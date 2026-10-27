@@ -38,7 +38,7 @@ const { t } = useI18n({ useScope: 'global' })
         {{ artifactForInstance(instance, artifacts)?.metadata.version }}
       </ZTag>
       <PluginStatusNotice :instance="instance" />
-      <ZTag size="small" :type="pluginStatusType(configurationStatus(instance))">
+      <ZTag v-if="!['failed', 'incompatible'].includes(configurationStatus(instance))" size="small" :type="pluginStatusType(configurationStatus(instance))">
         {{ PLUGIN_STATUS_LABELS[configurationStatus(instance)] }}
       </ZTag>
       <div class="flex shrink-0 items-center gap-1">

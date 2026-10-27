@@ -69,8 +69,9 @@
     },
     "plugins": {
       "title": "插件兼容性提醒",
-      "description": "重启后保留启用配置，逐个尝试启动插件",
-      "incompatible": "不兼容插件"
+      "description": "重启后，不兼容插件将保持未启动",
+      "incompatible": "不兼容插件",
+      "requestErrorHelp": "配置和数据保留，可在插件页尝试启动"
     },
     "versionAfterRestart": "重启后版本",
     "confirmation": {

@@ -1,0 +1,28 @@
+# Dependencies and build outputs
+node_modules/
+.pnpm-store/
+.pnpm-cache/
+dist/
+playground-dist/
+playground/.vitepress/cache/
+playground/.vitepress/dist/
+.vite/
+artifacts/
+coverage/
+*.tsbuildinfo
+*.tgz
+
+# Local configuration and logs
+*.log
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

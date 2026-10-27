@@ -107,7 +107,6 @@ mod execution;
 mod failure;
 mod live;
 mod observation;
-mod parameters;
 mod upstream_adapter;
 mod workers;
 pub(crate) use live::{CodexLiveGateway, CodexLiveRegistry};
@@ -118,7 +117,6 @@ use execution::*;
 pub use failure::openai_failure_affects_account_score;
 use failure::*;
 use observation::*;
-use parameters::RequestParameters;
 pub(crate) use workers::worker_contributions;
 
 const PROVIDER_NAME: &str = "openai";
@@ -221,14 +219,9 @@ impl PreparedGenerateRequest {
 }
 
 struct SelectedGenerate {
-    request: SelectedRequest,
-    frozen_requirements: CapabilityRequirements,
-}
-
-struct SelectedRequest {
     lease: CodexCredentialLease,
     account_selection_wait_ms: u64,
-    parameters: RequestParameters,
+    frozen_requirements: CapabilityRequirements,
 }
 
 impl CodexProvider {
@@ -756,10 +749,7 @@ impl Provider for CodexProvider {
                 provider_kind,
                 Some(upstream_model.as_str().to_owned()),
                 account_id,
-                adapter
-                    .is_none()
-                    .then(|| RequestParameters::baseline(lease.installation_id())),
-                Box::new(move |operation, middleware_headers, parameters| {
+                Box::new(move |operation, middleware_headers| {
                     Box::pin(async move {
                         if let Some(adapter) = adapter {
                             return provider.execute_upstream_adapter(
@@ -780,11 +770,8 @@ impl Provider for CodexProvider {
                                 terminal_model,
                                 terminal_context,
                                 SelectedGenerate {
-                                    request: SelectedRequest {
-                                        parameters: RequestParameters::decode(parameters)?,
-                                        lease,
-                                        account_selection_wait_ms,
-                                    },
+                                    lease,
+                                    account_selection_wait_ms,
                                     frozen_requirements,
                                 },
                             )
@@ -806,12 +793,8 @@ impl CodexProvider {
         selected: SelectedGenerate,
     ) -> Result<ProviderStream, ProviderError> {
         let SelectedGenerate {
-            request:
-                SelectedRequest {
-                    parameters,
-                    mut lease,
-                    account_selection_wait_ms,
-                },
+            mut lease,
+            account_selection_wait_ms,
             frozen_requirements,
         } = selected;
         let Operation::Generate(generate) = operation else {
@@ -951,7 +934,7 @@ impl CodexProvider {
             .then(|| crate::transport::diagnostics::evidence::request_state(&upstream_request));
         scope_request_to_account(
             &mut upstream_request,
-            &parameters.installation_id,
+            lease.installation_id(),
             account_scope,
         );
         if let Some(before) = state_before {
@@ -1106,7 +1089,6 @@ impl CodexProvider {
             AttemptTransport::Default | AttemptTransport::Fallback => 0,
         };
         let events = cold_response_stream(ColdResponse {
-            parameters,
             client: self
                 .client_for_request(&context)?
                 .for_account(lease.account())

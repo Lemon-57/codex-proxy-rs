@@ -1,3 +1,4 @@
+import { escape } from 'es-toolkit'
 import { isRecord } from '@/utils/data'
 
 interface ChartTooltipTheme {
@@ -45,13 +46,24 @@ export function chartTooltipStyle(
   }
 }
 
+export function chartTooltipContent(label: string, lines: string[]) {
+  const title = label
+    ? `<span style="font-size:13px;line-height:20px">${escape(label)}</span>`
+    : ''
+  return [title, ...lines].filter(Boolean).join('<br/>')
+}
+
 export function tooltipRows(params: unknown): Record<string, unknown>[] {
-  const values = Array.isArray(params) ? params : [params]
+  const values = Array.isArray(params)
+    ? params
+    : [params]
   return values.filter(isRecord)
 }
 
 export function tooltipIndex(source: unknown) {
   if (!isRecord(source))
     return -1
-  return typeof source.dataIndex === 'number' ? source.dataIndex : -1
+  return typeof source.dataIndex === 'number'
+    ? source.dataIndex
+    : -1
 }

@@ -1113,7 +1113,7 @@ where
                 pinned_account.clone(),
                 self.account_state_owner.clone(),
             )
-            .with_account_scope(Arc::clone(self.plan.account_scope())),
+            .with_account_scope(Arc::clone(candidate.account_scope())),
         }
         .with_credential_recovery_attempted(pinned_account.as_ref().is_some_and(|account| {
             self.credential_recovery_attempted_accounts
@@ -2345,12 +2345,6 @@ where
             http_version,
             websocket_pool,
             service_tier,
-            upstream_response_model: self
-                .current
-                .as_ref()
-                .and_then(|current| current.response_observation.as_ref())
-                .and_then(ProviderResponseObservation::upstream_response_model)
-                .map(str::to_owned),
             provider_metadata_json,
             diagnostic_trace_json: self.trace.snapshot().map(|value| value.to_string()),
             error: None,
@@ -2533,12 +2527,6 @@ where
             http_version,
             websocket_pool,
             service_tier,
-            upstream_response_model: self
-                .current
-                .as_ref()
-                .and_then(|current| current.response_observation.as_ref())
-                .and_then(ProviderResponseObservation::upstream_response_model)
-                .map(str::to_owned),
             provider_metadata_json,
             diagnostic_trace_json: self.trace.snapshot().map(|value| value.to_string()),
             error: Some(finalization.error),

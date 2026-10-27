@@ -18,7 +18,8 @@
       "requestVolume": "请求量",
       "noServiceResult": "无服务结果",
       "title": "请求健康",
-      "description": "请求状态分布 · {granularityText}",
+      "description": "请求状态分布",
+      "descriptionWithGranularity": "请求状态分布 · {granularityText}",
       "completionRate": "完成率",
       "abnormalEnd": "非正常结束",
       "loading": "正在加载请求数据",
@@ -81,6 +82,7 @@
       "reviewSubagentRequest": "Review 子代理请求"
     },
     "filters": {
+      "modelPlaceholder": "按模型筛选",
       "error": "错误",
       "requestDetailType": "请求明细类型",
       "label": "使用记录筛选与操作",
@@ -126,8 +128,6 @@
     "future": "未来",
     "status": {
       "mappedModel": "网关映射后发送给上游的模型：{secondary}",
-      "returnedModel": "上游返回模型：{returned}（与网关映射后发送的模型一致）",
-      "returnedModelHelp": "上游返回模型：{returned}",
       "firstOutputWaiting": "首个输出等待",
       "reasoningToText": "推理到正文",
       "firstOneIsOutputToText": "首个输出到正文",
@@ -167,6 +167,7 @@
       "requestsPerMinute": "RPM"
     },
     "header": {
+      "title": "使用统计",
       "currentKey": "当前密钥",
       "keyPrefix": "密钥前缀",
       "keyConfiguration": "密钥配置",
@@ -200,8 +201,8 @@
       "clickRefreshAtTopToTryAgain": "，请点击顶部刷新重试",
       "description": "查看请求用量、性能趋势与调用错误记录",
       "dateRangeLabel": "统计日期范围，仅可选择最近 31 天",
-      "requestDetails": "请求明细",
-      "recordsDescription": "成功请求与失败请求明细",
+      "requestDetails": "请求记录",
+      "recordsDescription": "成功请求与失败请求记录",
       "failedToLoad": "加载失败：{error}",
       "noRequestsMatchTheseFilters": "所选条件下暂无请求记录",
       "viewErrorDetails": "查看错误详情",
@@ -282,7 +283,7 @@
       "requestId": "请求 ID",
       "upstreamRequestId": "上游请求 ID",
       "responseId": "响应 ID",
-      "clientKeyId": "客户端 Key ID",
+      "clientKeyId": "API密钥 ID",
       "errorCode": "错误码",
       "failureClassification": "失败分类",
       "duration": "耗时",
@@ -309,7 +310,6 @@
       "message": "消息",
       "upstreamTimeConsumption": "上游耗时",
       "storageModel": "存储模型",
-      "upstreamReturnModel": "上游返回模型",
       "clientIp": "客户端 IP",
       "eventType": "事件类型",
       "trySerialNumber": "尝试序号",

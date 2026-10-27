@@ -11,7 +11,7 @@ pub use crate::account::scope::{
 };
 pub use crate::identity::ProviderKind;
 pub use catalog::{
-    ContributedModelAlias, ProviderCatalogGeneration, ProviderCatalogPort,
+    ContributedModel, ContributedModelAlias, ProviderCatalogGeneration, ProviderCatalogPort,
     ProviderCatalogUnavailable, ProviderModelCapabilities, ProviderModelContent,
     ProviderModelDescriptor, PublicModelDescriptor,
 };

@@ -39,7 +39,6 @@ pub struct MiddlewareRequest {
     pub body: Vec<u8>,
     original_protocol: String,
     original_settings: serde_json::Value,
-    original_provider_parameters: Option<serde_json::Map<String, serde_json::Value>>,
     original_headers: Vec<MiddlewareHeader>,
     original_body: Vec<u8>,
     body_replaced: bool,
@@ -99,9 +98,6 @@ impl MiddlewareRequest {
         };
         (
             MiddlewareNextRequest {
-                provider_parameters: (self.head.provider_parameters
-                    != self.original_provider_parameters)
-                    .then(|| self.head.provider_parameters.unwrap_or_default()),
                 settings: (self.head.settings != self.original_settings)
                     .then_some(self.head.settings),
                 protocol,
@@ -345,7 +341,6 @@ impl RequestCall {
             context: call.context,
             request: MiddlewareRequest {
                 original_settings: head.settings.clone(),
-                original_provider_parameters: head.provider_parameters.clone(),
                 body: call.payload,
                 original_body,
                 body_replaced: false,

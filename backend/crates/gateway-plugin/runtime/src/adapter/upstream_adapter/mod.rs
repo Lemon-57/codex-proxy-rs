@@ -37,6 +37,24 @@ pub(crate) struct AdapterEntry {
     adapter: Option<Arc<PluginUpstreamAdapter>>,
 }
 
+impl AdapterEntry {
+    pub(crate) fn catalog_target(
+        &self,
+        id: &str,
+        model: &str,
+    ) -> Option<&UpstreamAdapterDeclaration> {
+        let adapter = self.adapter.as_ref()?;
+        let declaration = &adapter.declaration;
+        let provider = ProviderKind::new(declaration.provider.as_str()).ok()?;
+        (declaration.id == id
+            && !declaration.account_ids.is_empty()
+            && (declaration.models.is_empty()
+                || declaration.models.iter().any(|value| value == model))
+            && self.scope.matches_catalog(&provider, model))
+        .then_some(declaration)
+    }
+}
+
 pub(crate) struct PluginUpstreamAdapter {
     instance_id: String,
     contribution_id: String,

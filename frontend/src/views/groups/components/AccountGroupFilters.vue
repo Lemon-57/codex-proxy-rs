@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { ZButton, ZInput, ZSelect } from '@codex-proxy/ui'
+import { ZButton, ZInput } from '@codex-proxy/ui'
 
 import { Plus, Search, Trash2 } from '@lucide/vue'
 
 import { useI18n } from 'vue-i18n'
-import { accountGroupStatusOptions } from '../constants'
 
 defineProps<{
   batchDeleting: boolean
@@ -19,14 +18,13 @@ const emit = defineEmits<{
 const { t } = useI18n({ useScope: 'global' })
 
 const search = defineModel<string>('search', { required: true })
-const status = defineModel<string>('status', { required: true })
 </script>
 
 <template>
   <div class="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
     <ZInput
       v-model="search"
-      class="min-w-0 sm:w-80 sm:flex-1 sm:basis-64"
+      class="min-w-0 sm:w-80 sm:flex-none"
       :aria-label="t('groups.filters.searchAccountGroup')"
       :placeholder="t('groups.filters.searchGroupName')"
     >
@@ -34,12 +32,6 @@ const status = defineModel<string>('status', { required: true })
         <Search class="size-4.5 text-cp-text-tertiary" />
       </template>
     </ZInput>
-    <ZSelect
-      v-model="status"
-      :options="accountGroupStatusOptions"
-      :aria-label="t('groups.filters.filterByGroupStatus')"
-      class="w-40"
-    />
     <div class="flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2 sm:ml-auto">
       <ZButton
         v-if="selectedCount > 0"

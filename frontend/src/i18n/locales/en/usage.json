@@ -18,7 +18,8 @@
       "requestVolume": "Requests",
       "noServiceResult": "No service result",
       "title": "Health",
-      "description": "Request outcomes · {granularityText}",
+      "description": "Request outcomes",
+      "descriptionWithGranularity": "Request outcomes · {granularityText}",
       "completionRate": "Completion",
       "abnormalEnd": "Abnormal",
       "loading": "Loading requests",
@@ -81,6 +82,7 @@
       "reviewSubagentRequest": "Review subagent request"
     },
     "filters": {
+      "modelPlaceholder": "Filter by model",
       "error": "Error",
       "requestDetailType": "Request detail type",
       "label": "Usage record filters and actions",
@@ -126,8 +128,6 @@
     "future": "Future",
     "status": {
       "mappedModel": "Model sent upstream after gateway mapping: {secondary}",
-      "returnedModel": "Upstream response model: {returned} (matches the mapped request model)",
-      "returnedModelHelp": "Model returned by upstream: {returned}",
       "firstOutputWaiting": "First output",
       "reasoningToText": "Reasoning → Text",
       "firstOneIsOutputToText": "First output → Text",
@@ -167,6 +167,7 @@
       "requestsPerMinute": "RPM"
     },
     "header": {
+      "title": "Analytics",
       "currentKey": "Current key",
       "keyPrefix": "Key prefix",
       "keyConfiguration": "Key configuration",
@@ -200,8 +201,8 @@
       "clickRefreshAtTopToTryAgain": ", please click refresh at the top to try again",
       "description": "View usage, performance trends, and request errors",
       "dateRangeLabel": "Statistics date range, limited to the last 31 days",
-      "requestDetails": "Request details",
-      "recordsDescription": "Successful and failed request details",
+      "requestDetails": "Request log",
+      "recordsDescription": "Successful and failed request records",
       "failedToLoad": "Failed to load: {error}",
       "noRequestsMatchTheseFilters": "No requests match these filters",
       "viewErrorDetails": "View error details",
@@ -309,7 +310,6 @@
       "message": "Message",
       "upstreamTimeConsumption": "Upstream time consumption",
       "storageModel": "Storage model",
-      "upstreamReturnModel": "Upstream return model",
       "clientIp": "Client IP",
       "eventType": "Event type",
       "trySerialNumber": "Try serial number",

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ZButton, ZEmpty, ZIconButton, ZPageHeader, ZSegmented, ZSelect } from '@codex-proxy/ui'
+import { ZButton, ZConfirmDialog, ZEmpty, ZIconButton, ZPageHeader, ZSegmented, ZSelect } from '@codex-proxy/ui'
 
 import { Save, Undo2 } from '@lucide/vue'
 
-import { computed, nextTick, reactive, shallowRef, watch } from 'vue'
+import { computed, nextTick, reactive, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -22,6 +22,7 @@ import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import SettingsAccessSection from './components/SettingsAccessSection.vue'
 import TokenRefreshCard from './components/TokenRefreshCard.vue'
 import { useSettingsForm } from './composables/useSettingsForm'
+import { useSettingsLeaveGuard } from './composables/useSettingsLeaveGuard'
 import { rotationOptions } from './constants'
 import PricingSection from './pricing/index.vue'
 
@@ -30,11 +31,26 @@ const { t } = useI18n({ useScope: 'global' })
 const route = useRoute()
 const router = useRouter()
 const sectionOptions = computed(() => ([
-  { label: t('settings.page.tabs.runtime'), value: 'runtime' },
-  { label: t('settings.page.tabs.upstream'), value: 'upstream' },
-  { label: t('settings.page.tabs.pricing'), value: 'pricing' },
-  { label: t('settings.page.tabs.access'), value: 'access' },
-  { label: t('settings.page.tabs.backups'), value: 'backup' },
+  {
+    label: t('settings.page.tabs.runtime'),
+    value: 'runtime',
+  },
+  {
+    label: t('settings.page.tabs.upstream'),
+    value: 'upstream',
+  },
+  {
+    label: t('settings.page.tabs.pricing'),
+    value: 'pricing',
+  },
+  {
+    label: t('settings.page.tabs.access'),
+    value: 'access',
+  },
+  {
+    label: t('settings.page.tabs.backups'),
+    value: 'backup',
+  },
 ]))
 const section = computed(() => {
   switch (route.name) {
@@ -50,7 +66,9 @@ const visited = reactive(new Set<string>())
 const settingsVisited = shallowRef(false)
 
 function switchSection(value = 'runtime'): void {
-  void router.push(value === 'runtime' ? '/settings' : `/settings/${value}`)
+  void router.push(value === 'runtime'
+    ? '/settings'
+    : `/settings/${value}`)
 }
 
 const {
@@ -89,6 +107,9 @@ const {
   saveSettings,
   loadSettings,
 } = useSettingsForm()
+const backupSection = useTemplateRef<InstanceType<typeof SettingsBackupSection>>('backupSection')
+const hasUnsavedChanges = computed(() => hasChanges.value || !!backupSection.value?.hasChanges)
+const { showLeaveConfirm, confirmLeave } = useSettingsLeaveGuard(hasUnsavedChanges)
 
 watch(() => !loading.value && route.hash === '#reset-credits', async (ready) => {
   if (ready) {
@@ -231,7 +252,15 @@ watch(section, (value) => {
       </fieldset>
     </div>
 
-    <SettingsBackupSection v-if="visited.has('backup')" v-show="section === 'backup'" class="mt-5" :active="section === 'backup'" />
+    <SettingsBackupSection v-if="visited.has('backup')" v-show="section === 'backup'" ref="backupSection" class="mt-5" :active="section === 'backup'" />
     <PricingSection v-if="visited.has('pricing')" v-show="section === 'pricing'" class="mt-5 min-h-0 flex-1" />
+    <ZConfirmDialog
+      v-model="showLeaveConfirm"
+      :title="t('settings.page.unsavedChanges.title')"
+      :description="t('settings.page.unsavedChanges.description')"
+      :confirm-text="t('settings.page.unsavedChanges.leave')"
+      :cancel-text="t('settings.page.unsavedChanges.stay')"
+      @confirm="confirmLeave()"
+    />
   </div>
 </template>

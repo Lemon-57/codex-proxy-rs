@@ -69,8 +69,9 @@
     },
     "plugins": {
       "title": "Plugin compatibility notice",
-      "description": "Keep enabled configurations and try starting each plugin after restarting",
-      "incompatible": "Incompatible plugins"
+      "description": "Incompatible plugins will remain stopped",
+      "incompatible": "Incompatible plugins",
+      "requestErrorHelp": "Data and settings are kept, retry from the plugins page"
     },
     "versionAfterRestart": "Version after restart",
     "confirmation": {

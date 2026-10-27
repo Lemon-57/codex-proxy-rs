@@ -23,7 +23,6 @@
     "filters": {
       "searchAccountGroup": "Search account group",
       "searchGroupName": "Search group name",
-      "filterByGroupStatus": "Filter by group status",
       "deleteSelected": "Delete ({count})",
       "createGroup": "Create group"
     },

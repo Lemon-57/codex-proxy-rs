@@ -16,6 +16,7 @@ const probeEnabled = defineModel<boolean>('probeEnabled', { required: true })
 const probeModel = defineModel<string>('probeModel', { required: true })
 const adaptiveConcurrency = defineModel<boolean>('adaptiveConcurrency', { required: true })
 const adaptiveConcurrencyHintId = useId()
+const probeModelId = useId()
 </script>
 
 <template>
@@ -98,6 +99,7 @@ const adaptiveConcurrencyHintId = useId()
       <ZFormItem
         :label="t('settings.autoDisable.recoveryProbeModel')"
         :description="t('settings.autoDisable.probeModelHelp')"
+        :for="probeModelId"
       >
         <template #extra>
           <ZCheckbox
@@ -107,6 +109,7 @@ const adaptiveConcurrencyHintId = useId()
           />
         </template>
         <ZInput
+          :id="probeModelId"
           v-model="probeModel"
           :disabled="!enabled || !probeEnabled"
           :aria-label="t('settings.autoDisable.recoveryProbeModel')"

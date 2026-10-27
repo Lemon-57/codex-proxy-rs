@@ -3,32 +3,52 @@ import type { PluginInstance } from '@/api'
 
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { PLUGIN_STATUS_LABELS } from '../constants'
+import { configurationStatus } from '../utils/catalog'
 import PluginHelpPopover from './PluginHelpPopover.vue'
 
-const props = defineProps<{ instance: PluginInstance }>()
+const props = defineProps<{ instance: PluginInstance, failureReason?: string }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
-const failure = computed(() => props.instance.loadError ?? props.instance.runtime.failure?.message)
-const title = computed(() => failure.value ? (props.instance.loadError ? t('plugins.status.unableToStart') : t('plugins.status.runFailed')) : props.instance.compatibilityWarning ? t('plugins.status.compatibilityReminder') : t('plugins.status.deprecatedApi'))
+const status = computed(() => configurationStatus(props.instance))
+const failure = computed(() => props.failureReason ?? props.instance.loadError ?? props.instance.runtime.failure?.message)
+const incompatible = computed(() => !props.failureReason && status.value === 'incompatible')
+const tone = computed(() => (failure.value || status.value === 'failed') && !incompatible.value
+  ? 'error'
+  : 'warning')
+const title = computed(() => {
+  if (props.failureReason)
+    return PLUGIN_STATUS_LABELS.value.failed
+  if (incompatible.value)
+    return t('plugins.status.incompatibleNotStarted')
+  if (failure.value || status.value === 'failed') {
+    return props.instance.loadError
+      ? t('plugins.status.unableToStart')
+      : t('plugins.status.runFailed')
+  }
+  return props.instance.compatibilityWarning
+    ? t('plugins.status.compatibilityReminder')
+    : t('plugins.status.deprecatedApi')
+})
 </script>
 
 <template>
   <PluginHelpPopover
-    v-if="failure || instance.compatibilityWarning || instance.apiDeprecations.length"
+    v-if="failure || status === 'failed' || instance.compatibilityWarning || instance.apiDeprecations.length"
     :label="`${instance.name}：${title}`"
-    :tone="failure ? 'error' : 'warning'"
+    :tone="tone"
   >
     <p class="m-0 font-emphasis text-cp-text">
       {{ title }}
     </p>
-    <p v-if="failure" class="m-0 text-cp-error-text">
+    <p v-if="failure" class="m-0" :class="tone === 'error' ? 'text-cp-error-text' : 'text-cp-warning'">
       {{ failure }}
     </p>
-    <p v-if="instance.runtime.failure" class="m-0 font-mono">
+    <p v-if="instance.runtime.failure && !incompatible" class="m-0 font-mono">
       {{ instance.runtime.failure.code }}
     </p>
-    <template v-if="instance.compatibilityWarning">
+    <template v-if="instance.compatibilityWarning && !incompatible">
       <p class="m-0 text-cp-warning">
         {{ instance.compatibilityWarning }}
       </p>
@@ -50,7 +70,7 @@ const title = computed(() => failure.value ? (props.instance.loadError ? t('plug
     <p v-if="instance.loadError" class="m-0">
       {{ t('plugins.status.unsupportedVersionHelp') }}
     </p>
-    <p v-else-if="failure" class="m-0">
+    <p v-else-if="(failure || status === 'failed') && !instance.compatibilityWarning" class="m-0">
       {{ t('plugins.status.restartHelp') }}
     </p>
     <p v-else-if="instance.apiDeprecations.length" class="m-0">

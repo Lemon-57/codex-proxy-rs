@@ -8,7 +8,7 @@ import { computed, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import { requestActivityByBucket, zeroInactiveValues } from '@/components/charts/timeSeriesGap'
-import { tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
+import { chartTooltipContent, tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
 import { useChartPalette } from '@/composables/useChartPalette'
 import { formatLocalizedCompactNumber as formatCompactNumber, formatDuration, formatPercent } from '@/utils/format'
 
@@ -18,7 +18,6 @@ import {
   usageGapAwareLineSeries,
   usageLegend,
   usageTooltip,
-  usageTooltipContent,
   usageTooltipItem,
   usageValueAxis,
 } from '../utils/chart'
@@ -49,17 +48,34 @@ const requestActivity = computed(() => requestActivityByBucket(
 ))
 
 const viewOptions = computed(() => ([
-  { label: t('usage.latency.totalLatency'), value: 'total' },
-  { label: t('usage.ttft'), value: 'firstToken' },
-  { label: t('usage.outputThroughput'), value: 'throughput' },
-  { label: t('usage.performance.scheduling'), value: 'scheduling' },
+  {
+    label: t('usage.latency.totalLatency'),
+    value: 'total',
+  },
+  {
+    label: t('usage.ttft'),
+    value: 'firstToken',
+  },
+  {
+    label: t('usage.outputThroughput'),
+    value: 'throughput',
+  },
+  {
+    label: t('usage.performance.scheduling'),
+    value: 'scheduling',
+  },
 ]))
 
 const seriesLabels = computed(() => {
   if (activeView.value === 'throughput')
     return ['P10', 'P50', 'P90'] as const
-  if (activeView.value === 'scheduling')
-    return [t('usage.performance.admissionP95'), t('usage.performance.accountSelectionP95'), t('usage.performance.capacityP95')] as const
+  if (activeView.value === 'scheduling') {
+    return [
+      t('usage.performance.admissionP95'),
+      t('usage.performance.accountSelectionP95'),
+      t('usage.performance.capacityP95'),
+    ] as const
+  }
   return ['P50', 'P95', 'P99'] as const
 })
 
@@ -90,23 +106,52 @@ const summaryMetrics = computed(() => {
   const performance = props.performance
   if (activeView.value === 'throughput') {
     return [
-      { label: 'P10', value: formatThroughput(performance.outputThroughputP10) },
-      { label: 'P50', value: formatThroughput(performance.outputThroughputP50) },
-      { label: 'P90', value: formatThroughput(performance.outputThroughputP90) },
+      {
+        label: 'P10',
+        value: formatThroughput(performance.outputThroughputP10),
+      },
+      {
+        label: 'P50',
+        value: formatThroughput(performance.outputThroughputP50),
+      },
+      {
+        label: 'P90',
+        value: formatThroughput(performance.outputThroughputP90),
+      },
     ]
   }
   if (activeView.value === 'scheduling') {
     return [
-      { label: t('usage.performance.decisionCoverage'), value: formatPercent(performance.admissionDecisionCoverage) },
-      { label: t('usage.performance.accountSelectionCoverage'), value: formatPercent(performance.accountSelectionWaitCoverage) },
-      { label: t('usage.performance.capacityCoverage'), value: formatPercent(performance.capacityCoverage) },
+      {
+        label: t('usage.performance.decisionCoverage'),
+        value: formatPercent(performance.admissionDecisionCoverage),
+      },
+      {
+        label: t('usage.performance.accountSelectionCoverage'),
+        value: formatPercent(performance.accountSelectionWaitCoverage),
+      },
+      {
+        label: t('usage.performance.capacityCoverage'),
+        value: formatPercent(performance.capacityCoverage),
+      },
     ]
   }
-  const prefix = activeView.value === 'firstToken' ? 'firstToken' : 'latency'
+  const prefix = activeView.value === 'firstToken'
+    ? 'firstToken'
+    : 'latency'
   return [
-    { label: 'P50', value: formatDuration(performance[`${prefix}P50Ms`]) },
-    { label: 'P95', value: formatDuration(performance[`${prefix}P95Ms`]) },
-    { label: 'P99', value: formatDuration(performance[`${prefix}P99Ms`]) },
+    {
+      label: 'P50',
+      value: formatDuration(performance[`${prefix}P50Ms`]),
+    },
+    {
+      label: 'P95',
+      value: formatDuration(performance[`${prefix}P95Ms`]),
+    },
+    {
+      label: 'P99',
+      value: formatDuration(performance[`${prefix}P99Ms`]),
+    },
   ]
 })
 
@@ -139,8 +184,14 @@ const chartOption = computed<EChartsOption>(() => {
     ...usageGapAwareLineSeries(
       seriesLabels.value[2],
       points.map(point => point.third),
-      activeView.value === 'scheduling' ? theme.success : theme.danger,
-      { yAxisIndex: activeView.value === 'scheduling' ? 1 : 0 },
+      activeView.value === 'scheduling'
+        ? theme.success
+        : theme.danger,
+      {
+        yAxisIndex: activeView.value === 'scheduling'
+          ? 1
+          : 0,
+      },
     ),
   ]
 
@@ -194,8 +245,14 @@ function seriesValue(point: PerformancePoint, position: 'first' | 'second' | 'th
       return point.accountSelectionWaitP95Ms
     return point.capacityUtilizationP95
   }
-  const prefix = activeView.value === 'firstToken' ? 'firstToken' : 'latency'
-  const suffix = position === 'first' ? 'P50Ms' : position === 'second' ? 'P95Ms' : 'P99Ms'
+  const prefix = activeView.value === 'firstToken'
+    ? 'firstToken'
+    : 'latency'
+  const suffix = position === 'first'
+    ? 'P50Ms'
+    : position === 'second'
+      ? 'P95Ms'
+      : 'P99Ms'
   return point[`${prefix}${suffix}`]
 }
 
@@ -206,7 +263,7 @@ function formatTooltip(params: unknown) {
     return ''
 
   const theme = palette.value
-  return usageTooltipContent(theme, selected.point.label, [
+  return chartTooltipContent(selected.point.label, [
     usageTooltipItem(
       seriesLabels.value[0],
       formatSeriesValue(selected.first, 'first'),
@@ -220,7 +277,9 @@ function formatTooltip(params: unknown) {
     usageTooltipItem(
       seriesLabels.value[2],
       formatSeriesValue(selected.third, 'third'),
-      activeView.value === 'scheduling' ? theme.success : theme.danger,
+      activeView.value === 'scheduling'
+        ? theme.success
+        : theme.danger,
     ),
   ])
 }
@@ -234,7 +293,9 @@ function formatSeriesValue(value: number | null, position: 'first' | 'second' | 
 }
 
 function formatThroughput(value: number | null) {
-  return value == null ? '—' : `${formatCompactNumber(value)} tok/s`
+  return value == null
+    ? '—'
+    : `${formatCompactNumber(value)} tok/s`
 }
 </script>
 

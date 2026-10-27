@@ -12,9 +12,8 @@ use super::contract::{
 use super::probe_store::{ProbeObservation, TransientExecutionStore};
 use super::scope::{
     ActiveRequestAuthority, ActiveRequestLease, ActiveRequestRegistry, AuthorizedExecution,
-    BoundExecutionFacts, BoundModelExecutionAuthority, BoundModelExecutionContext,
-    ExecutionStartGuard, ExecutionTarget, NestedExecutionFacts, NestedExecutionGraph,
-    PendingStartExecution, PreparedExecutionStart,
+    BoundExecutionFacts, ExecutionStartGuard, ExecutionTarget, NestedExecutionFacts,
+    NestedExecutionGraph, PendingStartExecution, PreparedExecutionStart,
 };
 use super::{COORDINATION_TIMEOUT, DIAGNOSTIC_TIMEOUT};
 use super::{scope::ExecutionAdmission, session::DefaultExecutionSession};
@@ -28,7 +27,7 @@ use crate::{
             ClientAdmissionRequest,
         },
         authentication::{
-            ClientAuthenticationRequest, FrontendAuthenticationDecision,
+            ClientAuthenticationRequest, ClientIdentityPort, FrontendAuthenticationDecision,
             FrontendAuthenticationExtensionIndex,
         },
         budget::{ClientBudgetCharge, ClientBudgetPort},
@@ -41,8 +40,8 @@ use crate::{
         middleware::FrozenMiddlewarePlan,
         nested::{
             AffinityLookupPort, AffinityLookupRequest, AffinityLookupResult,
-            BoundModelExecutionBinding, BoundModelExecutionRequest, ExecutionEffects,
-            NestedModelExecutionPort, NestedModelExecutionRequest,
+            BoundModelExecutionRequest, ExecutionEffects, NestedModelExecutionPort,
+            NestedModelExecutionRequest,
         },
         observation::{
             FrozenRequestObservationContext, RequestObservationDispatch, RequestObservationScope,
@@ -1081,72 +1080,54 @@ impl DefaultExecutionService {
         })
     }
 
-    async fn bind_bound_model_inner(
-        &self,
-        binding: BoundModelExecutionBinding,
-    ) -> Result<BoundModelExecutionContext, GatewayError> {
-        let client = self
-            .client_for_key_id(&binding.client_key_id, binding.settings)
-            .await?;
-        if binding.extension_scope.len() >= ExtensionCallScope::MAXIMUM_DEPTH {
-            return Err(GatewayError::new(
-                GatewayErrorKind::PolicyDenied,
-                "plugin model execution depth exceeded",
-            ));
-        }
-        let extension_scope = binding
-            .extension_scope
-            .extending(binding.initiating_plugin_instance_id.clone())
-            .ok_or_else(|| {
-                GatewayError::new(
-                    GatewayErrorKind::Internal,
-                    "bound plugin execution scope is invalid",
-                )
-            })?;
-        let account_scope = Arc::clone(client.policy.account_scope());
-        Ok(BoundModelExecutionContext {
-            authority: Arc::new(BoundModelExecutionAuthority {
-                client,
-                account_scope,
-                cancellation: binding.cancellation,
-                extension_scope,
-                initiating_plugin_instance_id: binding.initiating_plugin_instance_id,
-            }),
-        })
-    }
-
     async fn start_bound_model_inner(
         &self,
         request: BoundModelExecutionRequest,
     ) -> Result<StartedExecution, GatewayError> {
         let BoundModelExecutionRequest {
-            context,
+            client,
+            initiating_plugin_instance_id,
+            cancellation,
+            extension_scope,
             public_model,
             operation,
             mut metadata,
             provider,
             account,
         } = request;
-        let authority = &context.authority;
-        if authority.cancellation.is_cancelled() {
+        if cancellation.is_cancelled() {
             return Err(GatewayError::new(
                 GatewayErrorKind::Cancelled,
                 "bound plugin invocation was cancelled",
             ));
         }
-        let now = SystemTime::now();
-        let deadline_at = Deadline::from_timeout(now, authority.client.execution_timeout())
+        if extension_scope.len() >= ExtensionCallScope::MAXIMUM_DEPTH {
+            return Err(GatewayError::new(
+                GatewayErrorKind::PolicyDenied,
+                "plugin model execution depth exceeded",
+            ));
+        }
+        let extension_scope = extension_scope
+            .extending(initiating_plugin_instance_id.clone())
             .ok_or_else(|| {
+                GatewayError::new(
+                    GatewayErrorKind::PolicyDenied,
+                    "plugin model execution scope is recursive",
+                )
+            })?;
+        let now = SystemTime::now();
+        let deadline_at =
+            Deadline::from_timeout(now, client.execution_timeout()).ok_or_else(|| {
                 GatewayError::new(GatewayErrorKind::Internal, "system clock is invalid")
             })?;
         let (account_scope, required_provider) = restrict_model_execution_scope(
-            authority.account_scope.as_ref(),
+            client.policy.account_scope().as_ref(),
             provider,
             account.as_ref(),
             None,
         )?;
         // 连接承载多个独立执行；递归预算和副作用只在本次执行的子调用图内共享
-        // 父连接的取消仍通过 authority 传播，不能因新建执行丢失扩展调用链
+        // 父调用的取消继续向子执行传播，不能因新建执行丢失扩展调用链
         let graph = Arc::new(NestedExecutionGraph::new(Arc::new(
             ExecutionEffects::default(),
         )));
@@ -1154,12 +1135,12 @@ impl DefaultExecutionService {
         let execution_effects_baseline = graph.effects.epoch();
         metadata.endpoint = "host.model".to_owned();
         metadata.transport = ClientTransport::InternalPlugin;
-        metadata.inherit_request_origin(&authority.extension_scope);
+        metadata.inherit_request_origin(&extension_scope);
         self.client_api_key_usage
-            .record_used(authority.client.policy.key_id());
+            .record_used(client.policy.key_id());
         self.start_authorized(
             PendingStartExecution {
-                client: authority.client.clone(),
+                client,
                 target: ExecutionTarget::Model(public_model),
                 operation,
                 metadata,
@@ -1168,13 +1149,13 @@ impl DefaultExecutionService {
                 account_scope,
                 response_control: None,
                 deadline_at,
-                cancellation: authority.cancellation.child_token(),
-                extension_scope: authority.extension_scope.clone(),
+                cancellation: cancellation.child_token(),
+                extension_scope,
                 required_provider,
                 required_account: account,
                 nested: None,
                 bound: Some(BoundExecutionFacts {
-                    initiating_plugin_instance_id: authority.initiating_plugin_instance_id.clone(),
+                    initiating_plugin_instance_id,
                 }),
                 graph: Some(graph),
                 execution_effects_baseline,
@@ -1572,14 +1553,7 @@ impl ExecutionService for DefaultExecutionService {
                     .query_client_model_catalog(scope, protocol, client_version)
                     .await?
                 else {
-                    for profile in client.snapshot.public_model_profiles_for_provider(kind) {
-                        if !client.snapshot.catalog_model_allowed_for_scope(
-                            kind,
-                            profile.model(),
-                            scope,
-                        ) {
-                            continue;
-                        }
+                    for profile in client.snapshot.profiles_for_provider_scope(kind, scope) {
                         if seen.insert(profile.model().clone()) {
                             result.push(PublicModelDescriptor::Adapted(profile));
                         }
@@ -1629,6 +1603,12 @@ impl ExecutionService for DefaultExecutionService {
                     if let Some(source) = by_id.get(target.as_str()) {
                         seen.insert(model.clone());
                         result.push(source.content.for_public_model(model));
+                    }
+                }
+                // 原生完整对象优先；只补入当前授权账号实际提供的独立适配画像
+                for profile in client.snapshot.contributed_profiles_for_scope(kind, scope) {
+                    if seen.insert(profile.model().clone()) {
+                        result.push(PublicModelDescriptor::Adapted(profile));
                     }
                 }
             }
@@ -1726,23 +1706,57 @@ impl ExecutionService for DefaultExecutionService {
     }
 }
 
+impl ClientIdentityPort for DefaultExecutionService {
+    fn resolve_client(
+        &self,
+        client_key_id: ClientApiKeyId,
+        settings: Option<RequestSettings>,
+    ) -> BoxFuture<'_, Result<AuthenticatedClient, GatewayError>> {
+        Box::pin(async move { self.client_for_key_id(&client_key_id, settings).await })
+    }
+
+    fn verify_client(
+        &self,
+        request: ClientAuthenticationRequest,
+    ) -> BoxFuture<'_, Result<AuthenticatedClient, GatewayError>> {
+        Box::pin(async move {
+            let cancellation = request
+                .invocation()
+                .map(|origin| origin.cancellation.clone());
+            let verification = self.verify_request(request).fuse();
+            pin_mut!(verification);
+            match cancellation {
+                Some(cancellation) => {
+                    let cancelled = cancellation.cancelled().fuse();
+                    pin_mut!(cancelled);
+                    select_biased! {
+                        () = cancelled => Err(GatewayError::new(GatewayErrorKind::Cancelled, "client verification was cancelled")),
+                        result = verification => result.map_err(authentication_gateway_error),
+                    }
+                }
+                None => verification.await.map_err(authentication_gateway_error),
+            }
+        })
+    }
+}
+
 impl NestedModelExecutionPort for DefaultExecutionService {
     fn models(
         &self,
-        context: BoundModelExecutionContext,
+        client: AuthenticatedClient,
+        cancellation: CancellationToken,
         protocol: String,
         client_version: String,
     ) -> BoxFuture<'_, Result<Vec<PublicModelId>, GatewayError>> {
         Box::pin(async move {
-            let authority = &context.authority;
-            let cancellation = authority.cancellation.cancelled().fuse();
+            let cancelled = cancellation.cancelled().fuse();
             let timeout = Delay::new(DIAGNOSTIC_TIMEOUT).fuse();
             let catalog = self
-                .client_model_catalog(&authority.client, &protocol, &client_version)
+                .client_model_catalog(&client, &protocol, &client_version)
                 .fuse();
-            pin_mut!(cancellation, timeout, catalog);
+            pin_mut!(cancelled, timeout, catalog);
             let models = select_biased! {
-                () = cancellation => return Err(GatewayError::new(GatewayErrorKind::Cancelled, "model catalog call was cancelled")),
+                () = cancelled => return Err(GatewayError::new(GatewayErrorKind::Cancelled, "model catalog call was cancelled")),
                 () = timeout => return Err(GatewayError::new(GatewayErrorKind::Timeout, "model catalog deadline elapsed")),
                 result = catalog => result.map_err(|_| GatewayError::new(GatewayErrorKind::Internal, "model catalog is unavailable"))?,
             };
@@ -1754,13 +1768,6 @@ impl NestedModelExecutionPort for DefaultExecutionService {
                 })
                 .collect())
         })
-    }
-
-    fn bind(
-        &self,
-        binding: BoundModelExecutionBinding,
-    ) -> BoxFuture<'_, Result<BoundModelExecutionContext, GatewayError>> {
-        Box::pin(async move { self.bind_bound_model_inner(binding).await })
     }
 
     fn start(

@@ -50,23 +50,10 @@ fn decoder_should_bill_the_sent_model_independently_of_the_response_model() {
             provider_cost_ticks(&facts),
             reported_cost.filter(|ticks| *ticks > 0)
         );
-        assert_eq!(decoder.response_model(), returned);
         assert!(facts.iter().any(|event| matches!(
             event,
             GatewayEvent::Completed(meta) if meta.model() == Some(returned.unwrap_or(sent))
         )));
-    }
-}
-
-#[test]
-fn response_model_observation_preserves_raw_model_and_missing_values() {
-    for model in [None, Some("grok-4.6-build")] {
-        let mut decoder = GrokCanonicalDecoder::new("grok-4.6");
-        let body = serde_json::json!({"type":"response.created","response":{"id":"resp_model","model":model}});
-        decoder
-            .push(format!("data: {body}\n\n").as_bytes())
-            .expect("decode created");
-        assert_eq!(decoder.response_model(), model);
     }
 }
 

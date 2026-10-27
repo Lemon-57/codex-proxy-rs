@@ -53,7 +53,7 @@ export function useApiKeyEditor(options: {
   }
 
   function requestSave() {
-    if (!validateForm() || savingKey.value)
+    if (savingKey.value)
       return
     if (form.value.groupIds.length === 0) {
       showAllAccountsConfirm.value = true
@@ -68,7 +68,7 @@ export function useApiKeyEditor(options: {
   }
 
   async function save() {
-    if (!validateForm() || savingKey.value)
+    if (savingKey.value)
       return
 
     await savingKeyAction.run(
@@ -76,7 +76,9 @@ export function useApiKeyEditor(options: {
         const payload = {
           name: form.value.name.trim(),
           label: form.value.label.trim() || null,
-          groupIds: [...new Set(form.value.groupIds)],
+          groupIds: [
+            ...new Set(form.value.groupIds),
+          ],
           maxConcurrency: Number(form.value.maxConcurrency),
           requestsPerMinute: Number(form.value.requestsPerMinute),
           dailyLimitUsd: form.value.dailyLimitUsd.trim() || '0',
@@ -106,50 +108,39 @@ export function useApiKeyEditor(options: {
         showFormModal.value = false
         await options.reload()
         if (current) {
-          ZNotification.success({ message: t('keys.editor.updated') })
+          ZNotification.success({
+            message: t('keys.editor.updated'),
+          })
         }
         else if (created) {
           options.onCreated(created.key, created.name)
-          ZNotification.success({ message: t('keys.editor.created') })
+          ZNotification.success({
+            message: t('keys.editor.created'),
+          })
         }
       },
-      { onError: () => void options.reload() },
+      {
+        onError: () => void options.reload(),
+      },
     )
-  }
-
-  function validateForm() {
-    for (const [label, value] of [[t('keys.editor.dailyLimit'), form.value.dailyLimitUsd], [t('keys.editor.weeklyLimit'), form.value.weeklyLimitUsd]]) {
-      if (value.trim() && !/^\d{1,10}(?:\.\d{1,10})?$/.test(value.trim())) {
-        ZNotification.warning({ message: t('keys.editor.validation.amount', { label }) })
-        return false
-      }
-    }
-    if (!form.value.name.trim()) {
-      ZNotification.warning({ message: t('keys.editor.enterApiKeyName') })
-      return false
-    }
-    if (!editingKey.value && form.value.customKey && !/^[\x21-\x7E]+$/.test(form.value.customKey)) {
-      ZNotification.warning({ message: t('keys.editor.invalidKey') })
-      return false
-    }
-    for (const [label, value] of [
-      [t('keys.editor.maximumConcurrency'), form.value.maxConcurrency],
-      [t('keys.editor.requestsPerMinute'), form.value.requestsPerMinute],
-    ] as const) {
-      const parsed = Number(value)
-      if (!Number.isSafeInteger(parsed) || parsed < 0) {
-        ZNotification.warning({ message: t('keys.editor.validation.integer', { label }) })
-        return false
-      }
-    }
-    return true
   }
 
   function clearCustomKey() {
     form.value.customKey = ''
   }
 
-  return { showFormModal, showAllAccountsConfirm, editingKey, savingKey, form, openCreate, openEdit, clearCustomKey, requestSave, confirmAllAccountsScope }
+  return {
+    showFormModal,
+    showAllAccountsConfirm,
+    editingKey,
+    savingKey,
+    form,
+    openCreate,
+    openEdit,
+    clearCustomKey,
+    requestSave,
+    confirmAllAccountsScope,
+  }
 }
 
 function emptyForm(): ApiKeyFormValue {
@@ -179,5 +170,7 @@ function profileOverrideUpdates(
 }
 
 function limitInputValue(limit: string | number) {
-  return Number(limit) === 0 ? '' : String(limit)
+  return Number(limit) === 0
+    ? ''
+    : String(limit)
 }

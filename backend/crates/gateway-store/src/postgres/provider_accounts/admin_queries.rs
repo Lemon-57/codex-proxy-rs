@@ -23,14 +23,14 @@ pub(crate) async fn load_admin_account_page(
         .provider_kind
         .as_ref()
         .map(|provider| provider.as_str().to_owned());
-    let search_prefix = query
+    let search_pattern = query
         .search
         .as_deref()
-        .map(crate::postgres::literal_prefix_pattern);
+        .map(|search| crate::postgres::literal_contains_pattern(&search.to_lowercase()));
     let supplier_pattern = query
         .supplier
         .as_deref()
-        .map(|value| format!("%{}", crate::postgres::literal_prefix_pattern(value)));
+        .map(|value| crate::postgres::literal_contains_pattern(value));
     let plan_type = query.plan_type.clone();
     let status = query.status.map(|status| status.as_str().to_owned());
     let (group_mode, group_id) = match query.group_filter.as_ref() {
@@ -85,7 +85,6 @@ pub(crate) async fn load_admin_account_page(
              join provider_accounts a on a.id = status.id
             where ($3::text is null or a.provider_kind = $3)
               and ($4::text is null or
-                   lower(a.id) like $4 escape '\\' or
                    lower(a.name) like $4 escape '\\' or
                    lower(coalesce(a.email, '')) like $4 escape '\\' or
                    lower(coalesce(a.upstream_account_id, '')) like $4 escape '\\' or
@@ -167,7 +166,7 @@ pub(crate) async fn load_admin_account_page(
                     .bind(active_rate_limited_ids)
                     .bind(now)
                     .bind(provider_kind)
-                    .bind(search_prefix)
+                    .bind(search_pattern)
                     .bind(status)
                     .bind(group_mode)
                     .bind(group_id)
@@ -308,3 +307,4 @@ fn unsigned_metadata(row: &sqlx::postgres::PgRow, column: &'static str) -> Admin
             )
         })
 }
+

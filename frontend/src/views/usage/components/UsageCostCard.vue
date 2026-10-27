@@ -11,7 +11,7 @@ import {
   requestActivityByBucket,
   zeroInactiveValues,
 } from '@/components/charts/timeSeriesGap'
-import { tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
+import { chartTooltipContent, tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
 import { useChartPalette } from '@/composables/useChartPalette'
 import { decimalDisplayNumber, formatLocalizedCompactNumber as formatCompactNumber, formatPercent, formatUsd } from '@/utils/format'
 
@@ -21,7 +21,6 @@ import {
   usageGapAwareLineSeries,
   usageLegend,
   usageTooltip,
-  usageTooltipContent,
   usageTooltipItem,
   usageValueAxis,
 } from '../utils/chart'
@@ -56,13 +55,24 @@ const hasNoCacheCost = computed(() =>
 const coverageRate = computed(() => {
   const { known, partial, unknown } = props.cost.coverage
   const total = known + partial + unknown
-  return total > 0 ? (known + partial) / total : null
+  return total > 0
+    ? (known + partial) / total
+    : null
 })
 
 const viewOptions = computed(() => ([
-  { label: t('usage.fields.cost'), value: 'cost' },
-  { label: t('usage.cost.savings'), value: 'savings' },
-  { label: t('usage.cost.cache'), value: 'cache' },
+  {
+    label: t('usage.fields.cost'),
+    value: 'cost',
+  },
+  {
+    label: t('usage.cost.savings'),
+    value: 'savings',
+  },
+  {
+    label: t('usage.cost.cache'),
+    value: 'cache',
+  },
 ]))
 
 const hasData = computed(() => {
@@ -100,19 +110,37 @@ const chartOption = computed<EChartsOption>(() => {
       theme,
     ),
     yAxis: usageValueAxis(theme, axisFormatter(), {
-      min: activeView.value === 'cache' ? 0 : undefined,
-      max: activeView.value === 'cache' ? 1 : undefined,
+      min: activeView.value === 'cache'
+        ? 0
+        : undefined,
+      max: activeView.value === 'cache'
+        ? 1
+        : undefined,
     }),
     series,
   }
 })
 
 function legendNames() {
-  if (activeView.value === 'savings')
-    return [t('usage.cost.cacheSavings')]
-  if (activeView.value === 'cache')
-    return [t('usage.cost.cacheTokenProportion'), t('usage.cost.hitRequestRate')]
-  return hasNoCacheCost.value ? [t('usage.cost.actualCost'), t('usage.cost.withoutCacheEstimate')] : [t('usage.cost.actualCost')]
+  if (activeView.value === 'savings') {
+    return [
+      t('usage.cost.cacheSavings'),
+    ]
+  }
+  if (activeView.value === 'cache') {
+    return [
+      t('usage.cost.cacheTokenProportion'),
+      t('usage.cost.hitRequestRate'),
+    ]
+  }
+  return hasNoCacheCost.value
+    ? [
+        t('usage.cost.actualCost'),
+        t('usage.cost.withoutCacheEstimate'),
+      ]
+    : [
+        t('usage.cost.actualCost'),
+      ]
 }
 
 function axisFormatter() {
@@ -189,7 +217,7 @@ function formatTooltip(params: unknown) {
   const theme = palette.value
 
   if (activeView.value === 'savings') {
-    return usageTooltipContent(theme, point.label, [
+    return chartTooltipContent(point.label, [
       usageTooltipItem(
         t('usage.cost.cacheSavings'),
         formatUsd(costAmount(point.cacheSavings, pointIndex)),
@@ -199,7 +227,7 @@ function formatTooltip(params: unknown) {
   }
 
   if (activeView.value === 'cache') {
-    return usageTooltipContent(theme, point.label, [
+    return chartTooltipContent(point.label, [
       usageTooltipItem(t('usage.cost.cacheTokenProportion'), formatPercent(point.cachedTokenRate), theme.normal),
       usageTooltipItem(t('usage.cost.hitRequestRate'), formatPercent(point.cacheHitRequestRate), theme.success),
     ])
@@ -219,11 +247,13 @@ function formatTooltip(params: unknown) {
       theme.textMuted,
     ))
   }
-  return usageTooltipContent(theme, point.label, lines)
+  return chartTooltipContent(point.label, lines)
 }
 
 function costAmount(value: string | null, pointIndex: number) {
-  return value ?? (requestActivity.value[pointIndex] === false ? '0' : null)
+  return value ?? (requestActivity.value[pointIndex] === false
+    ? '0'
+    : null)
 }
 </script>
 

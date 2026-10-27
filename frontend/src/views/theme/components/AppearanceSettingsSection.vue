@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ZButton, ZInput, ZPageHeader, ZScrollbar, ZSegmented } from '@codex-proxy/ui'
+import { ZButton, ZInput, ZPageHeader, ZScrollbar, ZSegmented, ZSkeleton } from '@codex-proxy/ui'
 import { Check, Eye, Pencil, RotateCcw, Save, Search, Undo2 } from '@lucide/vue'
 
-import { computed, shallowRef } from 'vue'
+import { computed, defineAsyncComponent, shallowRef } from 'vue'
 
 import { useI18n } from 'vue-i18n'
 
@@ -10,8 +10,14 @@ import { notification as ZNotification } from '@/utils/notification'
 
 import { useThemeEditor } from '../composables/useThemeEditor'
 import ThemeComponentTokenPanel from './ThemeComponentTokenPanel.vue'
-import ThemeEditorPreview from './ThemeEditorPreview.vue'
 import ThemeGlobalTokenPanel from './ThemeGlobalTokenPanel.vue'
+
+const ThemeEditorPreview = defineAsyncComponent({
+  loader: () => import('./ThemeEditorPreview.vue'),
+  loadingComponent: ZSkeleton,
+  delay: 200,
+  timeout: 30000,
+})
 
 const { t } = useI18n({ useScope: 'global' })
 const mobilePreviewOpen = shallowRef(false)
@@ -44,21 +50,33 @@ const {
 } = useThemeEditor()
 
 const scopeOptions = computed(() => ([
-  { label: t('appearance.settings.global'), value: 'global' },
-  { label: t('appearance.settings.components'), value: 'component' },
+  {
+    label: t('appearance.settings.global'),
+    value: 'global',
+  },
+  {
+    label: t('appearance.settings.components'),
+    value: 'component',
+  },
 ]))
 
 function switchScope(value: string) {
-  scope.value = value === 'component' ? 'component' : 'global'
+  scope.value = value === 'component'
+    ? 'component'
+    : 'global'
   mobilePreviewOpen.value = false
 }
 
 function saveTheme(event: MouseEvent) {
   if (!save(event)) {
-    ZNotification.error({ message: t('appearance.settings.invalidTheme') })
+    ZNotification.error({
+      message: t('appearance.settings.invalidTheme'),
+    })
     return
   }
-  ZNotification.success({ message: t('appearance.settings.themeSavedAndApplied') })
+  ZNotification.success({
+    message: t('appearance.settings.themeSavedAndApplied'),
+  })
 }
 </script>
 
@@ -131,7 +149,7 @@ function saveTheme(event: MouseEvent) {
         >
           <ZInput
             v-model="query"
-            class="mr-3"
+            class="pr-3"
             :aria-label="t('appearance.settings.searchToken')"
             :placeholder="t('appearance.settings.searchPlaceholder')"
           >

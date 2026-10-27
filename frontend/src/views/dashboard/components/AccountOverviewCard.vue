@@ -31,9 +31,24 @@ const scheduleStats = computed(() => {
     ? '—'
     : formatCompactNumber(value)
   return [
-    { label: t('dashboard.scheduling.defaultConcurrency'), value: cap?.maxConcurrentPerAccount === 0 ? t('common.values.unlimited') : display(cap?.maxConcurrentPerAccount) },
-    { label: t('dashboard.scheduling.totalSlots'), value: unlimitedCapacity.value ? t('common.values.unlimited') : display(cap?.totalSlots) },
-    { label: t('dashboard.scheduling.freeSlots'), value: unlimitedCapacity.value ? t('common.values.unlimited') : display(cap?.availableSlots) },
+    {
+      label: t('dashboard.scheduling.defaultConcurrency'),
+      value: cap?.maxConcurrentPerAccount === 0
+        ? t('common.values.unlimited')
+        : display(cap?.maxConcurrentPerAccount),
+    },
+    {
+      label: t('dashboard.scheduling.totalSlots'),
+      value: unlimitedCapacity.value
+        ? t('common.values.unlimited')
+        : display(cap?.totalSlots),
+    },
+    {
+      label: t('dashboard.scheduling.freeSlots'),
+      value: unlimitedCapacity.value
+        ? t('common.values.unlimited')
+        : display(cap?.availableSlots),
+    },
   ]
 })
 
@@ -44,14 +59,19 @@ const usedProgressStyle = computed(() => {
 
   return {
     width: `${(capacity.usedSlots / capacity.totalSlots) * 100}%`,
-    minWidth: capacity.usedSlots > 0 ? '3px' : undefined,
+    minWidth: capacity.usedSlots > 0
+      ? '3px'
+      : undefined,
   }
 })
 
 const usedRatio = computed(() => {
   const cap = props.capacity
-  if (unlimitedCapacity.value)
-    return `${cap?.usedSlots === null || cap?.usedSlots === undefined ? '—' : formatCompactNumber(cap.usedSlots)} / ∞`
+  if (unlimitedCapacity.value) {
+    return `${cap?.usedSlots === null || cap?.usedSlots === undefined
+      ? '—'
+      : formatCompactNumber(cap.usedSlots)} / ∞`
+  }
   if (!cap || cap.totalSlots === null || cap.totalSlots === undefined)
     return '— / —'
   if (cap.usedSlots === null || cap.usedSlots === undefined)
@@ -105,10 +125,34 @@ const statusRows = computed(() => {
   const counts = accountStatusCounts.value
   if (!p || !counts) {
     return [
-      { label: t('common.status.healthy'), description: t('dashboard.accountPool.empty'), value: '—', tone: 'success', icon: CircleCheck },
-      { label: t('dashboard.accountPool.quotaExhausted'), description: t('dashboard.accountPool.empty'), value: '—', tone: 'warning', icon: TriangleAlert },
-      { label: t('dashboard.accountPool.rateLimited'), description: t('dashboard.accountPool.empty'), value: '—', tone: 'normal', icon: RefreshCw },
-      { label: t('dashboard.accountPool.pending'), description: t('dashboard.accountPool.issueCountsEmpty'), value: '—', tone: 'danger', icon: ShieldAlert },
+      {
+        label: t('common.status.healthy'),
+        description: t('dashboard.accountPool.empty'),
+        value: '—',
+        tone: 'success',
+        icon: CircleCheck,
+      },
+      {
+        label: t('dashboard.accountPool.quotaExhausted'),
+        description: t('dashboard.accountPool.empty'),
+        value: '—',
+        tone: 'warning',
+        icon: TriangleAlert,
+      },
+      {
+        label: t('dashboard.accountPool.rateLimited'),
+        description: t('dashboard.accountPool.empty'),
+        value: '—',
+        tone: 'normal',
+        icon: RefreshCw,
+      },
+      {
+        label: t('dashboard.accountPool.pending'),
+        description: t('dashboard.accountPool.issueCountsEmpty'),
+        value: '—',
+        tone: 'danger',
+        icon: ShieldAlert,
+      },
     ]
   }
 
@@ -252,7 +296,7 @@ const statusBars = computed(() => {
               >
                 <span class="grid min-w-0 gap-1">
                   <span class="text-cp-xs leading-none font-bold text-cp-text-quaternary">
-                    {{ account.metric === 'requests' ? t('dashboard.metrics.requestCount') : t('dashboard.activeAccounts.todayTokens') }}
+                    {{ account.metric === 'requests' ? t('dashboard.activeAccounts.requestCount') : t('dashboard.activeAccounts.todayTokens') }}
                   </span>
                   <strong
                     class="font-mono text-sm leading-[1.15] font-heavy tabular-nums text-cp-text"

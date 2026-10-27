@@ -11,7 +11,9 @@ const props = defineProps<{
 const { t } = useI18n({ useScope: 'global' })
 
 const fullNames = computed(() =>
-  props.groups.map(group => (group.enabled ? group.name : t('common.status.disabledName', { name: group.name }))).join('、'),
+  props.groups.map(group => (group.enabled
+    ? group.name
+    : t('common.status.disabledName', { name: group.name }))).join('、'),
 )
 </script>
 
@@ -25,10 +27,15 @@ const fullNames = computed(() =>
     <span
       v-for="group in groups"
       :key="group.id"
-      class="size-4 shrink-0 rounded-sm"
-      :style="{ backgroundColor: group.color }"
-      :title="group.name"
-    />
+      class="max-w-full truncate rounded px-1.5 py-0.5 text-xs leading-4"
+      :style="{
+        color: group.color,
+        backgroundColor: `${group.color}1a`,
+      }"
+      :title="group.enabled ? group.name : t('common.status.disabledName', { name: group.name })"
+    >
+      {{ group.enabled ? group.name : t('common.status.disabledName', { name: group.name }) }}
+    </span>
   </div>
   <span v-else class="text-xs text-cp-text-quaternary">—</span>
 </template>

@@ -147,3 +147,46 @@ async fn compatibility_warning_rejects_invalid_packages_and_digest_mismatches() 
         .unwrap_err();
     assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Invalid);
 }
+
+#[tokio::test]
+async fn runtime_and_update_preflight_compare_only_declared_contracts() {
+    let host: PluginHostCompatibility =
+        serde_json::from_str(include_str!("../../plugin-host-compatibility.json")).unwrap();
+    for capability_version in [6, 3] {
+        let mut contribution =
+            crate::support::contribution(Capability::Middleware, vec![Stage::Http], vec![], vec![]);
+        contribution.1.version = capability_version;
+        let archive = crate::support::package_with_contributions(
+            b"not-an-executable",
+            Contributions::from([contribution]),
+        );
+        let digest = hex::encode(Sha256::digest(&archive));
+        for version in ["1.0.0", "3.0.0"] {
+            let version = semver::Version::parse(version).unwrap();
+            let inspector = PackageInspector::new(PackageLimits::default(), version.clone());
+            let requirements = inspector
+                .compatibility(archive.clone(), digest.clone())
+                .await
+                .unwrap();
+            let reasons = host.incompatibilities(&requirements, &version);
+            assert_eq!(
+                inspector
+                    .compatibility_warning(archive.clone(), digest.clone())
+                    .await
+                    .unwrap(),
+                (!reasons.is_empty()).then(|| reasons.join("，"))
+            );
+            assert_eq!(
+                reasons.len(),
+                usize::from(capability_version != 6) + usize::from(version.major != 1)
+            );
+            let mut unsupported = requirements;
+            unsupported.manifest_schema_version = 999;
+            unsupported.protocol_version = 999;
+            assert_eq!(
+                host.incompatibilities(&unsupported, &version).len(),
+                reasons.len() + 2
+            );
+        }
+    }
+}

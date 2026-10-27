@@ -71,8 +71,7 @@ async fn reading_websocket_facts_preserves_original_text_and_opaque_messages() {
         attempt_middleware_context_for_transport(Arc::default(), ClientTransport::WebSocket),
         operation(),
         ClientTransport::WebSocket,
-        None,
-        Box::new(move |_, _, _| {
+        Box::new(move |_, _| {
             Box::pin(async move {
                 Ok(ProviderStream::new(
                     ProviderCallMetadata::new(
@@ -190,7 +189,6 @@ async fn facts_are_readable_without_replacing_or_duplicating_the_original_execut
             .with_status_code(200)
             .with_request_id(OpaqueUpstreamValue::new("response-request-id"))
             .with_service_tier_if_valid("priority")
-            .with_upstream_response_model_if_valid("returned-model")
             .with_client_headers(vec![ProviderResponseHeader::new(
                 "set-cookie",
                 Bytes::from_static(b"fixture=secret"),
@@ -228,8 +226,7 @@ async fn facts_are_readable_without_replacing_or_duplicating_the_original_execut
         attempt_middleware_context(Arc::default()),
         operation(),
         ClientTransport::HttpJson,
-        None,
-        Box::new(move |_, _, _| {
+        Box::new(move |_, _| {
             Box::pin(async move {
                 Ok(ProviderStream::new(
                     metadata,

@@ -5,7 +5,7 @@ import type { DashboardTrendMetric } from '@/api'
 import { usePreferredReducedMotion } from '@vueuse/core'
 import { computed, shallowRef, watch } from 'vue'
 import { sampleGapBridgeSeries } from '@/components/charts/timeSeriesGap'
-import { chartTooltipStyle, tooltipIndex } from '@/components/charts/tooltip'
+import { chartTooltipContent, chartTooltipStyle, tooltipIndex } from '@/components/charts/tooltip'
 
 import { useChartPalette } from '@/composables/useChartPalette'
 import { t } from '@/i18n'
@@ -43,9 +43,18 @@ interface BarSeriesOptions {
 }
 
 const tabs = computed(() => ([
-  { label: t('usage.usage'), value: 'usage' },
-  { label: t('dashboard.trends.latency'), value: 'latency' },
-  { label: t('dashboard.trends.errors'), value: 'errors' },
+  {
+    label: t('usage.usage'),
+    value: 'usage',
+  },
+  {
+    label: t('dashboard.trends.latency'),
+    value: 'latency',
+  },
+  {
+    label: t('dashboard.trends.errors'),
+    value: 'errors',
+  },
 ]))
 
 export function useRequestTrendChart(options: {
@@ -84,8 +93,12 @@ export function useRequestTrendChart(options: {
     return {
       ...getCoordinateSystem(buckets),
       series: getSeries(),
-      animationDuration: preferredMotion.value === 'reduce' ? 0 : 420,
-      animationDurationUpdate: preferredMotion.value === 'reduce' ? 0 : 220,
+      animationDuration: preferredMotion.value === 'reduce'
+        ? 0
+        : 420,
+      animationDurationUpdate: preferredMotion.value === 'reduce'
+        ? 0
+        : 220,
       animationEasing: 'cubicOut',
       animationEasingUpdate: 'cubicOut',
       tooltip: {
@@ -108,7 +121,9 @@ export function useRequestTrendChart(options: {
     return {
       grid: {
         left: 8,
-        right: activeKind.value === 'latency' ? 8 : 10,
+        right: activeKind.value === 'latency'
+          ? 8
+          : 10,
         top: 10,
         bottom: 2,
         outerBoundsMode: 'same' as const,
@@ -118,7 +133,10 @@ export function useRequestTrendChart(options: {
         type: 'category' as const,
         data: buckets,
         boundaryGap: activeKind.value === 'errors',
-        axisLine: { show: true, lineStyle: { color: axisLine } },
+        axisLine: {
+          show: true,
+          lineStyle: { color: axisLine },
+        },
         axisTick: { show: false },
         axisLabel: {
           color: muted,
@@ -149,7 +167,9 @@ export function useRequestTrendChart(options: {
         {
           type: 'value' as const,
           min: 0,
-          max: activeKind.value === 'errors' ? 100 : undefined,
+          max: activeKind.value === 'errors'
+            ? 100
+            : undefined,
           splitNumber: 3,
           axisLine: { show: false },
           axisTick: { show: false },
@@ -170,7 +190,9 @@ export function useRequestTrendChart(options: {
 
   function formatPrimaryAxisValue(value: number) {
     if (activeKind.value === 'latency') {
-      return value >= 1000 ? `${formatAxisNumber(value / 1000)} s` : `${Math.round(value)} ms`
+      return value >= 1000
+        ? `${formatAxisNumber(value / 1000)} s`
+        : `${Math.round(value)} ms`
     }
     return formatAxisCompact(value)
   }
@@ -184,13 +206,14 @@ export function useRequestTrendChart(options: {
   }
 
   function formatTooltip(params: unknown) {
-    const rows = Array.isArray(params) ? params : [params]
+    const rows = Array.isArray(params)
+      ? params
+      : [params]
     const point = points.value[tooltipIndex(rows[0])]
     const title = point?.label ?? ''
 
     if (activeKind.value === 'usage') {
-      return [
-        title,
+      return chartTooltipContent(title, [
         tooltipItem(t('dashboard.metrics.inputTokens'), point?.inputTokens, trendColor('inputTokens')),
         tooltipItem(t('dashboard.metrics.outputTokens'), point?.outputTokens, trendColor('outputTokens')),
         tooltipItem(
@@ -204,9 +227,7 @@ export function useRequestTrendChart(options: {
           trendColor('cachedInputTokens'),
         ),
         tooltipItem(t('dashboard.metrics.requests'), point?.requests, palette.value.textSecondary),
-      ]
-        .filter(Boolean)
-        .join('<br/>')
+      ])
     }
 
     const lines = rows.map((row) => {
@@ -216,7 +237,7 @@ export function useRequestTrendChart(options: {
       const marker = tooltipValue(row, 'marker')
       return `${marker}${name}: ${tooltipDisplayValue(point, metric, value)}`
     })
-    return [title, ...lines].filter(Boolean).join('<br/>')
+    return chartTooltipContent(title, lines)
   }
 
   function tooltipDisplayValue(point: TrendPoint | undefined, metric: string, value: string) {
@@ -226,7 +247,9 @@ export function useRequestTrendChart(options: {
       case 'latencyP95Ms':
         return formatLatency(point?.latencyP95Ms, value)
       case 'outputThroughputP50':
-        return point?.outputThroughputP50 == null ? value : `${point.outputThroughputP50} tok/s`
+        return point?.outputThroughputP50 == null
+          ? value
+          : `${point.outputThroughputP50} tok/s`
       case 'errors':
         return point?.errors ?? value
       case 'successRate':
@@ -278,19 +301,34 @@ export function useRequestTrendChart(options: {
           'latencyP95Ms',
           activeSeriesValues('latencyP95Ms'),
           trendColor('latencyP95Ms'),
-          { lineType: 'dashed', smooth: 0.2, width: 1.8, z: 2 },
+          {
+            lineType: 'dashed',
+            smooth: 0.2,
+            width: 1.8,
+            z: 2,
+          },
         ),
         ...gapLineSeries(
           'firstTokenP95Ms',
           activeSeriesValues('firstTokenP95Ms'),
           trendColor('firstTokenP95Ms'),
-          { area: true, smooth: 0.24, width: 2.5, z: 4 },
+          {
+            area: true,
+            smooth: 0.24,
+            width: 2.5,
+            z: 4,
+          },
         ),
         ...gapLineSeries(
           'outputThroughputP50',
           activeSeriesValues('outputThroughputP50'),
           trendColor('outputThroughputP50'),
-          { smooth: 0.2, width: 2, yAxisIndex: 1, z: 3 },
+          {
+            smooth: 0.2,
+            width: 2,
+            yAxisIndex: 1,
+            z: 3,
+          },
         ),
       ]
     }
@@ -322,7 +360,9 @@ export function useRequestTrendChart(options: {
 
   function activeSeriesValues(key: string) {
     return points.value.map(point =>
-      Number(point.requestsValue) > 0 ? trendPointNumber(point, key) : 0,
+      Number(point.requestsValue) > 0
+        ? trendPointNumber(point, key)
+        : 0,
     )
   }
 
@@ -354,7 +394,10 @@ export function useRequestTrendChart(options: {
         width: lineOptions.width ?? 2.2,
         opacity: muted ? 0.18 : 1,
       },
-      itemStyle: { color, opacity: muted ? 0.18 : 1 },
+      itemStyle: {
+        color,
+        opacity: muted ? 0.18 : 1,
+      },
       emphasis: { disabled: true },
       areaStyle: area
         ? {
@@ -414,7 +457,9 @@ export function useRequestTrendChart(options: {
       z: barOptions.z ?? 2,
       itemStyle: {
         color,
-        opacity: muted ? 0.14 : (barOptions.opacity ?? 0.72),
+        opacity: muted
+          ? 0.14
+          : (barOptions.opacity ?? 0.72),
         borderRadius: barOptions.borderRadius ?? [3, 3, 0, 0],
       },
       emphasis: { disabled: true },
@@ -422,7 +467,9 @@ export function useRequestTrendChart(options: {
   }
 
   function summaryMarkerStyle(item: TrendSummaryItem) {
-    return item.colorVar ? { backgroundColor: `var(${item.colorVar})` } : undefined
+    return item.colorVar
+      ? { backgroundColor: `var(${item.colorVar})` }
+      : undefined
   }
 
   function trendColor(metric: DashboardTrendMetric) {
@@ -434,7 +481,9 @@ export function useRequestTrendChart(options: {
   }
 
   function toggleSummarySeries(metric: DashboardTrendMetric) {
-    pinnedSummaryMetric.value = pinnedSummaryMetric.value === metric ? undefined : metric
+    pinnedSummaryMetric.value = pinnedSummaryMetric.value === metric
+      ? undefined
+      : metric
   }
 
   function isSeriesMuted(metric: DashboardTrendMetric) {
@@ -473,7 +522,9 @@ function formatAxisCompact(value: number) {
 }
 
 function formatAxisNumber(value: number) {
-  return value >= 10 ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, '')
+  return value >= 10
+    ? value.toFixed(0)
+    : value.toFixed(1).replace(/\.0$/, '')
 }
 
 function formatLatency(value: number | null | undefined, fallback: string) {
@@ -497,7 +548,9 @@ function tooltipValue(source: unknown, key: string) {
   if (typeof source !== 'object' || source === null || !(key in source))
     return ''
   const value = (source as Record<string, unknown>)[key]
-  return typeof value === 'number' || typeof value === 'string' ? String(value) : ''
+  return typeof value === 'number' || typeof value === 'string'
+    ? String(value)
+    : ''
 }
 
 function trendPointProperty(point: TrendPoint | undefined, key: string) {
@@ -508,7 +561,9 @@ function trendPointProperty(point: TrendPoint | undefined, key: string) {
 
 function trendPointText(point: TrendPoint | undefined, key: string) {
   const value = trendPointProperty(point, key)
-  return typeof value === 'string' ? value : undefined
+  return typeof value === 'string'
+    ? value
+    : undefined
 }
 
 function zeroAwareRateText(
@@ -524,5 +579,7 @@ function zeroAwareRateText(
 
 function trendPointNumber(point: TrendPoint, key: string) {
   const value = trendPointProperty(point, key)
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : null
 }

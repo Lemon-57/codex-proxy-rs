@@ -70,9 +70,6 @@ pub struct MiddlewareRequestHead {
     /// 当前请求的完整有效执行设置；尚未建立可改写设置的边界使用 null
     #[serde(default)]
     pub settings: serde_json::Value,
-    /// 本次 Provider 构造参数；仅原生 attempt 提供
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_parameters: Option<serde_json::Map<String, serde_json::Value>>,
     pub request_id: String,
     pub client_key_id: String,
     pub account_group_ids: Vec<String>,
@@ -131,13 +128,6 @@ pub struct MiddlewareNextRequest {
         deserialize_with = "deserialize_replacement"
     )]
     pub settings: Option<serde_json::Value>,
-    /// 完整替换构造参数；空对象仍表示显式替换，不隐式合并或补回删除字段
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_replacement"
-    )]
-    pub provider_parameters: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     #[serde(default)]

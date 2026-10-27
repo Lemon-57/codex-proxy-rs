@@ -9,7 +9,7 @@ import { use } from 'echarts/core'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseChart from '@/components/charts/BaseChart.vue'
-import { tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
+import { chartTooltipContent, tooltipIndex, tooltipRows } from '@/components/charts/tooltip'
 import { healthEligibleRequestCount } from '@/components/usage/shared/health'
 import { useChartPalette } from '@/composables/useChartPalette'
 
@@ -20,7 +20,6 @@ import {
   usageGapAwareLineSeries,
   usageLegend,
   usageTooltip,
-  usageTooltipContent,
   usageTooltipItem,
   usageValueAxis,
 } from '../utils/chart'
@@ -61,6 +60,10 @@ const granularityText = computed(() => {
   return labels[props.granularity] ?? props.granularity
 })
 
+const description = computed(() => props.loading || !granularityText.value
+  ? t('usage.health.description')
+  : t('usage.health.descriptionWithGranularity', { granularityText: granularityText.value }))
+
 const chartOption = computed<EChartsOption>(() => {
   const theme = palette.value
   const chartPoints = points.value
@@ -80,7 +83,9 @@ const chartOption = computed<EChartsOption>(() => {
     ...successRateSeries.map((item, index) => index === 0
       ? {
           ...item,
-          symbol: activePointCount <= 16 ? 'circle' : 'none',
+          symbol: activePointCount <= 16
+            ? 'circle'
+            : 'none',
           symbolSize: 4,
         }
       : item),
@@ -96,7 +101,14 @@ const chartOption = computed<EChartsOption>(() => {
       outerBoundsMode: 'same',
       outerBoundsContain: 'axisLabel',
     },
-    legend: usageLegend(theme, [t('common.status.success'), t('usage.health.point.serviceFailed'), t('usage.status.cancelled'), t('usage.health.notCompleted'), t('usage.health.point.callerError'), t('usage.health.serviceSuccessRate')]),
+    legend: usageLegend(theme, [
+      t('common.status.success'),
+      t('usage.health.point.serviceFailed'),
+      t('usage.status.cancelled'),
+      t('usage.health.notCompleted'),
+      t('usage.health.point.callerError'),
+      t('usage.health.serviceSuccessRate'),
+    ]),
     tooltip: usageTooltip(theme, formatTooltip),
     xAxis: usageCategoryAxis(
       chartPoints.map(point => point.label),
@@ -122,7 +134,9 @@ function serviceSuccessRate(point: HealthPoint) {
   const total = healthEligibleRequestCount(point)
   if (total > 0)
     return 1 - point.errorRate
-  return requestCount(point) === 0 ? 0 : null
+  return requestCount(point) === 0
+    ? 0
+    : null
 }
 
 function outcomeSeries(name: string, data: number[], color: string) {
@@ -145,7 +159,7 @@ function formatTooltip(params: unknown) {
   const successRate = serviceSuccessRate(point)
   const theme = palette.value
 
-  return usageTooltipContent(theme, point.label, [
+  return chartTooltipContent(point.label, [
     usageTooltipItem(t('usage.health.requestVolume'), formatCompactNumber(requestCount(point)), theme.textSecondary),
     usageTooltipItem(t('common.status.success'), formatCompactNumber(point.successRequests), theme.success),
     usageTooltipItem(t('usage.health.point.serviceFailed'), formatCompactNumber(point.failedRequests), theme.danger),
@@ -154,7 +168,9 @@ function formatTooltip(params: unknown) {
     usageTooltipItem(t('usage.health.point.callerError'), formatCompactNumber(point.callerErrorRequests), theme.normal),
     usageTooltipItem(
       t('usage.health.serviceSuccessRate'),
-      successRate == null ? t('usage.health.noServiceResult') : formatPercent(successRate),
+      successRate == null
+        ? t('usage.health.noServiceResult')
+        : formatPercent(successRate),
       theme.success,
     ),
   ])
@@ -165,7 +181,7 @@ function formatTooltip(params: unknown) {
   <ZCard
     as="article"
     :title="t('usage.health.title')"
-    :description="t('usage.health.description', { granularityText })"
+    :description="description"
     class="min-h-90 xl:h-full"
   >
     <template #body>

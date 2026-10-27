@@ -322,10 +322,6 @@ pub(super) fn cold_compaction_http_sse_stream(
             }
         }
 
-        if let Some(model) = canonical.response_model() {
-            observation = observation.with_upstream_response_model_if_valid(model);
-            yield ProviderEvent::observation(observation.clone());
-        }
         if let Some(tier) = canonical.response_service_tier() {
             observation = observation.with_service_tier_if_valid(tier.to_owned());
             yield ProviderEvent::observation(observation);
@@ -606,12 +602,6 @@ pub(super) fn cold_http_sse_stream(
             if observe_output_timings(&mut observation, &events, context.timing_started_at()) {
                 yield ProviderEvent::observation(observation.clone());
             }
-            if let Some(model) = decoder.response_model()
-                && observation.upstream_response_model() != Some(model)
-            {
-                observation = observation.with_upstream_response_model_if_valid(model);
-                yield ProviderEvent::observation(observation.clone());
-            }
             if let Some(tier) = decoder.response_service_tier()
                 && observation.service_tier() != Some(tier)
             {
@@ -667,12 +657,6 @@ pub(super) fn cold_http_sse_stream(
             .iter()
             .flat_map(ProviderEvent::canonical_facts)
             .any(|event| matches!(event, GatewayEvent::Completed(_)));
-        if let Some(model) = decoder.response_model()
-            && observation.upstream_response_model() != Some(model)
-        {
-            observation = observation.with_upstream_response_model_if_valid(model);
-            yield ProviderEvent::observation(observation.clone());
-        }
         if let Some(tier) = decoder.response_service_tier()
             && observation.service_tier() != Some(tier)
         {

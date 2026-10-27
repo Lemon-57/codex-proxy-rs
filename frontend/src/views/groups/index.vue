@@ -18,7 +18,6 @@ const {
   loading,
   pagination,
   searchQuery,
-  statusQuery,
   showFormModal,
   showDeleteModal,
   showBatchDeleteModal,
@@ -64,7 +63,6 @@ const { allSelected, indeterminate, selectedRowKeys, toggleSelection, toggleAll 
       <template #header>
         <AccountGroupFilters
           v-model:search="searchQuery"
-          v-model:status="statusQuery"
           :batch-deleting="batchDeleting"
           :selected-count="selectedIds.size"
           @create="openCreate"

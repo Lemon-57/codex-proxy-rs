@@ -533,14 +533,8 @@ async fn adapter_sse_outlives_rpc_budget_and_cancellation_closes_its_resources()
             .as_object_mut()
             .unwrap()
             .remove("wire");
-        let (cache, _, runtime) = setup_with_limits(
-            config,
-            gateway_plugin_runtime::RpcLimits {
-                maximum_call_timeout: Duration::from_millis(500),
-                ..Default::default()
-            },
-        )
-        .await;
+        config["call_budgets_ms"] = json!({"upstream":500});
+        let (cache, _, runtime) = setup(config).await;
         let generation =
             ExtensionPreparationPort::prepare(&runtime, ConfigRevision::new(1).unwrap())
                 .await
@@ -667,7 +661,7 @@ async fn adapter_preserves_observation_updates_and_measures_only_real_output() {
         {"event":{"facts":[{"type":"started","id":"response-one","model":"native-model"},
             {"type":"content_added","index":0,"kind":"reasoning"}]},
          "observation":{"transport":"http_sse","http_version":"HTTP/2","status_code":200,
-            "request_id":"upstream-494","upstream_response_model":"real-model",
+            "request_id":"upstream-494",
             "client_headers":[{"name":"x-bytes","value":[255]},{"name":"x-bytes","value":[254]}],
             "provider_metadata":"{ \"future\": 1e3 }","timings":{"connect_ms":5,"headers_ms":8}}},
         {"event":{"facts":[{"type":"reasoning_delta","index":0,"text":""}]}},
@@ -711,7 +705,6 @@ async fn adapter_preserves_observation_updates_and_measures_only_real_output() {
     assert_eq!(last.status_code(), Some(200));
     assert_eq!(last.http_version().unwrap().as_str(), "HTTP/2");
     assert_eq!(last.request_id().unwrap().as_str(), "upstream-494");
-    assert_eq!(last.upstream_response_model(), Some("real-model"));
     assert_eq!(last.service_tier(), Some("priority"));
     assert_eq!(
         last.provider_metadata().unwrap().as_json(),
@@ -855,6 +848,10 @@ async fn adapter_failure_preserves_upstream_diagnostics_and_native_feedback() {
     assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
     assert_eq!(error.send_state(), UpstreamSendState::Sent);
     assert_eq!(error.upstream_status(), Some(429));
+    assert!(
+        error.replay_is_safe(),
+        "宿主观测的单次 HTTP429 应允许 Core 判断重试"
+    );
     assert_eq!(
         error.upstream_code().unwrap().as_str(),
         "rate_limit_exceeded"
@@ -880,6 +877,197 @@ async fn adapter_failure_preserves_upstream_diagnostics_and_native_feedback() {
     assert_eq!(Arc::strong_count(&account), 1);
     drop(generation);
     runtime.shutdown().await;
+    super::wait_until_empty(cache.path()).await;
+}
+
+#[tokio::test]
+async fn adapter_replay_requires_a_single_managed_http_rejection_before_output() {
+    for scenario in [
+        "json",
+        "stream",
+        "no_request",
+        "http_200",
+        "http_503",
+        "wrong_status",
+        "wrong_kind",
+        "sequential",
+        "concurrent",
+        "auxiliary",
+        "unmanaged",
+        "started",
+        "text",
+        "tool",
+        "failure_wire",
+    ] {
+        let server = MockServer::start().await;
+        let status = match scenario {
+            "http_200" => 200,
+            "http_503" => 503,
+            _ => 429,
+        };
+        let requests = match scenario {
+            "no_request" => 0,
+            "sequential" | "concurrent" => 2,
+            _ => 1,
+        };
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status).set_body_string("{}"))
+            .expect(requests)
+            .mount(&server)
+            .await;
+        let mut config = configuration(&server.uri(), scenario == "stream");
+        let callback = config["upstream_callbacks"][0].clone();
+        match scenario {
+            "no_request" => config["upstream_callbacks"] = json!([]),
+            "sequential" => config["upstream_callbacks"] = json!([callback, callback]),
+            "concurrent" => config["upstream_callbacks"] = json!([[callback, callback]]),
+            "auxiliary" => {
+                config["upstream_registration"]["adapters"][0]["paths"][0]["purpose"] =
+                    json!("auxiliary");
+            }
+            "unmanaged" => {
+                config["upstream_callbacks"] = json!([{
+                    "method":"host.http.do", "params":{"method":"POST","url":server.uri()},
+                    "body":"request"
+                }]);
+            }
+            _ => {}
+        }
+        let mut events = Vec::new();
+        if matches!(scenario, "started" | "text" | "tool") {
+            events.push(json!({"event":{"facts":[{"type":"started","id":"response-one"}]}}));
+        }
+        if matches!(scenario, "text" | "tool") {
+            let kind = if scenario == "text" {
+                "text"
+            } else {
+                "tool_call"
+            };
+            events
+                .push(json!({"event":{"facts":[{"type":"content_added","index":0,"kind":kind}]}}));
+            let fact = if scenario == "text" {
+                json!({"type":"text_delta","index":0,"text":"partial"})
+            } else {
+                json!({"type":"tool_call_delta","index":0,"id":"call-one","name":"write_file","arguments":"{}"})
+            };
+            events.push(json!({"event":{"facts":[fact]}}));
+        }
+        let mut failure = json!({
+            "event":{"facts":[]},
+            "failure":{"kind":"rate_limited","status":429,"message":"fixture rejection"}
+        });
+        if scenario == "wrong_status" {
+            failure["failure"]["status"] = json!(503);
+        }
+        if scenario == "wrong_kind" {
+            failure["failure"]["kind"] = json!("unavailable");
+        }
+        if scenario == "failure_wire" {
+            failure["wire"] = json!("http");
+        }
+        events.push(failure);
+        config["upstream_events"] = json!(events);
+        let (cache, _, runtime) = setup(config).await;
+        let generation =
+            ExtensionPreparationPort::prepare(&runtime, ConfigRevision::new(1).unwrap())
+                .await
+                .unwrap();
+        let account = Account::new();
+        let mut stream = execute(&runtime, &generation, Arc::clone(&account), "key-one", None);
+        let error = loop {
+            match stream.next().await.expect("fixture must report a failure") {
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(
+            error.kind(),
+            if scenario == "wrong_kind" {
+                ProviderErrorKind::Unavailable
+            } else {
+                ProviderErrorKind::RateLimited
+            },
+            "{scenario}"
+        );
+        assert_eq!(
+            error.replay_is_safe(),
+            matches!(scenario, "json" | "stream"),
+            "{scenario}"
+        );
+        assert_eq!(
+            error.send_state(),
+            if requests == 0 {
+                UpstreamSendState::NotSent
+            } else {
+                UpstreamSendState::Sent
+            },
+            "{scenario}"
+        );
+        drop(stream);
+        assert_eq!(Arc::strong_count(&account), 1, "{scenario}");
+        drop(generation);
+        runtime.shutdown().await;
+        super::wait_until_empty(cache.path()).await;
+    }
+}
+
+#[tokio::test]
+async fn adapter_rejection_with_pending_http_revokes_the_call_without_replay() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(429).set_body_string("{}"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("pending-http-received");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pending_url = format!("http://{}/pending", listener.local_addr().unwrap());
+    let received = marker.clone();
+    let pending = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = [0; 4096];
+        assert_ne!(socket.read(&mut bytes).await.unwrap(), 0);
+        std::fs::write(received, b"received").unwrap();
+        // 不返回响应头；父调用结束必须释放尚未确定结果的 HTTP 请求
+        while socket.read(&mut bytes).await.unwrap() != 0 {}
+        let _ = socket.shutdown().await;
+    });
+    let mut config = configuration(&server.uri(), false);
+    let first = config["upstream_callbacks"][0].clone();
+    config["upstream_callbacks"] = json!([first, {
+        "method":"host.upstream.http.do",
+        "params":{"method":"POST","path":pending_url,"headers":[]},
+        "pending_marker":marker
+    }]);
+    config["upstream_events"] = json!([{
+        "event":{"facts":[]},
+        "failure":{"kind":"rate_limited","status":429,"message":"fixture rejection"}
+    }]);
+    let (cache, _, runtime) = setup(config).await;
+    let generation = ExtensionPreparationPort::prepare(&runtime, ConfigRevision::new(1).unwrap())
+        .await
+        .unwrap();
+    let account = Account::new();
+    let mut stream = execute(&runtime, &generation, Arc::clone(&account), "key-one", None);
+    let error = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+    assert!(!error.replay_is_safe());
+    assert_ne!(error.send_state(), UpstreamSendState::NotSent);
+    tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(stream);
+    drop(generation);
+    runtime.shutdown().await;
+    assert_eq!(Arc::strong_count(&account), 1);
     super::wait_until_empty(cache.path()).await;
 }
 
@@ -1359,7 +1547,7 @@ async fn cancelling_adapter_body_closes_pending_websocket_and_releases_selected_
 }
 
 #[tokio::test]
-async fn usage_without_response_model_still_uses_native_account_pricing() {
+async fn upstream_adapter_usage_uses_native_account_pricing() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
@@ -1386,6 +1574,168 @@ async fn usage_without_response_model_still_uses_native_account_pricing() {
     drop(stream);
     drop(generation);
     runtime.shutdown().await;
+}
+
+struct RotatingAdapterProvider {
+    accounts: Vec<Arc<Account>>,
+    selected: std::sync::Mutex<Vec<ProviderAccountId>>,
+}
+
+#[async_trait::async_trait]
+impl gateway_core::engine::provider::Provider for RotatingAdapterProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn catalog_generation(&self) -> gateway_core::routing::ProviderCatalogGeneration {
+        Default::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<gateway_core::routing::ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![gateway_core::routing::ProviderModelCapabilities::new(
+            UpstreamModelId::new("native-model").unwrap(),
+            gateway_core::routing::ModelCapabilities::new(
+                std::collections::BTreeSet::from([
+                    gateway_core::operation::OperationKind::Generate,
+                ]),
+                None,
+            ),
+        )])
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        request: gateway_core::engine::provider::ProviderRequest,
+        context: AttemptContext,
+    ) -> Result<gateway_core::engine::provider::ProviderStream, ProviderError> {
+        let account = self
+            .accounts
+            .iter()
+            .find(|account| !context.excluded_accounts().contains(&account.id))
+            .cloned()
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::NoEligibleAccount,
+                    UpstreamSendState::NotSent,
+                )
+            })?;
+        self.selected.lock().unwrap().push(account.id.clone());
+        let candidate = request.candidate();
+        let model = candidate.upstream_model().unwrap();
+        let adapter = context
+            .upstream_adapter_for_account(candidate.provider(), model, &account.id)?
+            .unwrap();
+        let metadata = ProviderCallMetadata::new(
+            candidate.provider().clone(),
+            model.clone(),
+            account.id.clone(),
+            UpstreamTransport::new(adapter.transport()).unwrap(),
+        );
+        let events = adapter.execute(UpstreamAdapterInvocation {
+            operation: request.operation().clone(),
+            headers: vec![],
+            context,
+            metadata: metadata.clone(),
+            account,
+        });
+        Ok(gateway_core::engine::provider::ProviderStream::new(
+            metadata,
+            events,
+            (),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn core_rotates_after_a_managed_adapter_http_rejection() {
+    use gateway_core::engine::{
+        execution::{ClientTransport, ExecutionRequestMetadata, StartExecution},
+        provider::{Provider, ProviderRegistry},
+    };
+    let Some(environment) = crate::support::environment::Environment::create().await else {
+        eprintln!("SKIP: plugin integration environment absent");
+        return;
+    };
+    let server = MockServer::start().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    Mock::given(method("POST"))
+        .respond_with(move |_: &wiremock::Request| {
+            let status = if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                429
+            } else {
+                200
+            };
+            ResponseTemplate::new(status).set_body_string("{}")
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let first = environment.account(None).await;
+    let second = environment.account(None).await;
+    let provider = Arc::new(RotatingAdapterProvider {
+        accounts: vec![
+            Account::with_identity(first.as_str(), 1),
+            Account::with_identity(second.as_str(), 1),
+        ],
+        selected: Default::default(),
+    });
+    let mut config = configuration(&server.uri(), false);
+    config["upstream_registration"]["adapters"][0]["account_ids"] =
+        json!([first.as_str(), second.as_str()]);
+    config["upstream_account_events"] = json!({first.as_str(): [{
+        "event":{"facts":[]},
+        "failure":{"kind":"rate_limited","status":429,"message":"fixture rejection"}
+    }]});
+    environment.install_plugin(config).await;
+    let key = "sk-adapter-rotation-fixture";
+    environment.client_key("key_adapter_rotation", key).await;
+    let (runtime, core) = environment
+        .runtime_with_providers(
+            Default::default(),
+            ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+        )
+        .await;
+    let execution = core.execution_service();
+    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "openai",
+            json!({"model":"native-model","input":"hello"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap(),
+    ));
+    let mut started = execution
+        .start(StartExecution {
+            client: execution.authenticate(key).unwrap(),
+            public_model: gateway_core::routing::PublicModelId::new("native-model").unwrap(),
+            operation,
+            metadata: ExecutionRequestMetadata {
+                protocol: "openai".into(),
+                endpoint: "/v1/responses".into(),
+                transport: ClientTransport::HttpJson,
+                stream: false,
+                client_ip: None,
+                user_agent: None,
+                previous_response_id: None,
+            },
+        })
+        .await
+        .unwrap();
+    started.session.collect_uncommitted().await.unwrap();
+    started.session.commit_downstream(Some(200)).await.unwrap();
+    started.session.detach_finalize().await;
+    assert_eq!(*provider.selected.lock().unwrap(), vec![first, second]);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    environment.release_plugin_accounts(&runtime);
+    drop(execution);
+    drop(core);
+    runtime.shutdown().await;
+    environment.close().await;
 }
 
 #[tokio::test]

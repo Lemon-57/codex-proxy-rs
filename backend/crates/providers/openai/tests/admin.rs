@@ -409,6 +409,7 @@ async fn copying_builtin_prices_keeps_cache_read_and_write_fallback_costs() {
         "gpt-4o",
         "gpt-6-astra",
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
         "gpt-6-sol",
         "gpt-6-luna",
     ] {
@@ -2446,7 +2447,7 @@ mod errors {
     #[tokio::test]
     async fn manual_refresh_preserves_banned_evidence_without_promoting_401_to_terminal() {
         for (status, kind, message) in [
-            (400, Kind::Invalid, "OpenAI 账号已被停用，请检查账号状态"),
+            (400, Kind::Invalid, "Codex 账号已被停用，请检查账号状态"),
             (
                 401,
                 Kind::BadGateway,

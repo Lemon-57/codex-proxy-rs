@@ -248,7 +248,6 @@ pub struct ModelRequestFinalization {
     pub http_version: Option<String>,
     pub websocket_pool: Option<String>,
     pub service_tier: Option<String>,
-    pub upstream_response_model: Option<String>,
     pub provider_metadata_json: Option<Value>,
     pub diagnostic_trace_json: Option<Value>,
     pub error_kind: Option<String>,
@@ -312,12 +311,6 @@ impl ModelRequestFinalization {
             require_nonempty(ENTITY, "service_tier", service_tier)?;
             if service_tier.len() > 64 || service_tier.chars().any(char::is_control) {
                 return Err(invalid("service tier is invalid"));
-            }
-        }
-        if let Some(model) = self.upstream_response_model.as_deref() {
-            require_nonempty(ENTITY, "upstream_response_model", model)?;
-            if model.len() > 256 || model.chars().any(char::is_control) {
-                return Err(invalid("upstream response model is invalid"));
             }
         }
         if self
@@ -1180,7 +1173,6 @@ impl ExecutionStore for PgExecutionStore {
                 http_version: finalization.http_version,
                 websocket_pool: finalization.websocket_pool,
                 service_tier: finalization.service_tier,
-                upstream_response_model: finalization.upstream_response_model,
                 provider_metadata_json,
                 diagnostic_trace_json: finalization
                     .diagnostic_trace_json

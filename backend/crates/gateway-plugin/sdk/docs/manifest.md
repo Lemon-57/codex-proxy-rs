@@ -26,7 +26,7 @@
 | 版本字段 | 当前值 | 对应合同 |
 | --- | --- | --- |
 | `manifestVersion` / `manifest_schema_versions` | `2` | 插件清单格式 |
-| `package.protocolVersion` / `protocol_versions` | `5` | 插件进程 RPC 封装，不是 OpenAI 或 xAI 的业务协议 |
+| `package.protocolVersion` / `protocol_versions` | `7` | 插件进程 RPC 封装，不是 OpenAI 或 xAI 的业务协议 |
 | `contributes.<capability>.version` / `capabilities[].versions` | 见[扩展项简写](#扩展项简写) | 指定扩展能力的行为合同 |
 | 宿主声明的 `schema_version` | `2` | 宿主兼容声明自身的格式 |
 
@@ -34,11 +34,11 @@
 
 清单不接受 `permissions` 字段；插件按[完整信任](#完整信任)运行
 
-RPC v5 的帧布局、编码与会话生命周期见[通信边界](../README.md#通信边界)。插件使用 SDK 构建，并由 CLI 生成包含协议版本的安装包
+RPC v7 的帧布局、编码与会话生命周期见[通信边界](../README.md#通信边界)。插件使用 SDK 构建，并由 CLI 生成包含协议版本的安装包
 
 安装包清单校验与已安装元数据读取是两个边界：清单拒绝未知字段，并检查必需字段、类型和版本；
 数据库元数据的读取规则见[制品与发布](../../../../../docs/architecture.md#制品配置与发布)，不改变清单或 RPC 合同。
-`engines.codex-proxy-rs` 声明插件所需的宿主范围。范围或能力版本不匹配时持续提示风险，允许尝试启动；包结构、平台与 RPC 封装校验失败阻止加载。CLI 严格校验作者声明是否符合 SDK 支持的合同
+`engines.codex-proxy-rs` 声明插件所需的宿主范围。范围或已声明能力版本不匹配时不自动启动，管理员确认风险后可尝试本次启动；确认不跨宿主重启保留。包结构、清单格式、平台与 RPC 封装校验失败阻止加载，不能通过风险确认绕过。CLI 严格校验作者声明是否符合 SDK 支持的合同
 
 ## 接口弃用
 
@@ -57,7 +57,8 @@ RPC v5 的帧布局、编码与会话生命周期见[通信边界](../README.md#
 | `scheduler` | `3` |
 | `upstream_adapter` | `5` |
 | `frontend_authentication`、`model_router`、`retry_policy`、`observer`、`management` | `2` |
-| `model_catalog`、`command_line`、`maintenance` | `1` |
+| `model_catalog` | `1`、`2` |
+| `command_line`、`maintenance` | `1` |
 
 例如，仅声明管理页面、命令行和模型请求中间件：
 

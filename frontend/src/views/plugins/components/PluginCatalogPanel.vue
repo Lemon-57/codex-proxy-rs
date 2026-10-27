@@ -22,12 +22,34 @@ const status = shallowRef('all')
 const display = shallowRef('cards')
 const page = shallowRef(1)
 const pageSize = shallowRef(20)
-const statusOptions = computed(() => ([{ label: t('common.status.all'), value: 'all' }, ...Object.entries(PLUGIN_STATUS_LABELS.value).map(([value, label]) => ({ value, label }))]))
-const displayOptions = computed(() => ([{ label: t('plugins.catalog.cardView'), value: 'cards', icon: LayoutGrid }, { label: t('plugins.catalog.listView'), value: 'list', icon: List }]))
+const statusOptions = computed(() => ([
+  {
+    label: t('common.status.all'),
+    value: 'all',
+  },
+  ...Object.entries(PLUGIN_STATUS_LABELS.value).map(([value, label]) => ({ value, label })),
+]))
+const displayOptions = computed(() => ([
+  {
+    label: t('plugins.catalog.cardView'),
+    value: 'cards',
+    icon: LayoutGrid,
+  },
+  {
+    label: t('plugins.catalog.listView'),
+    value: 'list',
+    icon: List,
+  },
+]))
 const filtered = computed(() => props.plugins.filter((plugin) => {
   const metadata = plugin.artifact.metadata
   return (status.value === 'all' || pluginStatus(plugin) === status.value)
-    && [metadata.displayName, metadata.pluginId, metadata.publisher, metadata.description].some(value => value.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase()))
+    && [
+      metadata.displayName,
+      metadata.pluginId,
+      metadata.publisher,
+      metadata.description,
+    ].some(value => value.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase()))
 }))
 const rows = computed(() => filtered.value
   .slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
@@ -36,8 +58,13 @@ const rows = computed(() => filtered.value
     const version = plugin.artifacts.find(artifact => artifact.metadata.sha256 === current?.artifactSha256)?.metadata.version ?? plugin.artifact.metadata.version
     return {
       ...plugin,
+      failureReason: plugin.configurations.filter(instance => instance.enabled).length > 1
+        ? t('plugins.configuration.legacy.multipleEnabledNotice')
+        : undefined,
       versionLabel: version,
-      versionTitle: `${current ? t('plugins.catalog.currentVersion') : t('plugins.catalog.installedVersion')}：${version}`,
+      versionTitle: `${current
+        ? t('plugins.catalog.currentVersion')
+        : t('plugins.catalog.installedVersion')}：${version}`,
     }
   }))
 const pagination = computed(() => ({ currentPage: page.value, pageSize: pageSize.value, total: filtered.value.length }))
@@ -48,11 +75,36 @@ watch(() => filtered.value.length, (total) => {
   page.value = Math.min(page.value, Math.max(1, Math.ceil(total / pageSize.value)))
 })
 const columns = computed(() => (defineTableColumns<(typeof rows.value)[number]>([
-  { key: 'plugin', label: t('navigation.plugins'), kind: 'identity', size: '3xl' },
-  { key: 'status', label: t('common.fields.status'), kind: 'custom', size: 'lg' },
-  { key: 'capabilities', label: t('plugins.catalog.provideFunctionality'), kind: 'custom', size: 'xl' },
-  { key: 'configurations', label: t('plugins.catalog.versionCount'), kind: 'custom', size: 'lg' },
-  { key: 'actions', label: t('common.fields.actions'), kind: 'actions', size: 'sm' },
+  {
+    key: 'plugin',
+    label: t('navigation.plugins'),
+    kind: 'identity',
+    size: '3xl',
+  },
+  {
+    key: 'status',
+    label: t('common.fields.status'),
+    kind: 'custom',
+    size: 'lg',
+  },
+  {
+    key: 'capabilities',
+    label: t('plugins.catalog.provideFunctionality'),
+    kind: 'custom',
+    size: 'xl',
+  },
+  {
+    key: 'configurations',
+    label: t('plugins.catalog.versionCount'),
+    kind: 'custom',
+    size: 'lg',
+  },
+  {
+    key: 'actions',
+    label: t('common.fields.actions'),
+    kind: 'actions',
+    size: 'sm',
+  },
 ])))
 </script>
 
@@ -90,8 +142,8 @@ const columns = computed(() => (defineTableColumns<(typeof rows.value)[number]>(
                 </div>
                 <span class="truncate text-cp-xs text-cp-text-secondary">{{ plugin.artifact.metadata.publisher }}</span>
               </div>
-              <PluginStatusNotice v-if="currentPluginInstance(plugin)" :instance="currentPluginInstance(plugin)!" />
-              <ZTag :type="pluginStatusType(pluginStatus(plugin))" size="small">
+              <PluginStatusNotice v-if="currentPluginInstance(plugin)" :instance="currentPluginInstance(plugin)!" :failure-reason="plugin.failureReason" />
+              <ZTag v-if="!['failed', 'incompatible'].includes(pluginStatus(plugin))" :type="pluginStatusType(pluginStatus(plugin))" size="small">
                 {{ PLUGIN_STATUS_LABELS[pluginStatus(plugin)] }}
               </ZTag>
             </div>
@@ -126,8 +178,8 @@ const columns = computed(() => (defineTableColumns<(typeof rows.value)[number]>(
       </template>
       <template #status="{ row }">
         <div class="flex items-center gap-1.5">
-          <PluginStatusNotice v-if="currentPluginInstance(row)" :instance="currentPluginInstance(row)!" />
-          <ZTag :type="pluginStatusType(pluginStatus(row))">
+          <PluginStatusNotice v-if="currentPluginInstance(row)" :instance="currentPluginInstance(row)!" :failure-reason="row.failureReason" />
+          <ZTag v-if="!['failed', 'incompatible'].includes(pluginStatus(row))" :type="pluginStatusType(pluginStatus(row))">
             {{ PLUGIN_STATUS_LABELS[pluginStatus(row)] }}
           </ZTag>
         </div>
