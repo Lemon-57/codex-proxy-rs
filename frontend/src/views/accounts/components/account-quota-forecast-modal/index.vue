@@ -23,7 +23,7 @@ const open = defineModel<boolean>({ default: false })
 const period = ref('weekly')
 const explanationOpen = ref(false)
 const explanationId = useId()
-const { report, loading, refreshing, error, load, refresh } = useAccountQuotaForecast(
+const { report, loading, refreshing, refresh } = useAccountQuotaForecast(
   toRef(() => props.account.id),
   open,
   account => emit('accountUpdated', account),
@@ -99,15 +99,6 @@ function handleExplanationKeydown(event: KeyboardEvent) {
 
       <div aria-live="polite" :aria-busy="loading || refreshing">
         <ForecastSkeleton v-if="loading || refreshing" />
-        <div v-else-if="error && !report" class="grid rounded-cp-card bg-cp-fill-tertiary/70 [html[data-theme=light]_&]:bg-cp-fill-quaternary/70">
-          <ZEmpty :title="t('accounts.quotaForecast.predictionLoadFailed')" :description="t('accounts.quotaForecast.loadFailed')" surface="none" class="min-h-80 content-center">
-            <template #action>
-              <ZButton @click="load">
-                {{ t('accounts.quotaForecast.reload') }}
-              </ZButton>
-            </template>
-          </ZEmpty>
-        </div>
         <template v-else-if="forecast">
           <div v-if="unavailableReason" class="grid rounded-cp-card bg-cp-fill-tertiary/70 [html[data-theme=light]_&]:bg-cp-fill-quaternary/70">
             <ZEmpty :title="t('accounts.quotaForecast.unpredictableAtMoment')" :description="unavailableReason" :icon="ChartNoAxesCombined" surface="none" class="min-h-72 content-center" />

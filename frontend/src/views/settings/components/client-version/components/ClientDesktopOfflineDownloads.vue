@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { ClientDownloadPackage, CodexDesktopWindowsDownloads } from '@/api'
 
-import { ZButton, ZEmpty, ZIconButton, ZSkeleton } from '@codex-proxy/ui'
-import { ArrowDownToLine, PackageOpen, RefreshCw } from '@lucide/vue'
+import { ZIconButton, ZSkeleton } from '@codex-proxy/ui'
+import { ArrowDownToLine, RefreshCw } from '@lucide/vue'
 
 import { computed } from 'vue'
 
@@ -16,18 +16,15 @@ const props = withDefaults(
   defineProps<{
     downloads?: CodexDesktopWindowsDownloads | null
     loading?: boolean
-    error?: string
   }>(),
   {
     downloads: null,
     loading: false,
-    error: '',
   },
 )
 
 const emit = defineEmits<{
   refresh: []
-  retry: []
 }>()
 
 const { t } = useI18n({ useScope: 'global' })
@@ -116,20 +113,6 @@ function formatFileSize(value: number | null): string {
         <ZSkeleton class="h-9 w-full" />
       </div>
     </div>
-
-    <ZEmpty
-      v-else-if="error && !downloads"
-      :title="t('settings.clientVersion.packagesFailed')"
-      :description="error"
-      :icon="PackageOpen"
-      size="small"
-    >
-      <template #action>
-        <ZButton size="small" :loading="loading" @click="emit('retry')">
-          {{ t('common.actions.retry') }}
-        </ZButton>
-      </template>
-    </ZEmpty>
 
     <div v-else-if="downloads" class="grid gap-3 sm:grid-cols-2">
       <article

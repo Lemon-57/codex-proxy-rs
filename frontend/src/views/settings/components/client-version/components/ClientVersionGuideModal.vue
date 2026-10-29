@@ -16,18 +16,15 @@ withDefaults(
   defineProps<{
     downloads?: CodexDesktopWindowsDownloads | null
     loading?: boolean
-    error?: string
   }>(),
   {
     downloads: null,
     loading: false,
-    error: '',
   },
 )
 
 const emit = defineEmits<{
   refresh: []
-  retry: []
 }>()
 
 const { t } = useI18n({ useScope: 'global' })
@@ -67,8 +64,6 @@ const sectionOptions = [
         v-if="activeSection === 'desktop'"
         :downloads="downloads"
         :loading="loading"
-        :error="error"
-        @retry="emit('retry')"
         @refresh="emit('refresh')"
       />
       <ClientCliInstallPanel v-else />

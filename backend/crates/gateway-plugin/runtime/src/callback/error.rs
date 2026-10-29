@@ -154,7 +154,7 @@ pub(crate) fn rpc_middleware(error: crate::RpcError) -> MiddlewareError {
         return MiddlewareError::Gateway(
             GatewayError::new(
                 GatewayErrorKind::MiddlewareCapacityUnavailable,
-                "Request middleware is temporarily busy",
+                "Request middleware is temporarily busy.",
             )
             .with_source(gateway_core::error::ErrorSource::new(error)),
         );

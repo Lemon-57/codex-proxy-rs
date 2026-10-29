@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import type { ClientProfilePreview } from '@/api/modules/settings/profiles'
 
-import { ZEmpty, ZSkeleton } from '@codex-proxy/ui'
+import { ZSkeleton } from '@codex-proxy/ui'
 import { useI18n } from 'vue-i18n'
 
 defineProps<{
   preview?: Pick<ClientProfilePreview, 'userAgent' | 'versionSource' | 'checkedAtDisplay' | 'error'> & { versionLag?: number | null }
   previewing: boolean
   needsVersionInput: boolean
-  error: string
 }>()
 
 const { t } = useI18n({ useScope: 'global' })
@@ -18,7 +17,6 @@ const { t } = useI18n({ useScope: 'global' })
   <p v-if="needsVersionInput" role="status" class="m-0 text-cp-sm text-cp-text-tertiary">
     {{ t('settings.clientProfile.previewAfterFillingInVersion') }}
   </p>
-  <ZEmpty v-else-if="error && !previewing" :title="t('settings.clientProfile.previewIsNotAvailableYet')" :description="error" size="small" surface="none" role="alert" />
   <div
     v-else-if="previewing || preview"
     class="grid min-h-20 min-w-0 content-center gap-2 rounded-cp bg-cp-fill-quaternary p-4"

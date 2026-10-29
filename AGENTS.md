@@ -35,6 +35,7 @@ Issue 和 PR 回复统一按 [GitHub 回复口吻](CONTRIBUTING.md#github-回复
 
 In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it BEFORE grep/find or reading files when you need to understand or locate code:
 
+- **Index freshness**: Run `codegraph sync` from the repository root before the first code query in a task. After pulling updates, switching branches, or changing code, run it again before the next query so symbols and call paths match the working tree. If synchronization fails, report the failure and verify against current source rather than treating the index as current.
 - **MCP tools** (when available): `codegraph_explore` answers most code questions in one call — the relevant symbols' verbatim source plus the call paths between them. `codegraph_node` returns one symbol's source + callers, or reads a whole file with line numbers. If the tools are listed but deferred, load them by name via tool search.
 - **Shell** (always works): `codegraph explore "<symbol names or question>"` and `codegraph node <symbol-or-file>` print the same output.
 

@@ -775,7 +775,7 @@ fn observability_semantics_should_reuse_codex_turn_metadata() {
 
     let semantics = encode_generate_request(&request, "observability", None)
         .expect("observability request should encode")
-        .semantics();
+        .semantics(None);
 
     assert_eq!(semantics.request_kind.as_deref(), Some("compaction"));
     assert_eq!(semantics.subagent_kind.as_deref(), Some("review"));
@@ -845,7 +845,7 @@ fn observability_semantics_should_use_the_transparent_openai_payload() {
 
     let semantics = encode_generate_request(&request, "observability", None)
         .expect("transparent OpenAI request should encode")
-        .semantics();
+        .semantics(None);
 
     assert_eq!(semantics.reasoning_preset, Some("ultra"));
     assert!(semantics.compact);

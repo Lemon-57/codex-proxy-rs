@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ZButton, ZEmpty, ZIconButton, ZPageHeader, ZSegmented } from '@codex-proxy/ui'
 
-import { Blocks, CircleAlert, RefreshCw } from '@lucide/vue'
+import { Blocks, RefreshCw } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -63,7 +63,7 @@ async function refreshDirectory() {
     frameReload.value += 1
   }
   catch {
-    // Store 保留可展示的错误；旧目录继续留在页面上，避免把暂时失败误判为撤销。
+    // 请求层统一提示失败，保留旧目录，避免把暂时失败误判为撤销
   }
 }
 
@@ -91,11 +91,11 @@ onMounted(() => {
     <PluginPageLoading v-if="loading && !loaded" />
 
     <ZEmpty
-      v-else-if="!view || !page"
+      v-else-if="!loadError && (!view || !page)"
       class="min-h-0 flex-1 content-center"
       :icon="Blocks"
       :title="t('plugins.pluginPageIsUnavailable')"
-      :description="loadError || t('plugins.page.unpublished')"
+      :description="t('plugins.page.unpublished')"
     >
       <template #action>
         <ZButton @click="router.push('/plugins')">
@@ -103,20 +103,6 @@ onMounted(() => {
         </ZButton>
       </template>
     </ZEmpty>
-
-    <div
-      v-else-if="loadError"
-      class="flex shrink-0 flex-wrap items-center gap-2 rounded-cp bg-cp-warning-container px-4 py-3 text-cp-warning-on-container"
-      role="alert"
-    >
-      <CircleAlert class="size-4 shrink-0" />
-      <p class="m-0 min-w-0 flex-1 text-cp-sm font-semibold">
-        {{ t('plugins.page.refreshFailed', { loadError }) }}
-      </p>
-      <ZButton size="small" :loading="loading" @click="refreshDirectory">
-        {{ t('common.actions.retry') }}
-      </ZButton>
-    </div>
 
     <section v-if="view && page" class="flex min-w-0 flex-col gap-4">
       <ZSegmented

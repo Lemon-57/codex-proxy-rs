@@ -1,7 +1,8 @@
-//! Images 的 OAuth 套餐资格、混合池、亲和和失败换号回归
+//! Images 与 Live 的账号资格、混合池、亲和和失败换号回归
 
 use super::*;
 use gateway_core::account::{AccountAffinity, ProviderAccountUpdate};
+use wiremock::matchers::path_regex;
 
 const PLUS: &str = "acct_provider_contract";
 const FREE: [&str; 3] = ["acct_scope_new", "acct_scope_old", "acct_scope_same"];
@@ -28,6 +29,28 @@ fn image(kind: ImageRequestKind, body: Value) -> Operation {
     ))
 }
 
+fn plan_restricted_requests(body: Value) -> [ProviderRequest; 3] {
+    let headers = body
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(|session| {
+            gateway_core::operation::ProviderHttpHeader::new(
+                "session-id",
+                Bytes::copy_from_slice(session.as_bytes()),
+            )
+        })
+        .into_iter()
+        .collect();
+    [
+        planned_provider_endpoint_request(
+            "openai",
+            image(ImageRequestKind::Generation, body.clone()),
+        ),
+        planned_provider_endpoint_request("openai", image(ImageRequestKind::Edit, body)),
+        super::super::live::live_request_with_headers(headers),
+    ]
+}
+
 fn selection_attempt(
     accounts: AccountAttemptContext,
     affinity: AccountAffinity,
@@ -35,7 +58,7 @@ fn selection_attempt(
 ) -> AttemptContext {
     AttemptContext::new(
         RequestAttemptContext::new(
-            ModelRequestId::new("req_image_eligibility").unwrap(),
+            ModelRequestId::new("req_account_eligibility").unwrap(),
             ClientApiKeyId::new("key_openai_contract").unwrap(),
         ),
         NonZeroU32::new(index).unwrap(),
@@ -48,12 +71,25 @@ fn selection_attempt(
 }
 
 #[tokio::test]
-async fn images_use_plus_in_a_pool_with_three_higher_weight_free_accounts() {
+async fn images_and_live_use_plus_in_a_pool_with_higher_weight_free_accounts() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(header("chatgpt-account-id", format!("chatgpt-{PLUS}")))
+        .and(path_regex("/codex/images/.*"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[]})))
         .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/codex/realtime/calls"))
+        .and(header("chatgpt-account-id", format!("chatgpt-{PLUS}")))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header("location", "/v1/live/call_eligibility")
+                .insert_header("content-type", "application/sdp")
+                .set_body_string("v=0\r\n"),
+        )
+        .expect(1)
         .mount(&server)
         .await;
     let store = Arc::new(MemoryAccountStore::default());
@@ -69,15 +105,12 @@ async fn images_use_plus_in_a_pool_with_three_higher_weight_free_accounts() {
         server.uri(),
         leases.clone(),
     );
-    for kind in [ImageRequestKind::Generation, ImageRequestKind::Edit] {
+    for request in plan_restricted_requests(json!({"model":"gpt-image-2","prompt":"test"})) {
         let mut stream = provider
             .clone()
             .execute(
-                planned_provider_endpoint_request(
-                    "openai",
-                    image(kind, json!({"model":"gpt-image-2","prompt":"test"})),
-                ),
-                context("req_plus_images", CancellationToken::new()),
+                request,
+                context("req_plus_endpoints", CancellationToken::new()),
             )
             .await
             .unwrap();
@@ -97,7 +130,7 @@ async fn images_use_plus_in_a_pool_with_three_higher_weight_free_accounts() {
 }
 
 #[tokio::test]
-async fn images_never_fall_back_to_free_when_plus_is_excluded_or_free_is_pinned() {
+async fn images_and_live_never_fall_back_to_free_when_plus_is_excluded_or_free_is_pinned() {
     let server = MockServer::start().await;
     let store = Arc::new(MemoryAccountStore::default());
     oauth_account(&store, PLUS, Some("plus")).await;
@@ -109,39 +142,40 @@ async fn images_never_fall_back_to_free_when_plus_is_excluded_or_free_is_pinned(
         server.uri(),
         leases.clone(),
     );
-    for kind in [ImageRequestKind::Generation, ImageRequestKind::Edit] {
-        for body in [json!({"model":"gpt-image-2"}), json!({"prompt":"test"})] {
-            for (required, excluded) in [
-                (
-                    Some(ProviderAccountId::new(FREE[0]).unwrap()),
-                    BTreeSet::new(),
-                ),
-                (
-                    None,
-                    BTreeSet::from([ProviderAccountId::new(PLUS).unwrap()]),
-                ),
-            ] {
-                for index in [1, 2] {
-                    let error = provider
-                        .clone()
-                        .execute(
-                            planned_provider_endpoint_request("openai", image(kind, body.clone())),
-                            selection_attempt(
-                                AccountAttemptContext::new(
-                                    excluded.clone(),
-                                    required.clone(),
-                                    None,
-                                ),
-                                AccountAffinity::Strict,
-                                index,
-                            ),
-                        )
-                        .await
-                        .err()
-                        .expect("Free must remain ineligible for Images");
-                    assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
-                    assert_eq!(error.send_state(), UpstreamSendState::NotSent);
-                }
+    let requests = plan_restricted_requests(json!({"model":"gpt-image-2"}))
+        .into_iter()
+        .chain(
+            [ImageRequestKind::Generation, ImageRequestKind::Edit].map(|kind| {
+                planned_provider_endpoint_request("openai", image(kind, json!({"prompt":"test"})))
+            }),
+        );
+    for request in requests {
+        for (required, excluded) in [
+            (
+                Some(ProviderAccountId::new(FREE[0]).unwrap()),
+                BTreeSet::new(),
+            ),
+            (
+                None,
+                BTreeSet::from([ProviderAccountId::new(PLUS).unwrap()]),
+            ),
+        ] {
+            for index in [1, 2] {
+                let error = provider
+                    .clone()
+                    .execute(
+                        request.clone(),
+                        selection_attempt(
+                            AccountAttemptContext::new(excluded.clone(), required.clone(), None),
+                            AccountAffinity::Strict,
+                            index,
+                        ),
+                    )
+                    .await
+                    .err()
+                    .expect("Free must remain ineligible for Images and Live");
+                assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
+                assert_eq!(error.send_state(), UpstreamSendState::NotSent);
             }
         }
     }
@@ -150,7 +184,7 @@ async fn images_never_fall_back_to_free_when_plus_is_excluded_or_free_is_pinned(
 }
 
 #[tokio::test]
-async fn images_escape_free_session_bindings_while_search_remains_available() {
+async fn images_and_live_escape_free_session_bindings_while_search_remains_available() {
     for mode in [
         AccountAffinity::Strict,
         AccountAffinity::Preferred,
@@ -166,7 +200,7 @@ async fn images_escape_free_session_bindings_while_search_remains_available() {
         let search = Operation::Search(StandaloneSearchRequest::from_raw_json(
             RawJsonPayload::new(
                 "openai",
-                Bytes::from_static(br#"{"id":"image-plan-session","commands":{}}"#),
+                Bytes::from_static(br#"{"id":"plan-session","commands":{}}"#),
             )
             .unwrap(),
         ));
@@ -185,7 +219,9 @@ async fn images_escape_free_session_bindings_while_search_remains_available() {
         assert_eq!(stream.metadata().provider_account_id().as_str(), FREE[0]);
         drop(stream);
         assert_eq!(affinity.binding_count(), 1);
-        for kind in [ImageRequestKind::Generation, ImageRequestKind::Edit] {
+        for request in plan_restricted_requests(json!({
+            "model":"gpt-image-2", "session_id":"plan-session"
+        })) {
             let key = affinity.lookup_keys()[0].clone();
             affinity.seed_binding(
                 &ProviderKind::new("openai").unwrap(),
@@ -195,15 +231,7 @@ async fn images_escape_free_session_bindings_while_search_remains_available() {
             let stream = provider
                 .clone()
                 .execute(
-                    planned_provider_endpoint_request(
-                        "openai",
-                        image(
-                            kind,
-                            json!({
-                                "model":"gpt-image-2", "session_id":"image-plan-session"
-                            }),
-                        ),
-                    ),
+                    request,
                     selection_attempt(
                         AccountAttemptContext::new(BTreeSet::new(), None, None),
                         mode,
@@ -221,7 +249,7 @@ async fn images_escape_free_session_bindings_while_search_remains_available() {
 }
 
 #[tokio::test]
-async fn image_plan_eligibility_tracks_account_updates_without_affecting_text() {
+async fn plan_eligibility_tracks_account_updates_without_affecting_text() {
     let server = MockServer::start().await;
     let store = Arc::new(MemoryAccountStore::default());
     oauth_account(&store, PLUS, Some("free")).await;
@@ -238,6 +266,7 @@ async fn image_plan_eligibility_tracks_account_updates_without_affecting_text() 
     );
     for plan in [
         Some("free"),
+        Some(" FrEe "),
         Some("plus"),
         Some("free"),
         None,
@@ -252,28 +281,27 @@ async fn image_plan_eligibility_tracks_account_updates_without_affecting_text() 
             })
             .await
             .unwrap();
-        let result = provider
-            .clone()
-            .execute(
-                planned_provider_endpoint_request(
-                    "openai",
-                    image(ImageRequestKind::Generation, json!({"model":"gpt-image-2"})),
-                ),
-                context("req_plan_change", CancellationToken::new()),
-            )
-            .await;
-        if plan == Some("free") {
-            let error = result.err().expect("Free must be excluded");
-            assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
-            assert_eq!(error.send_state(), UpstreamSendState::NotSent);
-        } else {
-            drop(result.expect("unknown plans are not inferred to be Free"));
+        for request in plan_restricted_requests(json!({"model":"gpt-image-2"})) {
+            let result = provider
+                .clone()
+                .execute(
+                    request,
+                    context("req_plan_change", CancellationToken::new()),
+                )
+                .await;
+            if matches!(plan, Some("free" | " FrEe ")) {
+                let error = result.err().expect("Free must be excluded");
+                assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
+                assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+            } else {
+                drop(result.expect("unknown plans are not inferred to be Free"));
+            }
         }
     }
 }
 
 #[tokio::test]
-async fn api_key_image_accounts_do_not_inherit_chatgpt_free_plan_restrictions() {
+async fn api_key_images_bypass_chatgpt_plan_but_live_requires_oauth() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[]})))
@@ -298,6 +326,17 @@ async fn api_key_image_accounts_do_not_inherit_chatgpt_free_plan_restrictions() 
         .await
         .unwrap();
     let provider = provider_with_base_url(&store, server.uri());
+    let error = provider
+        .clone()
+        .execute(
+            super::super::live::live_request_with_headers(Vec::new()),
+            context("req_api_key_live", CancellationToken::new()),
+        )
+        .await
+        .err()
+        .expect("Live requires OAuth even when API Key credentials are available");
+    assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
+    assert_eq!(error.send_state(), UpstreamSendState::NotSent);
     for kind in [ImageRequestKind::Generation, ImageRequestKind::Edit] {
         let mut stream = provider
             .clone()

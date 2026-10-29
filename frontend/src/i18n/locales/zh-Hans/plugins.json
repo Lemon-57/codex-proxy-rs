@@ -203,11 +203,9 @@
       "identityMappingDescription": "身份映射说明",
       "identityHelp": "身份标识必须与插件返回的值完全一致，同一身份只能映射一次",
       "keyHelp": "选择该身份使用的 API密钥，已停用或删除的 API密钥不会获得执行权限",
-      "reloadClientKey": "重新加载 API密钥",
       "addMapping": "添加映射",
       "identityMark": "身份标识",
       "identityPlaceholder": "填写插件返回的身份标识",
-      "failedToLoadTryAgain": "加载失败，请重试",
       "selectClientApiKey": "选择 API密钥",
       "noClientKeyYet": "暂无 API密钥",
       "removeIdentityMapping": "移除第 {value} 条身份映射"
@@ -305,7 +303,6 @@
       "pluginDataLoadingFailed": "插件数据加载失败"
     },
     "frame": {
-      "pluginPageCannotBeLoaded": "插件页面无法加载",
       "versionChanged": "插件页面版本已变更，正在刷新",
       "navigationBlocked": "插件页面尝试离开已隔离的管理文档，已停止加载",
       "invalidQueryParameter": "查询参数无效",
@@ -381,7 +378,6 @@
       "configurationDescription": "使用插件提供的功能，当前配置为「{name}」",
       "description": "加载已启用插件的管理页面",
       "unpublished": "该配置或页面未发布，可能已停用或切换版本",
-      "refreshFailed": "页面目录刷新失败，当前显示上次成功加载的版本：{loadError}",
       "loadingPage": "正在加载页面"
     },
     "refreshPage": "刷新页面",
@@ -392,7 +388,6 @@
       "multipleSelectionsAllowed": "{label}（可多选）",
       "unlimitedPlaceholder": "不限（可多选）",
       "loading": "正在加载",
-      "isTemporarilyUnavailable": "暂时无法获取{label}",
       "noMatches": "没有匹配项",
       "no": "暂无{label}",
       "createOneInFirst": "请先在{value}中创建"

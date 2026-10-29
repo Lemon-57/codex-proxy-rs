@@ -8,6 +8,8 @@ mod selection;
 mod selection_diagnostics;
 mod smart_scheduling;
 
+mod error_protection;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;

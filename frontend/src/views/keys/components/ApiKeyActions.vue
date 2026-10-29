@@ -12,6 +12,7 @@ defineProps<{
   deleting: boolean
   updatingStatus: boolean
   revealing: boolean
+  configuring: boolean
 }>()
 
 const emit = defineEmits<{
@@ -38,7 +39,7 @@ const { t } = useI18n({ useScope: 'global' })
     <ZIconButton
       size="small"
       :aria-label="t('keys.actions.useKey')"
-      :loading="revealing"
+      :loading="configuring"
       :disabled="revealing"
       @click.stop="emit('use', apiKey)"
     >

@@ -8,7 +8,7 @@ import type {
 } from '@/api'
 
 import { ZButton, ZFormItem, ZIconButton, ZInput, ZSegmented, ZSelect, ZSwitch } from '@codex-proxy/ui'
-import { Plus, RefreshCw, Trash2 } from '@lucide/vue'
+import { Plus, Trash2 } from '@lucide/vue'
 
 import { computed, shallowRef, watch } from 'vue'
 
@@ -291,9 +291,6 @@ defineExpose({ validationError })
             </PluginHelpPopover>
           </div>
           <div class="flex shrink-0 items-center gap-1">
-            <ZIconButton v-if="keysFailed" size="small" :aria-label="t('plugins.frontendAuth.reloadClientKey')" :disabled="disabled" :loading="loadingKeys" @click="loadClientKeys()">
-              <RefreshCw class="size-3.5" />
-            </ZIconButton>
             <ZButton
               size="small"
               :disabled="disabled || binding.identityBindings.length >= 256"
@@ -325,8 +322,8 @@ defineExpose({ validationError })
             <ZSelect
               :model-value="identity.clientKeyId"
               :options="keyOptions"
-              :disabled="disabled || loadingKeys"
-              :placeholder="loadingKeys ? t('common.status.loading') : keysFailed ? t('plugins.frontendAuth.failedToLoadTryAgain') : t('plugins.frontendAuth.selectClientApiKey')"
+              :disabled="disabled || loadingKeys || keysFailed"
+              :placeholder="loadingKeys ? t('common.status.loading') : t('plugins.frontendAuth.selectClientApiKey')"
               :empty-text="t('plugins.frontendAuth.noClientKeyYet')"
               class="w-full min-w-0"
               @update:model-value="updateIdentity(index, { clientKeyId: $event })"

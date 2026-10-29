@@ -61,7 +61,7 @@ Provider 固定为宿主内置的 OpenAI 与 xAI。宿主开放以下 11 类扩�
 | `middleware` | `PluginBuilder::middleware` / `middleware.handle` |
 | `upstream_adapter` | `methods::UPSTREAM_ADAPTER_REGISTER`、`methods::UPSTREAM_ADAPTER_EXECUTE`，见[受管上游](upstream-adapters.md) |
 | `model_router` | `methods::ROUTE_MODEL` |
-| `model_catalog` | `PluginBuilder::model_catalog` / `methods::MODEL_CATALOG_REGISTER` |
+| `model_catalog` | `PluginBuilder::model_catalog` / `methods::MODEL_CATALOG_REGISTER_V2` |
 | `retry_policy` | `methods::RETRY_DECISION` |
 | `scheduler` | `methods::SCHEDULE_ACCOUNT` |
 | `observer` | `methods::OBSERVE` / `observer.observe`，按事件类型订阅 |
@@ -345,6 +345,10 @@ let status = host.service::<SetResetCreditAutomation>((account_id, true)).await?
 插件改写后用于后续认证、版本检查、正文解压及执行；不新增设置业务的中间件入口。`timeout_ms` 使用宿主 HTTP 超时基线，
 插件可改写或用 `None` 清除；终端按有效值执行，不恢复宿主默认值。宿主快照不可用时 `settings` 为 `null`
 
+`POST /v1/chat/completions` 在 HTTP 挂载中保留 Chat 请求与 Chat JSON/SSE 响应视图，
+转换为 Responses 发生在内层模型入口。自行按 URI 筛选、改写或分派模型请求的 HTTP 插件，
+需要将该路径包含在自身匹配范围内；只匹配 `/v1/responses` 不会覆盖 Chat
+
 `HttpCall.settings_sources` 返回 `config_revision`、宿主 `host` 基线、运行设置的 `overrides`、Key 作用域的 `execution` 与 `http_timeout`。
 每条改写记录含 `instance_id`、`order` 和 `value`；来源由宿主记录，修改查询结果不会写入设置。
 宿主比较提交前后的值，仅记录实际改变的设置项；同值赋值不新增改写记录。每个顶层设置项整体替换，`false`、`0`、
@@ -469,6 +473,13 @@ Responses 终端重新解码插件正文时读取改写后的正文上限；atte
 更早的改写使用上述 HTTP 请求的 `settings`。`request.head.settings_sources` 使用相同的来源结构，`execution.input` 表示进入当前 Key 作用域时的有效值。
 原生 Responses WebSocket 每轮请求读取当前宿主快照，重新认证并解析 Key 策略，同时保留握手阶段的显式改写；已开始的执行保持自己的冻结值
 
+Chat Completions 在 request 与 attempt 挂载中使用规范化的 Responses 请求和响应正文，
+`request.head.endpoint` 仍为 `/v1/chat/completions`，`protocol` 仍为 `openai`。
+request 改写按 Responses 合同重新解码，响应先经过该合同的复核，再由 API 投影成 Chat 交给外层 HTTP 挂载。
+Chat 的下游流模式及 `include_usage` 由 API 持有，request 阶段不能切换已确定的下游流模式。
+同一边界的原样保留不要求 Chat 与 Responses 字节相同；需要读写 `messages` 或 `choices` 的插件应使用 HTTP 挂载，
+字段范围见 [Chat 合同](../../../../../docs/api.md#chat-completions-请求)
+
 中间件可读取和改写完整请求、响应 headers、正文与响应帧，也不按字段名称过滤认证、Cookie、会话或连接头。
 该能力遵循[完整信任](manifest.md#完整信任)边界；类型、HTTP 格式、大小及资源生命周期仍需符合合同
 
@@ -531,26 +542,30 @@ restore_and_validate_response(response).await
 
 ### 模型目录
 
-`model_catalog` v1 在 registration 阶段一次提交 `ModelCatalogRegistration { models: Vec<ModelAlias> }`，不需要请求级 binding。
-每条 `ModelAlias { id, provider, model }` 定义公开 ID、Provider 及直接上游目标，条目正确性由插件负责。
-每实例最多 256 条，整个二进制 JSON 最多 64 KiB；条目重复、目标不存在或 Provider 未注册不阻止宿主快照发布。
+`model_catalog` 仅支持 v2，在 registration 阶段通过 `model_catalog.register` 一次提交
+`ModelCatalogRegistrationV2 { aliases, models }`，不接受请求级 binding。
+返回值必须同时包含 `aliases` 和 `models`，没有对应条目时使用空数组。
+`aliases` 的每条 `ModelAlias { id, provider, model }` 定义公开 ID、Provider 及直接上游目标，条目正确性由插件负责。
+别名条目重复、目标不存在或 Provider 未注册不阻止宿主快照发布。
 请求按发布顺序取首个匹配条目，插件别名优先于静态映射，目标直接用于上游选路，不递归展开别名或目标上的静态映射
 
 ```rust,ignore
-use gateway_plugin_sdk::call::catalog::{ModelAlias, ModelCatalogRegistration};
+use gateway_plugin_sdk::call::catalog::{ModelAlias, ModelCatalogRegistrationV2};
 let plugin = PluginBuilder::from_json(include_bytes!("../plugin.json"))?
-    .model_catalog(ModelCatalogRegistration { models: vec![ModelAlias {
-        id: "team-default".into(), provider: "openai".into(), model: "gpt-target".into(),
-    }] })?
+    .model_catalog(ModelCatalogRegistrationV2 {
+        aliases: vec![ModelAlias {
+            id: "team-default".into(), provider: "openai".into(), model: "gpt-target".into(),
+        }],
+        models: vec![],
+    })?
     .build()?;
 ```
 
 有效目录、路由和目标能力随同一个不可变快照发布，`/v1/models`、详情、原生目录和 `host.models.list` 共用该事实及现有 Key／账号模型范围。
 目标存在时，别名复用目标的可公开对象；禁用后新请求不再使用该别名，在途请求持有旧代次。
-v1 是直接别名，动态选择可组合 `model_router`；实际路由仍须通过宿主的权限和能力校验，不提供多目标虚拟模型注册合同
+别名仅表达直接映射，动态选择可组合 `model_router`；实际路由仍须通过宿主的权限和能力校验，不提供多目标虚拟模型注册合同
 
-`model_catalog` v2 使用同一 RPC 方法，返回 `ModelCatalogRegistrationV2 { aliases, models }`。
-`aliases` 沿用 v1 直接别名语义；`models` 的每条 `AdaptedModel { id, adapter_id, features, max_output_tokens, presentation }`
+`models` 的每条 `AdaptedModel { id, adapter_id, features, max_output_tokens, presentation }`
 声明一个受管适配器提供的公开模型，不要求内置 Provider 的原生目录存在同名条目
 
 - `adapter_id` 必须指向同实例已绑定的 `upstream_adapter`，Provider 与非空账号集合取自该适配器声明
@@ -558,10 +573,10 @@ v1 是直接别名，动态选择可组合 `model_router`；实际路由仍须�
 - `features` 使用 `RequestFeature`，仅为生成操作声明工具、图片输入、推理或 JSON Schema 支持；没有声明的能力不能借用同名原生模型的支持事实
 - `presentation` 是独立通用画像，字段见 `call::catalog::ModelPresentation`；省略的布尔能力为 false，未声明推理档位不补猜
 - 同名条目可关联不同账号，但 Provider、能力及画像须一致，账号集合不能重叠，也不能与插件直接别名同名，以免展示与实际选择产生歧义
-- v2 仍受每实例合计 256 条、64 KiB 信封限制；目录与适配器随同一代次发布，账号最终资格取当前 Key、分组及账号模型政策的交集
+- 别名与适配模型每实例合计最多 256 条，注册响应载荷最多 64 KiB；目录与适配器随同一代次发布，账号最终资格取当前 Key、分组及账号模型政策的交集
 
-使用 `PluginBuilder::on(methods::MODEL_CATALOG_REGISTER_V2, handler)` 返回 `TypedReply<ModelCatalogRegistrationV2>`，
-并在清单声明 `model_catalog.version = 2`。原有 `.model_catalog(...)` 作者入口继续使用 v1 合同
+清单须显式声明 `model_catalog.version = 2`，可使用上述 `.model_catalog(...)` 固定目录，
+或通过 `PluginBuilder::on(methods::MODEL_CATALOG_REGISTER_V2, handler)` 返回 `TypedReply<ModelCatalogRegistrationV2>`。
 
 原生 Codex 目录成功返回后，宿主保留其中的完整对象，只追加可见且尚未出现的适配模型画像；原生读取错误仍向调用方返回错误。
 适配模型的 wire 模型名、协议编解码及摘要由插件负责，宿主只使用公开 ID、能力和账号范围参与现有选号，不生成请求正文或转换历史

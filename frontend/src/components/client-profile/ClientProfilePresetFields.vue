@@ -9,7 +9,6 @@ const props = withDefaults(defineProps<{
   presets: ClientProfilePreset[]
   preview?: ClientProfilePreview
   previewing: boolean
-  error: string
   disabled: boolean
   maxVersionLag?: number
 }>(), {
@@ -250,9 +249,6 @@ const userAgent = computed({
         autocomplete="off"
         class="font-mono"
       />
-      <p v-if="error" role="alert" class="m-0 text-cp-sm text-cp-error">
-        {{ error }}
-      </p>
     </template>
   </div>
 </template>

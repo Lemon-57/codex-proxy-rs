@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { XaiClientProfilePreview, XaiClientProfileSelection } from '@/api/modules/settings/profiles'
 
-import { ZButton, ZEmpty, ZFormItem, ZInput, ZSegmented, ZSelect } from '@codex-proxy/ui'
+import { ZFormItem, ZInput, ZSegmented, ZSelect } from '@codex-proxy/ui'
 import { computed, onMounted, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getXaiClientProfileOptions, previewXaiClientProfile } from '@/api/modules/settings/profiles'
+import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage } from '@/utils/operation'
 import ClientProfilePreviewPanel from './ClientProfilePreviewPanel.vue'
 
@@ -20,7 +21,6 @@ const model = defineModel<XaiClientProfileSelection | null>({ required: true })
 const globalConfiguration = shallowRef<XaiClientProfileSelection>()
 const preview = shallowRef<XaiClientProfilePreview>()
 const loadError = shallowRef('')
-const previewError = shallowRef('')
 const previewing = shallowRef(false)
 const needsVersionInput = computed(() => model.value?.versionMode === 'fixed' && !model.value.clientVersion)
 const fields = computed(() => ([
@@ -99,7 +99,6 @@ watch([
     return
   let cancelled = false
   preview.value = undefined
-  previewError.value = ''
   previewing.value = !needsVersionInput.value
   if (needsVersionInput.value)
     return
@@ -110,8 +109,12 @@ watch([
         preview.value = result
     }
     catch (error) {
-      if (!cancelled)
-        previewError.value = errorMessage(error)
+      if (!cancelled) {
+        ZNotification.error({
+          message: errorMessage(error),
+          deduplicate: true,
+        })
+      }
     }
     finally {
       if (!cancelled)
@@ -139,13 +142,6 @@ onMounted(() => props.allowInherit && void load())
       />
       <slot name="source-extra" />
     </div>
-    <ZEmpty v-if="loadError" :title="t('settings.clientProfile.loadFailed')" :description="loadError" size="small" surface="none" role="alert">
-      <template #action>
-        <ZButton size="small" @click="load">
-          {{ t('common.actions.retry') }}
-        </ZButton>
-      </template>
-    </ZEmpty>
     <template v-if="model">
       <div class="grid gap-4 sm:grid-cols-2">
         <ZFormItem :label="t('settings.clientProfile.clientType')">
@@ -164,6 +160,6 @@ onMounted(() => props.allowInherit && void load())
         </ZFormItem>
       </div>
     </template>
-    <ClientProfilePreviewPanel v-if="!loadError" :preview="preview" :previewing="previewing" :needs-version-input="needsVersionInput" :error="previewError" />
+    <ClientProfilePreviewPanel v-if="!loadError" :preview="preview" :previewing="previewing" :needs-version-input="needsVersionInput" />
   </div>
 </template>

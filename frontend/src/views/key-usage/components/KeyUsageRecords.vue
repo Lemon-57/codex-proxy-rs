@@ -18,7 +18,7 @@ import UsageTimeCell from '@/components/usage/UsageTimeCell.vue'
 import UsageTokenCell from '@/components/usage/UsageTokenCell.vue'
 import UsageTransportBadge from '@/components/usage/UsageTransportBadge.vue'
 
-defineProps<{ rows: KeyUsageRecord[], pagination: Pagination, loading: boolean, error: string, stale: boolean }>()
+defineProps<{ rows: KeyUsageRecord[], pagination: Pagination, loading: boolean }>()
 
 defineEmits<{ pageChange: [page: number], pageSizeChange: [size: number] }>()
 
@@ -37,11 +37,8 @@ const { visibleColumns, columnOptions, setColumnVisible, setColumnOrder, resetCo
         <ZTableColumnSettings :options="columnOptions" @change="setColumnVisible" @reorder="setColumnOrder" @reset="resetColumns" />
       </div>
     </template>
-    <p v-if="error || stale" role="status" class="mt-0 mb-3 text-cp-sm text-cp-error-text">
-      {{ error || t('usage.records.refreshFailed') }}
-    </p>
     <div class="flex h-120 min-h-0 overflow-hidden">
-      <ZTable class="min-w-0 flex-1" :columns="visibleColumns" :data="rows" :loading="loading" :empty-text="error ? t('usage.records.loadFailed') : t('usage.records.noRecordsMatchTheseFilters')">
+      <ZTable class="min-w-0 flex-1" :columns="visibleColumns" :data="rows" :loading="loading" :empty-text="t('usage.records.noRecordsMatchTheseFilters')">
         <template #model="{ row }">
           <UsageModelCell :record="row" />
         </template>

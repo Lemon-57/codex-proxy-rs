@@ -24,7 +24,6 @@
       "sessionExpired": "Your session has expired, sign in again",
       "operation": "Operation failed",
       "copy": "Failed to copy",
-      "load": "Failed to load",
       "malformedJson": "The request body is not valid JSON",
       "invalidTimeRange": "Invalid time range",
       "invalidCredentials": "Invalid sign-in credentials",
@@ -52,7 +51,6 @@
     "actions": {
       "copy": "Copy",
       "close": "Close",
-      "retry": "Retry",
       "cancel": "Cancel",
       "previous": "Previous",
       "reset": "Reset",

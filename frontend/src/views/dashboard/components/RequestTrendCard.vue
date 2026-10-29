@@ -99,9 +99,9 @@ const {
         <div class="relative h-55 w-full overflow-hidden">
           <BaseChart v-if="hasSamples" :option="chartOption" :height="220" />
           <ZEmpty
-            v-else-if="!loading"
+            v-else-if="!loading && !error"
             surface="none"
-            :title="error || t('dashboard.trends.empty')"
+            :title="t('dashboard.trends.empty')"
             class="h-full place-content-center"
           />
         </div>

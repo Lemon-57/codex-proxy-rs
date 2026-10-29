@@ -11,6 +11,7 @@ import {
 import { API_BASE_URL } from '@/api/constants'
 import { ApiError } from '@/api/request'
 import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage, generateRequestId } from '@/utils/operation'
 import { isPluginBridgeRequest, isRecord } from '../management/bridge-contract'
 import {
@@ -47,6 +48,10 @@ export function usePluginFrameSession(options: {
   const srcdoc = shallowRef('')
   const loading = shallowRef(false)
   const loadError = shallowRef('')
+  watch(loadError, (message) => {
+    if (message)
+      ZNotification.error({ message, deduplicate: true })
+  })
   const contentHeight = shallowRef(0)
   const session = shallowRef<FrameSession>()
   let loadController: AbortController | undefined
@@ -408,7 +413,6 @@ export function usePluginFrameSession(options: {
     loadError,
     contentHeight,
     frameKey,
-    loadPage,
     handleFrameLoad,
     pushLayout,
     pushTheme,

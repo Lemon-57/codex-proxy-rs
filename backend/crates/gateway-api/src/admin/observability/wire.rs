@@ -406,6 +406,7 @@ pub struct DashboardAccountUsageView {
     pub provider: String,
     pub authentication_kind: String,
     pub email: String,
+    pub notes: Option<String>,
     pub plan_type: Option<String>,
     pub plan_type_display: String,
     pub tokens: String,
@@ -648,6 +649,16 @@ pub struct OverviewHealthView {
     pub points: Vec<OverviewHealthPointView>,
 }
 
+/// 并发与调度等待的负载指标
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewLoadView {
+    pub average_concurrency: f64,
+    pub peak_concurrency: u64,
+    pub admission_decision_p95_ms: Option<f64>,
+    pub account_selection_wait_p95_ms: Option<f64>,
+}
+
 /// 洞察性能趋势点
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -660,15 +671,10 @@ pub struct OverviewPerformancePointView {
     pub first_token_p50_ms: Option<f64>,
     pub first_token_p95_ms: Option<f64>,
     pub first_token_p99_ms: Option<f64>,
-    pub admission_decision_p50_ms: Option<f64>,
-    pub admission_decision_p95_ms: Option<f64>,
-    pub account_selection_wait_p50_ms: Option<f64>,
-    pub account_selection_wait_p95_ms: Option<f64>,
     pub output_throughput_p10: Option<u64>,
     pub output_throughput_p50: Option<u64>,
     pub output_throughput_p90: Option<u64>,
-    pub capacity_utilization: Option<f64>,
-    pub capacity_utilization_p95: Option<f64>,
+    pub load: OverviewLoadView,
 }
 
 /// 洞察性能摘要
@@ -681,20 +687,10 @@ pub struct OverviewPerformanceView {
     pub first_token_p50_ms: Option<f64>,
     pub first_token_p95_ms: Option<f64>,
     pub first_token_p99_ms: Option<f64>,
-    pub admission_decision_p50_ms: Option<f64>,
-    pub admission_decision_p95_ms: Option<f64>,
-    pub account_selection_wait_p50_ms: Option<f64>,
-    pub account_selection_wait_p95_ms: Option<f64>,
     pub output_throughput_p10: Option<u64>,
     pub output_throughput_p50: Option<u64>,
     pub output_throughput_p90: Option<u64>,
-    pub capacity_utilization: Option<f64>,
-    pub capacity_utilization_p95: Option<f64>,
-    pub latency_coverage: f64,
-    pub first_token_coverage: f64,
-    pub admission_decision_coverage: f64,
-    pub account_selection_wait_coverage: f64,
-    pub capacity_coverage: f64,
+    pub load: OverviewLoadView,
     pub points: Vec<OverviewPerformancePointView>,
 }
 

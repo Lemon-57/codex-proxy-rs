@@ -1287,6 +1287,102 @@ async fn calendar_query_rejects_an_anchor_outside_the_local_calendar() {
 }
 
 #[tokio::test]
+async fn usage_insights_maps_load_summary_and_points_to_camel_case() {
+    use crate::admin::{AdminTestFixture, AdminTestState};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use chrono::Duration;
+    use gateway_admin::model::observability::{
+        Granularity, LatencyPercentiles, PercentileMilliseconds, RequestMetricPoint,
+        RequestMetrics, TimeRange, UsageConcurrencyPoint, UsageOverview,
+    };
+    use gateway_api::admin::observability;
+    use tower::ServiceExt as _;
+
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let now = Utc::now();
+    let range = TimeRange::new(now - Duration::minutes(15), now).unwrap();
+    let bucket = range.start;
+    {
+        let mut observations = fixture.observations.lock().unwrap();
+        observations.summary = Some(UsageOverview {
+            analytics: Default::default(),
+            range,
+            requests: RequestMetrics {
+                admission_decision_percentiles: LatencyPercentiles {
+                    p95_ms: Some(PercentileMilliseconds::new(12.5).unwrap()),
+                    ..Default::default()
+                },
+                account_selection_wait_percentiles: LatencyPercentiles {
+                    p95_ms: Some(PercentileMilliseconds::new(128.75).unwrap()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            attempts: Default::default(),
+            providers: Vec::new(),
+        });
+        observations.trend = Some(vec![RequestMetricPoint {
+            bucket_start: bucket,
+            granularity: Granularity::FifteenMinutes,
+            metrics: RequestMetrics {
+                admission_decision_percentiles: LatencyPercentiles {
+                    p95_ms: Some(PercentileMilliseconds::new(2.5).unwrap()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            cost_coverage: Default::default(),
+            costs: Vec::new(),
+        }]);
+        observations.concurrency = vec![UsageConcurrencyPoint {
+            bucket_start: bucket,
+            average_concurrency: 1.25,
+            peak_concurrency: 3,
+        }];
+    }
+
+    let response = observability::router::<AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/usage/insights/overview")
+                .header(header::COOKIE, "cpr_session=valid-session")
+                .header("x-request-id", "req_usage_insights_load")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let performance = &value["data"]["performance"];
+    assert_eq!(
+        performance["load"],
+        json!({
+            "averageConcurrency": 1.25,
+            "peakConcurrency": 3,
+            "admissionDecisionP95Ms": 12.5,
+            "accountSelectionWaitP95Ms": 128.75,
+        })
+    );
+    assert_eq!(
+        performance["points"][0]["load"],
+        json!({
+            "averageConcurrency": 1.25,
+            "peakConcurrency": 3,
+            "admissionDecisionP95Ms": 2.5,
+            "accountSelectionWaitP95Ms": null,
+        })
+    );
+}
+
+#[tokio::test]
 async fn observability_queries_reject_group_filters_and_analytics_search() {
     use crate::admin::{AdminTestFixture, AdminTestState};
     use axum::{
@@ -1511,6 +1607,7 @@ async fn dashboard_summary_should_identify_metrics_without_localized_labels() {
                 authentication_kind: "oauth".to_owned(),
                 name: account_id.clone(),
                 email: None,
+                notes: None,
                 plan_type: None,
                 plan_type_display: None,
                 request_count: 10,
@@ -1709,6 +1806,7 @@ async fn dashboard_relative_time_preserves_server_anchor_boundaries_and_deployme
                     authentication_kind: "oauth".to_owned(),
                     name: "Relative time fixture".to_owned(),
                     email: None,
+                    notes: None,
                     plan_type: None,
                     plan_type_display: None,
                     request_count: 1,

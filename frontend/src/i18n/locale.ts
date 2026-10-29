@@ -12,25 +12,6 @@ export function isLocale(value: unknown): value is Locale {
   return localeOptions.some(option => option.value === value)
 }
 
-export function normalizeLocale(language: string): Locale {
-  try {
-    const { language: base, script, region } = new Intl.Locale(language)
-    if (base === 'zh') {
-      if (script === 'Hant')
-        return 'zh-Hant'
-      if (script === 'Hans')
-        return 'zh-Hans'
-      return region && ['TW', 'HK', 'MO'].includes(region)
-        ? 'zh-Hant'
-        : 'zh-Hans'
-    }
-  }
-  catch {
-    // 无效的浏览器语言使用应用默认语言
-  }
-  return 'en'
-}
-
 export function readInitialLocale(): Locale {
   try {
     const saved = localStorage.getItem(storageKey)
@@ -38,9 +19,9 @@ export function readInitialLocale(): Locale {
       return saved
   }
   catch {
-    // 存储不可用时继续使用浏览器语言
+    // 存储不可用时使用默认语言
   }
-  return normalizeLocale(navigator.language)
+  return 'zh-Hans'
 }
 
 export function applyLocale(value: string): void {

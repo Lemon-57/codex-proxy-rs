@@ -294,7 +294,7 @@ impl PgObservabilityRepository {
                 "load usage insights snapshot",
                 |mut connection| async move {
                     let mut snapshot = analytics::AnalyticsSnapshot::new(&mut connection).await?;
-                    let (mut overview, trend, costs) = snapshot
+                    let (mut overview, trend, costs, concurrency) = snapshot
                         .insights(range, &filter, granularity, self.timezone)
                         .await?;
                     overview.analytics = snapshot.metadata();
@@ -303,6 +303,7 @@ impl PgObservabilityRepository {
                         overview: admin_usage_overview(overview),
                         trend: trend.into_iter().map(admin_request_metric_point).collect(),
                         costs,
+                        concurrency,
                     })
                 },
             )

@@ -61,7 +61,7 @@ const {
   createdKey,
   showImportKeyModal,
   selectedImportKey,
-  revealingKeyIds,
+  revealingKeys,
   openAiBaseUrl,
   showCreatedKey,
   clearCreatedKey,
@@ -164,7 +164,8 @@ watch(
             <template #prefix="{ row }">
               <ApiKeyPrefixCell
                 :prefix="row.prefix"
-                :revealing="revealingKeyIds.has(row.id)"
+                :revealing="revealingKeys.has(row.id)"
+                :copying="revealingKeys.get(row.id) === 'copy'"
                 @copy="copyApiKey(row)"
               />
             </template>
@@ -200,7 +201,8 @@ watch(
               <ApiKeyActions
                 :api-key="row"
                 :deleting="deletingKey"
-                :revealing="revealingKeyIds.has(row.id)"
+                :revealing="revealingKeys.has(row.id)"
+                :configuring="revealingKeys.get(row.id) === 'use'"
                 :updating-status="updatingStatusKeyIds.has(row.id)"
                 @edit="openEdit"
                 @reset-budget="openBudgetReset"

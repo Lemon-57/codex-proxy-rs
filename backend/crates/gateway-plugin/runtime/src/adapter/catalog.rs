@@ -14,10 +14,7 @@ use gateway_core::{
 };
 use gateway_plugin_sdk::{
     Capability, Manifest, Stage,
-    call::{
-        catalog::{ModelCatalogRegistration, ModelCatalogRegistrationV2},
-        middleware::RequestFeature,
-    },
+    call::{catalog::ModelCatalogRegistrationV2, middleware::RequestFeature},
 };
 
 use crate::RpcSession;
@@ -52,15 +49,8 @@ pub(crate) async fn prepare(
     if reply.payload.len() > 64 * 1024 {
         return Err(AdminError::invalid("插件模型目录信封无效或过大"));
     }
-    let (aliases, models) = if manifest.contributes[&Capability::ModelCatalog].version == 2 {
-        let registration: ModelCatalogRegistrationV2 = serde_json::from_slice(&reply.payload)
-            .map_err(|_| AdminError::invalid("插件模型目录声明无效"))?;
-        (registration.aliases, registration.models)
-    } else {
-        let registration: ModelCatalogRegistration = serde_json::from_slice(&reply.payload)
-            .map_err(|_| AdminError::invalid("插件模型目录声明无效"))?;
-        (registration.models, Vec::new())
-    };
+    let ModelCatalogRegistrationV2 { aliases, models } = serde_json::from_slice(&reply.payload)
+        .map_err(|_| AdminError::invalid("插件模型目录声明无效"))?;
     if aliases.len().saturating_add(models.len()) > 256 {
         return Err(AdminError::invalid("单个插件最多贡献 256 个模型条目"));
     }

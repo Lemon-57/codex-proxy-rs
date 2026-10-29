@@ -141,14 +141,15 @@ async fn connect(
         .map_err(|source| redis_unavailable("connect Redis manager", source))?;
 
     let account_state_notifications = gateway_core::account::AccountStateNotifications::default();
-    let provider_accounts = Arc::new(
-        postgres::PgProviderAccountRepository::new(pool.clone())
-            .with_state_notifications(account_state_notifications.clone()),
-    );
     let cooldowns = Arc::new(redis::RedisCredentialCooldownRepository::new(
         redis_connection.clone(),
         REDIS_NAMESPACE,
     )?);
+    let provider_accounts = Arc::new(
+        postgres::PgProviderAccountRepository::new(pool.clone())
+            .with_account_error_protection(cooldowns.clone())
+            .with_state_notifications(account_state_notifications.clone()),
+    );
     let account_store: Arc<dyn ProviderAccountStore> = provider_accounts;
 
     let credential_leases =
@@ -273,6 +274,7 @@ async fn connect(
         Arc::new(client_key_usage),
         diagnostics.clone(),
     )
+    .with_account_error_protection(cooldowns.clone())
     .with_budget(Arc::new(budgets))
     .with_session_affinity(Arc::clone(&provider_session_affinity))
     .with_client_retry_store(Arc::new(redis::RedisClientRetryRepository::new(

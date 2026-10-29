@@ -61,21 +61,21 @@
     },
     "performance": {
       "ttftHelp": "TTFT：首个 Token 耗时",
-      "scheduling": "调度",
+      "concurrency": "并发",
+      "averageConcurrency": "平均并发",
+      "peakConcurrency": "峰值并发",
+      "load": "负载",
+      "waitTime": "耗时",
       "admissionP95": "准入 P95",
-      "accountSelectionP95": "选号 P95",
-      "capacityP95": "容量 P95",
-      "decisionCoverage": "判定覆盖",
-      "accountSelectionCoverage": "选号覆盖",
-      "capacityCoverage": "容量覆盖",
+      "accountSelectionP95": "选号等待 P95",
       "title": "响应性能",
-      "description": "延迟、速率与调度分位",
+      "description": "总耗时、首个 Token 耗时、速率与负载",
       "performanceIndicators": "性能指标",
       "loading": "正在加载性能数据",
       "noTtftSamples": "当前范围暂无 TTFT 样本",
       "noThroughput": "当前范围暂无速率样本",
-      "noScheduling": "当前范围暂无调度或容量样本",
-      "noLatency": "当前范围暂无延迟样本"
+      "noLatency": "当前范围暂无延迟样本",
+      "noLoad": "当前范围暂无负载数据"
     },
     "reasoning": {
       "subagentRequest": "子代理请求",
@@ -119,7 +119,7 @@
       "subscription": "订阅",
       "platformType": "平台"
     },
-    "outputThroughput": "输出速率",
+    "outputThroughput": "速率",
     "noValidSample": "无有效样本",
     "notReachable": "不可达",
     "unstable": "不稳定",
@@ -185,8 +185,6 @@
     "records": {
       "requestLog": "请求日志",
       "currentRequestRecord": "当前请求记录",
-      "refreshFailed": "请求日志刷新失败，暂时保留上次结果",
-      "loadFailed": "请求日志加载失败，请点击顶部刷新重试",
       "noRecordsMatchTheseFilters": "所选条件下暂无记录"
     },
     "page": {
@@ -197,13 +195,10 @@
       "changesInUsageOverTime": "用量随时间的变化",
       "requestHealthTimeline": "请求健康时间线",
       "updated": "更新于 {asOfDisplay}",
-      "temporarilyRetainLastResult": "，暂时保留上次结果",
-      "clickRefreshAtTopToTryAgain": "，请点击顶部刷新重试",
       "description": "查看请求用量、性能趋势与调用错误记录",
       "dateRangeLabel": "统计日期范围，仅可选择最近 31 天",
       "requestDetails": "请求记录",
       "recordsDescription": "成功请求与失败请求记录",
-      "failedToLoad": "加载失败：{error}",
       "noRequestsMatchTheseFilters": "所选条件下暂无请求记录",
       "viewErrorDetails": "查看错误详情",
       "viewUsageRecordDetails": "查看使用记录详情"

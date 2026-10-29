@@ -40,8 +40,6 @@
     "today": "Today's statistics",
     "refresh": {
       "action": "Refresh overview",
-      "failed": "Refresh failed, showing the last available statistics",
-      "unavailable": "Statistics temporarily unavailable, try again later",
       "lastUpdated": "Refreshes every 30 seconds, last refreshed {updatedAt}",
       "waiting": "Refreshes every 30 seconds, waiting for the first update",
       "interval": "Refreshes every 30 s"

@@ -65,7 +65,7 @@ pub(super) async fn required_credential(
         .credential_details(provider_kind, account_id)
         .await
         .map_err(|error| map_store_error(error, resource))?
-        .ok_or_else(|| AdminError::not_found("Provider 凭据不存在"))
+        .ok_or_else(|| AdminError::not_found("服务商凭据不存在"))
 }
 
 pub(super) async fn required_plugin_credential(
@@ -77,7 +77,7 @@ pub(super) async fn required_plugin_credential(
         .credential_details_by_id(account_id)
         .await
         .map_err(|error| map_store_error(error, resource))?
-        .ok_or_else(|| AdminError::not_found("Provider 凭据不存在"))
+        .ok_or_else(|| AdminError::not_found("服务商凭据不存在"))
 }
 
 pub(super) async fn import_proxy_binding(
@@ -156,7 +156,7 @@ pub(super) fn validate_prepared_import(
             .iter()
             .any(|credential| credential.provider_kind != *provider_kind)
     {
-        return Err(AdminError::conflict("Provider 准备结果与请求范围不一致"));
+        return Err(AdminError::conflict("服务商返回的凭据与请求范围不符"));
     }
     Ok(())
 }
@@ -176,7 +176,7 @@ pub(super) fn validate_prepared_rotation_facts(
     if facts.account_id.as_str() != account.id.as_str()
         || facts.provider_kind != account.provider_kind
     {
-        return Err(AdminError::conflict("Provider 准备结果与当前凭据不一致"));
+        return Err(AdminError::conflict("凭据处理结果与当前凭据不符"));
     }
     Ok(())
 }

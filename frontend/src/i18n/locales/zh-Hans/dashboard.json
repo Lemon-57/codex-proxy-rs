@@ -40,8 +40,6 @@
     "today": "当日统计",
     "refresh": {
       "action": "刷新概览",
-      "failed": "刷新失败，显示上次统计",
-      "unavailable": "统计暂不可用，请稍后重试",
       "lastUpdated": "自动刷新 30 秒，最近刷新 {updatedAt}",
       "waiting": "自动刷新 30 秒，等待首次刷新",
       "interval": "自动刷新 30 秒"

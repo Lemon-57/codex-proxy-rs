@@ -54,7 +54,7 @@ const items = computed(() => props.windows.map((window) => {
 <template>
   <section class="grid min-w-0 gap-2">
     <h4
-      v-if="grouped && label"
+      v-if="grouped && label && windows[0]?.limitId !== 'codex'"
       class="m-0 truncate text-cp-xs leading-4 font-heavy text-cp-text-secondary"
       :title="label"
     >

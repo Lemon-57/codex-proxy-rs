@@ -69,10 +69,10 @@ impl LiveClaimError {
 
     fn message(self) -> &'static str {
         match self {
-            Self::Missing => "codex live call not found",
-            Self::Busy => "codex live call already has a sideband connection",
-            Self::OwnerMismatch => "codex live call is outside the current API key scope",
-            Self::Invalid => "invalid codex live call id",
+            Self::Missing => "The voice call was not found or has expired.",
+            Self::Busy => "The voice call already has an active event connection.",
+            Self::OwnerMismatch => "This API key cannot access the voice call.",
+            Self::Invalid => "The voice call ID is invalid.",
         }
     }
 }
@@ -252,10 +252,7 @@ impl CodexProvider {
                 request_url: &self.live_calls_url,
                 attempt: &context,
                 session_affinity: session_affinity.as_ref(),
-                model: CodexSelectionModel::Requested(upstream_model.as_str()),
-                // realtime calls 端点绑定 ChatGPT OAuth 身份；在候选阶段就排除
-                // API Key 账号，避免混合账号池选中不支持语音的账号后必然失败。
-                requires_oauth: true,
+                model: CodexSelectionModel::Live(upstream_model.as_str()),
             })
             .await
             .map_err(map_selection_error)?;
@@ -346,6 +343,7 @@ impl CodexProvider {
                 provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent)
             })?,
         )
+        .with_credential_revision(lease.account().revision())
         .with_account_snapshot(Some(
             gateway_core::account::AccountHistorySnapshot::from_account(lease.account()),
         ))
@@ -419,14 +417,12 @@ fn cold_live_call_stream(request: ColdLiveCall) -> EventStream {
         let client = request.client.with_request_profile(profile.clone());
         let allows_account_state_mutation = request.lease.allows_account_state_mutation();
         let failure_context = OpenAiFailureContext {
-            request_id: request.context.request_id().as_str(),
             client: &client,
             selector: &request.selector,
             quota: &request.quota,
             response_origin: &request.response_origin,
             cyber_policy_scope: None,
             allows_account_state_mutation,
-            allows_capacity_feedback: !request.context.is_diagnostic_required_account(),
         };
         let active_account = request.lease.account().clone();
         let authorization = request
@@ -566,23 +562,29 @@ impl CodexLiveGateway {
             .store()
             .get_account(account_id)
             .await
-            .map_err(|_| credential_unavailable("codex live pinned account is unavailable"))?
-            .ok_or_else(|| credential_unavailable("codex live pinned account is unavailable"))?;
+            .map_err(|_| credential_unavailable("The account for this voice call is unavailable."))?
+            .ok_or_else(|| {
+                credential_unavailable("The account for this voice call is unavailable.")
+            })?;
         if account.authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH {
             return Err(LiveGatewayError::new(
                 LiveGatewayErrorKind::Unsupported,
-                "codex live requires an OAuth codex account",
+                "Voice calls require an OpenAI OAuth account.",
             ));
         }
         let credential = self
             .repository
             .load_runtime_credential(&account)
             .await
-            .map_err(|_| credential_unavailable("codex live pinned credential is unavailable"))?;
+            .map_err(|_| {
+                credential_unavailable("The credentials for this voice call are unavailable.")
+            })?;
         let authorization = credential
             .authentication
             .authorization_header()
-            .map_err(|_| credential_unavailable("codex live pinned credential is unusable"))?;
+            .map_err(|_| {
+                credential_unavailable("The credentials for this voice call are invalid.")
+            })?;
         Ok((account, authorization, credential.installation_id))
     }
 
@@ -612,9 +614,9 @@ fn map_sideband_dial_error(error: CodexWebSocketExchangeError) -> LiveGatewayErr
             )
             .with_upstream(upstream.status_code, body)
         }
-        other => LiveGatewayError::new(
-            LiveGatewayErrorKind::UpstreamUnavailable,
-            format!("codex live sideband upstream unavailable: {other}"),
+        other => local_live_error(
+            CodexClientError::WebSocket(other),
+            "The voice connection could not be established.",
         ),
     }
 }
@@ -641,11 +643,21 @@ fn map_live_http_error(error: CodexClientError) -> LiveGatewayError {
             ),
         )
         .with_upstream(status.as_u16(), Some(Bytes::from(body))),
-        other => LiveGatewayError::new(
-            LiveGatewayErrorKind::UpstreamUnavailable,
-            format!("codex live upstream call failed: {other}"),
-        ),
+        other => local_live_error(other, "The voice call request could not be completed."),
     }
+}
+
+fn local_live_error(error: CodexClientError, message: &'static str) -> LiveGatewayError {
+    // 本地传输异常可能包含 URL 或代理上下文；客户端提示与现有安全诊断各自保留
+    if let Some(diagnostic) = super::failure::client_diagnostic(&error) {
+        tracing::warn!(
+            stage = diagnostic.stage(),
+            code = diagnostic.code(),
+            detail = diagnostic.as_str(),
+            "Codex Live request failed"
+        );
+    }
+    LiveGatewayError::new(LiveGatewayErrorKind::UpstreamUnavailable, message)
 }
 
 impl LiveGateway for CodexLiveGateway {
@@ -671,7 +683,7 @@ impl LiveGateway for CodexLiveGateway {
             if !account.enabled() {
                 return Err(LiveGatewayError::new(
                     LiveGatewayErrorKind::OwnerMismatch,
-                    "codex live pinned account is disabled",
+                    "The account for this voice call is disabled.",
                 ));
             }
             let endpoint = Self::sideband_endpoint(request.style, request.call_id);
@@ -736,7 +748,7 @@ impl LiveGateway for CodexLiveGateway {
                 .map_err(|_| {
                     LiveGatewayError::new(
                         LiveGatewayErrorKind::CredentialUnavailable,
-                        "codex live hangup account client is unavailable",
+                        "The account connection for this voice call is unavailable.",
                     )
                 })?;
             let request_id = Uuid::new_v4().to_string();

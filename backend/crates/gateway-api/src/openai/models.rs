@@ -72,7 +72,7 @@ async fn models_response(
         {
             return openai_error_response(
                 StatusCode::BAD_REQUEST,
-                "Invalid client_version",
+                "Invalid client_version.",
                 "invalid_request_error",
                 "invalid_client_version",
             )
@@ -134,7 +134,7 @@ async fn models_response(
 fn catalog_unavailable_response() -> Response {
     openai_error_response(
         StatusCode::SERVICE_UNAVAILABLE,
-        "Model catalog is temporarily unavailable",
+        "Model catalog is temporarily unavailable.",
         "server_error",
         "model_catalog_unavailable",
     )

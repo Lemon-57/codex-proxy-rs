@@ -265,7 +265,9 @@ function costAmount(value: string | null, pointIndex: number) {
     class="@container/cost min-h-90 xl:h-full"
   >
     <template #actions>
-      <ZSegmented v-model="activeView" :aria-label="t('usage.cost.costView')" :options="viewOptions" :disabled="loading" />
+      <div class="flex justify-end">
+        <ZSegmented v-model="activeView" :aria-label="t('usage.cost.costView')" :options="viewOptions" :disabled="loading" />
+      </div>
     </template>
 
     <template #body>

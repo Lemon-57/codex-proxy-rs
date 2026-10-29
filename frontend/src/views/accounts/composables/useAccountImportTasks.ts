@@ -3,6 +3,7 @@ import { computed, onMounted, onScopeDispose, shallowRef, watch } from 'vue'
 import { getAccountImportTask, getAccountImportTasks, stopAccountImportTask } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage } from '@/utils/operation'
 
 export function useAccountImportTasks(options: { reload: () => Promise<unknown> }) {
@@ -60,8 +61,12 @@ export function useAccountImportTasks(options: { reload: () => Promise<unknown> 
       error.value = ''
     }
     catch (cause) {
-      if (!current.signal.aborted)
-        error.value = errorMessage(cause, t('accounts.importTasks.progressReadingFailedTryAgain'))
+      if (!current.signal.aborted) {
+        const message = errorMessage(cause, t('accounts.importTasks.progressReadingFailedTryAgain'))
+        if (open.value && (!background || error.value !== message))
+          ZNotification.error({ message, deduplicate: true })
+        error.value = message
+      }
     }
     finally {
       if (!current.signal.aborted && !disposed) {

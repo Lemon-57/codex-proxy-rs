@@ -212,20 +212,27 @@ async fn composed_plugin_registers_and_dispatches_multiple_typed_entries() {
 #[tokio::test]
 async fn catalog_and_retry_entries_use_typed_registration_and_stage_validation() {
     use gateway_plugin_sdk::call::{
-        catalog::{ModelAlias, ModelCatalogRegistration},
+        catalog::{AdaptedModel, ModelAlias, ModelCatalogRegistrationV2, ModelPresentation},
         policy::{RetryAction, RetryDecision, RetryDecisionRequest},
     };
     let source = author_manifest(
-        json!({"model_catalog":{},"retry_policy":{"version":2}}),
+        json!({"model_catalog":{"version":2},"retry_policy":{"version":2}}),
         json!([]),
     );
     let manifest = gateway_plugin_sdk::Manifest::from_author_slice(&source).unwrap();
     let contributions = manifest.contributes.clone();
-    let catalog = ModelCatalogRegistration {
-        models: vec![ModelAlias {
+    let catalog = ModelCatalogRegistrationV2 {
+        aliases: vec![ModelAlias {
             id: "public-model".into(),
             provider: "openai".into(),
             model: "upstream-model".into(),
+        }],
+        models: vec![AdaptedModel {
+            id: "adapted-model".into(),
+            adapter_id: "example".into(),
+            features: vec![],
+            max_output_tokens: None,
+            presentation: ModelPresentation::default(),
         }],
     };
     let plugin = PluginBuilder::from_manifest(manifest)
@@ -257,7 +264,7 @@ async fn catalog_and_retry_entries_use_typed_registration_and_stage_validation()
     let (result, payload) = unwrap_result(receive(&mut host).await, 1);
     assert_eq!(result, json!({}));
     assert_eq!(
-        serde_json::from_slice::<ModelCatalogRegistration>(&payload).unwrap(),
+        serde_json::from_slice::<ModelCatalogRegistrationV2>(&payload).unwrap(),
         catalog
     );
     let request = serde_json::to_value(RetryDecisionRequest {

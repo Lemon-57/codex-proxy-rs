@@ -137,6 +137,7 @@ fn capability_contract_versions_are_checked_independently_of_rpc_version() {
         (Capability::Management, Stage::Management, 2, false),
         (Capability::UpstreamAdapter, Stage::Upstream, 5, true),
         (Capability::Scheduler, Stage::Scheduling, 3, false),
+        (Capability::ModelCatalog, Stage::Registration, 2, false),
     ] {
         for mut manifest in [source_manifest(), packaged_manifest()] {
             let formats = if needs_formats {

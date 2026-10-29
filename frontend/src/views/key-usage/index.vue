@@ -15,8 +15,8 @@ import { useKeyUsage } from './composables/useKeyUsage'
 
 const { t } = useI18n({ useScope: 'global' })
 
-const { period, model, kind, refreshInterval, overview, overviewLoading, overviewError, refreshing, recordsStale, records, refresh, changePageSize, changePage } = useKeyUsage()
-const { items, currentPage, pageSize, total, loading: recordsLoading, error: recordsError } = records
+const { period, model, kind, refreshInterval, overview, overviewLoading, refreshing, records, refresh, changePageSize, changePage } = useKeyUsage()
+const { items, currentPage, pageSize, total, loading: recordsLoading } = records
 const { showConfig, configKey, configuring, apiBaseUrl, openConfig, copyConfig } = useKeyConfig()
 </script>
 
@@ -35,9 +35,6 @@ const { showConfig, configKey, configuring, apiBaseUrl, openConfig, copyConfig }
             </ZInput>
           </div>
         </div>
-        <p v-if="overviewError" role="alert" class="m-0 rounded-cp-lg bg-cp-error-container px-4 py-3 text-cp-sm text-cp-error-text">
-          {{ overviewError }}{{ overview ? t('usage.page.temporarilyRetainLastResult') : t('usage.page.clickRefreshAtTopToTryAgain') }}
-        </p>
         <template v-if="overview">
           <KeyUsageSummary :summary="overview.summary" />
           <div class="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(400px,1fr)]">
@@ -47,7 +44,7 @@ const { showConfig, configKey, configuring, apiBaseUrl, openConfig, copyConfig }
           <RequestHealthTimelineCard :timeline="overview.healthTimeline" />
         </template>
         <KeyUsageSkeleton v-else-if="overviewLoading" />
-        <KeyUsageRecords v-model:kind="kind" :rows="items" :pagination="{ currentPage, pageSize, total }" :loading="recordsLoading" :error="recordsError" :stale="recordsStale" @page-change="changePage" @page-size-change="changePageSize" />
+        <KeyUsageRecords v-model:kind="kind" :rows="items" :pagination="{ currentPage, pageSize, total }" :loading="recordsLoading" @page-change="changePage" @page-size-change="changePageSize" />
       </div>
     </ZScrollbar>
     <ApiKeyConfigModal v-model="showConfig" :title="t('usage.header.keyConfiguration')" :api-key="configKey" :api-base-url="apiBaseUrl" @copy="copyConfig" @after-leave="configKey = null" />

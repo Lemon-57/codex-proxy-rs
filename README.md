@@ -17,7 +17,7 @@
 </div>
 
 > [!NOTE]
-> 本项目提供 Responses API，不支持 `/v1/chat/completions`，接入前请确认客户端支持 Responses 协议
+> 本项目提供 Responses API 和 Chat Completions API；Chat Completions 请求通过 Responses 链路执行，支持范围见 [API 参考](docs/api.md#chat-completions-请求)
 
 ## 快速预览
 
@@ -97,7 +97,7 @@ API Key 持有者可在登录页切换身份，查看自己的用量与额度，
 
 完整步骤、生图配置与排障见[客户端配置](deploy/README.md#客户端配置)
 
-**其他 Responses API 客户端**：填写以下信息：
+**其他 Responses / Chat Completions API 客户端**：填写以下信息：
 
 | 配置 | 值 |
 | --- | --- |

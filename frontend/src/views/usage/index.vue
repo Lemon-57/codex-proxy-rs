@@ -48,7 +48,6 @@ const {
   providerQuery,
   usagePagination,
   loading,
-  error,
   analyticsLoading,
   records,
   summary,
@@ -152,7 +151,7 @@ watch(timeRange, () => {
               :columns="visibleColumns"
               :rows="records"
               :loading="loading"
-              :empty-text="error ? t('usage.page.failedToLoad', { error }) : t('usage.page.noRequestsMatchTheseFilters')"
+              :empty-text="t('usage.page.noRequestsMatchTheseFilters')"
             >
               <template #actions="{ row }">
                 <div class="flex items-center justify-start">

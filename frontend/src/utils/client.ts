@@ -17,22 +17,25 @@ model = "${CODEX_DEFAULT_MODEL}"
 review_model = "${CODEX_DEFAULT_MODEL}"
 model_reasoning_effort = "max"
 service_tier = "default"
+# 语音通话控制地址
+experimental_realtime_ws_base_url = ${JSON.stringify(baseUrl)}
 
 [model_providers.OpenAI]
 name = "OpenAI"
 base_url = ${JSON.stringify(baseUrl)}
+model_catalog_url = ${JSON.stringify(`${baseUrl}/models`)}
 wire_api = "responses"
 supports_websockets = ${websocketEnabled}
 requires_openai_auth = false
-# 代理密钥仅用于网关鉴权，真实账号登录状态由服务端管理
+# 代理密钥
 experimental_bearer_token = ${JSON.stringify(input.apiKey)}
 
 [model_providers.OpenAI.capabilities]
-# Codex 0.162.0+ 显式启用 V2 远程压缩，不依赖 Provider 名称识别
+# V2 远程压缩
 remote_compaction = "v2"
 
 [model_providers.OpenAI.http_headers]
-# 声明服务端托管认证，让官方客户端启用原生生图，该标记不是密钥
+# 服务端托管认证
 X-OpenAI-Actor-Authorization = "proxy-managed"
 
 [features]

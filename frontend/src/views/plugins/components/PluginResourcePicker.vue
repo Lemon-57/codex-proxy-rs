@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ZButton, ZEmpty, ZSelect } from '@codex-proxy/ui'
-import { CircleAlert, LoaderCircle } from '@lucide/vue'
+import { ZEmpty, ZSelect } from '@codex-proxy/ui'
+import { LoaderCircle } from '@lucide/vue'
 
 import { computed, onScopeDispose, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -103,8 +103,8 @@ onScopeDispose(() => controller?.abort())
     collapse-tags-tooltip
     :max-collapse-tags="maxCollapseTags"
     :filterable="choices.length > 6"
-    :loading="loading || Boolean(error)"
-    :disabled="disabled"
+    :loading="loading"
+    :disabled="disabled || Boolean(error)"
     :aria-label="t('plugins.resources.multipleSelectionsAllowed', { label })"
     :placeholder="t('plugins.resources.unlimitedPlaceholder')"
     class="w-full min-w-0"
@@ -115,15 +115,8 @@ onScopeDispose(() => controller?.abort())
           <LoaderCircle :size="18" class="animate-spin text-cp-text-quaternary motion-reduce:animate-none" />
         </template>
       </ZEmpty>
-      <ZEmpty v-else-if="error" :title="t('common.errors.load')" :description="t('plugins.resources.isTemporarilyUnavailable', { label })" :icon="CircleAlert" size="small" surface="none" role="alert">
-        <template #action>
-          <ZButton size="small" :disabled="disabled" @click="load">
-            {{ t('common.actions.retry') }}
-          </ZButton>
-        </template>
-      </ZEmpty>
       <ZEmpty
-        v-else
+        v-else-if="!error"
         :title="search ? t('plugins.resources.noMatches') : t('plugins.resources.no', { label })"
         :description="search ? undefined : t('plugins.resources.createOneInFirst', { value: kind === 'keys' ? t('navigation.apiKeys') : t('navigation.groups') })"
         size="small"

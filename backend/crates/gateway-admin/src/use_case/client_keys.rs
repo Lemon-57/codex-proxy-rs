@@ -94,7 +94,7 @@ impl ClientKeyService for DefaultClientKeyService {
             .get_client_key(id)
             .await
             .map_err(|error| map_store_error(error, "client API key"))?
-            .ok_or_else(|| AdminError::not_found("Client API Key 不存在"))
+            .ok_or_else(|| AdminError::not_found("API Key 不存在"))
     }
 
     async fn budget(&self, id: &ClientApiKeyId) -> Result<ClientBudgetStatus, AdminError> {
@@ -149,7 +149,7 @@ impl ClientKeyService for DefaultClientKeyService {
             .reveal_client_key(id)
             .await
             .map_err(|error| map_store_error(error, "client API key"))?
-            .ok_or_else(|| AdminError::not_found("Client API Key 不存在"))
+            .ok_or_else(|| AdminError::not_found("API Key 不存在"))
     }
 
     async fn create(
@@ -158,7 +158,7 @@ impl ClientKeyService for DefaultClientKeyService {
         command: CreateClientKey,
     ) -> Result<CreatedClientKey, AdminError> {
         crate::model::client_keys::validate_group_ids(&command.group_ids)
-            .map_err(|_| AdminError::invalid("Client API Key 分组不合法"))?;
+            .map_err(|_| AdminError::invalid("API Key 分组不合法"))?;
         for (provider, profile) in &command.request_profile_overrides {
             self.providers
                 .require(provider)
@@ -202,7 +202,7 @@ impl ClientKeyService for DefaultClientKeyService {
         command: UpdateClientKey,
     ) -> Result<ClientKeyMutation, AdminError> {
         crate::model::client_keys::validate_group_ids(&command.group_ids)
-            .map_err(|_| AdminError::invalid("Client API Key 分组不合法"))?;
+            .map_err(|_| AdminError::invalid("API Key 分组不合法"))?;
         for (provider, profile) in &command.request_profile_override_updates {
             if let Some(profile) = profile {
                 self.providers
@@ -277,9 +277,7 @@ fn validate_cursor(query: &ClientKeyListQuery) -> Result<(), AdminError> {
         return Ok(());
     };
     if cursor.sort != query.sort {
-        return Err(AdminError::invalid(
-            "Client API Key 游标排序与查询条件不一致",
-        ));
+        return Err(AdminError::invalid("分页游标与排序条件不一致"));
     }
     let matches = matches!(
         (cursor.sort.field, &cursor.value),
@@ -300,7 +298,7 @@ fn validate_cursor(query: &ClientKeyListQuery) -> Result<(), AdminError> {
     if matches {
         Ok(())
     } else {
-        Err(AdminError::invalid("Client API Key 游标不合法"))
+        Err(AdminError::invalid("API Key 分页游标不合法"))
     }
 }
 

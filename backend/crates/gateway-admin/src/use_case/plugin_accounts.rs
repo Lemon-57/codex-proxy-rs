@@ -104,7 +104,7 @@ impl PluginAccountAccess for DefaultPluginAccountAccess {
             .load_credential_for_plugin(account_id)
             .await
             .map_err(|error| map_store_error(error, "plugin credential"))?
-            .ok_or_else(|| AdminError::not_found("Provider 凭据不存在"))?;
+            .ok_or_else(|| AdminError::not_found("服务商凭据不存在"))?;
         Ok(PluginAccountCredential {
             account: credential.account,
             provider_material: credential.provider_material,

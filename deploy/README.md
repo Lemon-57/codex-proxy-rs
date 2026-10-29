@@ -305,9 +305,11 @@ Responses 流式请求完成准入后，每 15 秒无输出会发送一次 SSE �
 `api.request_timeout_seconds` 默认 `null`，只控制 HTTP 路由返回响应前的等待，不是流式正文或 WebSocket 每轮执行的总时限。
 排队、插件显式执行期限与客户端断开的边界见 [请求期限](../docs/api.md#请求期限)
 
-OpenAI 上游池化 WebSocket 默认每 25 秒发送一次 Ping，发出后允许等待 30 秒；
-收到 Pong 或其他入站帧即解除本次心跳截止，持续无响应则以 `pong_timeout` 关闭连接。
-此策略也覆盖正在生成的请求，与等待下一条上游消息的 `stream_idle_timeout_ms` 分别计时
+OpenAI 上游 WebSocket 被动回应 Ping，不主动发送心跳；Pong 写入最多等待 5 秒。
+下游 Responses WebSocket 每 25 秒发送 Ping，第一条未响应的 Ping 发出后 30 秒没有入站活动即断开；
+接收中的消息字节、Pong 和其他有效入站消息均算活动，慢速上传不必等整帧收齐才刷新探活状态。
+后续 Ping 不延长这次截止，心跳入队及写入最多等待 5 秒。两段心跳各自处理，不跨 WS 转发或转换为 SSE 事件。
+心跳不重置上游业务消息的 `openai.ws_pool.stream_idle_timeout_ms`
 
 每条已保存代理可在管理端配置“上游 WS 连接上限”，默认留空、不限制连接数。
 OpenAI HTTP 客户端使用代理时，每个目标主机最多保留 4 条空闲连接，空闲 30 秒后回收；
@@ -318,7 +320,11 @@ OpenAI HTTP 客户端使用代理时，每个目标主机最多保留 4 条空�
 修改上限对后续请求生效，已存在的连接继续计数；调低上限不会强制中断在途或绑定下游 WS 的连接。
 预算仅覆盖宿主原生 OpenAI Responses 连接，插件自建连接及其他 HTTP/WS 流量仍需预留容量
 
-有容量时继续复用，连接总寿命仍由 `max_age_ms` 控制，默认 55 分钟，不设置固定空闲回收时间。
+未绑定活跃客户端 WS 的池化连接，归池后按 `openai.ws_pool.idle_timeout_ms` 计时，默认 `300000`（5 分钟，必须大于零）。
+Ping/Pong 不延长空闲期限；默认每 5 秒扫描，通常在空闲 300～305 秒开始回收，复用前也检查是否到期。
+关闭先停止复用，最多等待 1 秒发送 Close，随后终止并等待 socket 释放，容量在物理连接释放后才归还。
+仍绑定活跃客户端 WS 的连接不受空闲期限约束；客户端退出会释放仍归它所有的上游连接，重新绑定或切到 HTTP 时释放失去用途的旧连接。
+连接总寿命由 `openai.ws_pool.max_age_ms` 控制，默认 55 分钟；到期退出复用，不为清池打断正在生成的响应。
 满额时优先关闭同代理下最久未使用的普通空闲 WS；在途、建连中和绑定下游 WS 的连接不参与容量淘汰。
 没有可回收连接时等待容量，受原请求期限、客户端取消和连接池关闭约束；无显式请求期限时不会额外设置排队超时。
 被回收连接上的精确续接沿用既有客户端完整回放合同，可能多一次恢复往返
@@ -337,7 +343,7 @@ SSE 注释保活用于防止传输链路空闲断开，不会重置 Codex 等待
 
 管理端生成的 CC Switch 一键导入包含连接信息和当前 Key 的日／周额度查询，默认每 30 分钟刷新。
 查询地址和凭据随导入生成，在 CC Switch 中修改 Provider 的地址或 Key 后，需重新导入以同步用量查询。
-导入不包含下方模板的远程压缩、原生生图和 WebSocket 设置。需要这些设置时，使用下方配置直连 CPR，
+导入不包含下方模板的远程压缩、原生生图、WebSocket 和语音设置。需要这些设置时，使用下方配置直连 CPR，
 避免 CC Switch 切换或接管后重写 Provider 配置
 
 Linux/macOS 默认目录为 `~/.codex/`，Windows 为 `%USERPROFILE%\.codex\`；
@@ -354,22 +360,25 @@ model = "gpt-5.6-terra"
 review_model = "gpt-5.6-terra"
 model_reasoning_effort = "max"
 service_tier = "default"
+# 语音通话控制地址
+experimental_realtime_ws_base_url = "http://127.0.0.1:8080/v1"
 
 [model_providers.OpenAI]
 name = "OpenAI"
 base_url = "http://127.0.0.1:8080/v1"
+model_catalog_url = "http://127.0.0.1:8080/v1/models"
 wire_api = "responses"
 supports_websockets = false
 requires_openai_auth = false
-# 填写代理密钥，真实账号由服务端管理。
+# 代理密钥
 experimental_bearer_token = "<client-api-key>"
 
 [model_providers.OpenAI.capabilities]
-# Codex 0.162.0+ 显式启用 V2 远程压缩，不依赖 Provider 名称识别
+# V2 远程压缩
 remote_compaction = "v2"
 
 [model_providers.OpenAI.http_headers]
-# 供客户端识别服务端托管认证，本身不是密钥。
+# 服务端托管认证
 X-OpenAI-Actor-Authorization = "proxy-managed"
 
 [features]
@@ -380,6 +389,9 @@ goals = true
 `OpenAI` 是自定义 Provider ID，大小写要与 `model_provider` 一致。合并配置时修改已有表，
 不要重复添加 `[features]` 或 Provider 表。更换模型时也要检查其支持的推理强度。
 密钥以明文保存，文件仅供本人读取，不要提交到 Git。接入代理不需要扩大命令沙箱的联网或文件权限
+
+`model_catalog_url` 指向同一网关的 `/v1/models`；更换网关地址时与 `base_url` 一起修改。
+该接口返回当前密钥可见的模型目录，具体格式见 [模型目录](../docs/api.md#模型目录)
 
 V2 远程压缩通过 Responses 接口发送 `compaction_trigger`，网关和上游需支持该协议。
 若 Provider ID 改为 `custom`，相应能力配置也要改到 `[model_providers.custom.capabilities]`
@@ -402,6 +414,20 @@ V2 远程压缩通过 Responses 接口发送 `compaction_trigger`，网关和上
 服务端仍可能用 WebSocket 访问上游；客户端开关不控制服务端连接池和 HTTP 回退策略。
 Codex OAuth 账号的上游传输方式默认 WS；固定为 SSE 的账号不承接必须依赖 WS 的预热及连接内续接。
 仅使用这类账号时，客户端保持 `supports_websockets = false`，避免先尝试 WS 再回退
+
+### 语音通话
+
+Codex 0.164.0 的 `/voice` 通过 Provider 的 `base_url` 创建通话，控制连接另用顶层
+`experimental_realtime_ws_base_url`，不会自动继承 Provider 地址。两者应指向同一网关的 `/v1`，
+使用相同的代理密钥，并确保反向代理允许 WebSocket Upgrade。此设置独立于 Responses 的
+`supports_websockets` 开关
+
+已有配置需把 `experimental_realtime_ws_base_url` 合并到第一个 TOML 表之前，修改后完全退出并重启
+Codex。创建通话成功后仍报 `realtime websocket handshake failed` 时，先检查客户端日志中的
+`connecting realtime websocket` 是否指向网关；若仍为 `api.openai.com`，说明控制连接未经过代理
+
+语音使用具备上游权限的 OAuth 账号，音频流由客户端与上游直接传输，路由与限制见
+[Codex Live 语音通话](../docs/api.md#codex-live-语音通话)
 
 ### 时区与客户端环境信息
 
@@ -443,7 +469,8 @@ metrics_exporter = "none"
   先备份并区分本地真实账号文件与代理密钥文件，不要直接删除全部登录状态
 - 已调用生图但失败：查看服务端账号的凭据、权限、额度和请求错误，不能只凭文本对话成功判断
 - `401`：检查代理密钥是否正确、是否启用；Actor 标记不能代替密钥
-- `426`：检查客户端版本及反向代理是否保留版本头，低于管理员设置的最低版本时需要更新客户端。
+- `400` 且错误码为 `client_version_too_old` 或 `client_version_unavailable`：检查客户端版本及反向代理是否保留版本头，
+  低于管理员设置的最低版本时需要更新客户端
   手机远程控制的版本识别范围见 [版本门禁规则](../docs/api.md#1-鉴权与公共约定)
 - 地址包含 `5173/dev/v1`：这是开发代理地址，依赖 Vite 服务。日常使用改成后端或 HTTPS 地址；
   验证 WebSocket 时直接连接后端，当前 Vite 代理未显式开启 WebSocket 转发
@@ -624,6 +651,16 @@ CPR_GIT_SHA="$(git rev-parse HEAD)" \
 CPR_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 docker compose -f deploy/compose.yaml build codex-proxy-rs
 ```
+
+### 错误保护配置升级
+
+使用 `accountAutoFreeze*` 运行参数的部署升级时，数据库迁移删除全部旧保护设置，不转换规则或继承参数。
+`accountErrorProtection` 与新安装使用相同默认值：关闭保护、规则为空，其余参数见[错误保护 API](../docs/api.md#账号错误保护)。
+需要保护时，在「系统设置 → 运行设置 → 错误保护」重新配置规则并启用，
+使用管理 API 的客户端须同步改用[新的设置对象](../docs/api.md#账号错误保护)，旧字段写入会被拒绝
+
+已有活动冻结保留当前冷却截止时间，保护关闭时到期解除，未冻结的旧计数不沿用。通用错误保护仅暂停账号调度，不再自动下调并发；
+已经保存的账号并发上限保持原值，需要恢复时在账号设置中手动调整
 
 ### 版本命名与升级规则
 

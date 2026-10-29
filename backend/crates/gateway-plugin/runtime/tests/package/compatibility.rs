@@ -81,13 +81,20 @@ async fn retired_contracts_remain_loadable_with_compatibility_warnings() {
             vec!["openai".into()],
             vec!["openai".into()],
         );
+        let mut catalog = crate::support::contribution(
+            Capability::ModelCatalog,
+            vec![Stage::Registration],
+            vec![],
+            vec![],
+        );
         if legacy {
             middleware.1.version = 3;
             upstream.1.version = 1;
+            catalog.1.version = 1;
         }
         let archive = crate::support::package_with_contributions(
             b"not-an-executable",
-            Contributions::from([middleware, upstream]),
+            Contributions::from([middleware, upstream, catalog]),
         );
         let inspector =
             PackageInspector::new(PackageLimits::default(), semver::Version::new(1, 0, 0));
@@ -102,6 +109,7 @@ async fn retired_contracts_remain_loadable_with_compatibility_warnings() {
             let warning = warning.expect("retired contracts must remain visible");
             assert!(warning.contains("middleware v3"));
             assert!(warning.contains("upstream_adapter v1"));
+            assert!(warning.contains("model_catalog v1"));
         } else {
             assert!(warning.is_none());
         }

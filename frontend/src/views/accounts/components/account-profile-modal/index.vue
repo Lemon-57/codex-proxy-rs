@@ -3,7 +3,7 @@ import type { Account } from '@/api'
 
 import { ZButton, ZDialog, ZEmpty, ZSkeleton } from '@codex-proxy/ui'
 
-import { RefreshCw, TriangleAlert } from '@lucide/vue'
+import { RefreshCw } from '@lucide/vue'
 
 import { toRef } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -50,31 +50,14 @@ const { profile, subscription, loading, error, load } = useAccountPersonalInfo({
           <ZSkeleton class="h-24 w-full rounded-cp-lg" />
         </div>
       </template>
-      <ZEmpty
-        v-else-if="error && !profile"
-        :title="t('accounts.profile.loadFailed')"
-        :description="error"
-        :icon="TriangleAlert"
-        surface="none"
-      />
       <template v-else-if="profile">
-        <ZEmpty
-          v-if="profile.hasStatsError"
-          :title="t('accounts.profile.statisticsUnavailable')"
-          :description="t('accounts.profile.statisticsEmpty')"
-          :icon="TriangleAlert"
-          surface="none"
-        />
-        <template v-else>
+        <template v-if="!profile.hasStatsError">
           <AccountProfileTokenActivity :calendar="profile.activityCalendar" />
           <AccountProfileActivityInsights :insights="profile.activityInsights" />
         </template>
-        <p v-if="error" role="status" class="m-0 text-cp-sm text-cp-warning">
-          {{ t('accounts.profile.refreshIncomplete') }}
-        </p>
       </template>
       <ZEmpty
-        v-else-if="!loading && !account.capabilities.profile && !subscription"
+        v-else-if="!loading && !error && !account.capabilities.profile && !subscription"
         :title="t('accounts.profile.noSubscriptionInformationYet')"
         surface="none"
       />

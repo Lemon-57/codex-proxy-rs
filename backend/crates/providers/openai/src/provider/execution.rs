@@ -161,7 +161,6 @@ impl CodexProvider {
                 attempt: &context,
                 session_affinity: request.session_affinity.as_ref(),
                 model,
-                requires_oauth: false,
             })
             .await
             .map_err(map_selection_error)?;
@@ -321,6 +320,7 @@ impl CodexProvider {
                 provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent)
             })?,
         )
+        .with_credential_revision(lease.account().revision())
         .with_account_snapshot(Some(
             gateway_core::account::AccountHistorySnapshot::from_account(lease.account()),
         ))
@@ -425,6 +425,8 @@ pub(super) struct OpenAiSessionState {
     pub(super) turn_state: Option<String>,
     #[serde(default)]
     pub(super) client_turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reasoning_effort_override: Option<String>,
     pub(super) continuation_scope: OpenAiContinuationScope,
 }
 
@@ -442,6 +444,7 @@ pub(super) struct OpenAiSessionCapture {
     pub(super) conversation_id: Option<String>,
     pub(super) turn_state: Option<String>,
     pub(super) client_turn_id: Option<String>,
+    pub(super) reasoning_effort_override: Option<String>,
     pub(super) response_store: bool,
     pub(super) continuation_scope: Option<OpenAiContinuationScope>,
 }
@@ -488,6 +491,7 @@ fn encode_openai_session_capture(
         conversation_id: capture.conversation_id.clone(),
         turn_state: capture.turn_state.clone(),
         client_turn_id: capture.client_turn_id.clone(),
+        reasoning_effort_override: capture.reasoning_effort_override.clone(),
         continuation_scope,
     })
 }
@@ -618,14 +622,12 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
     Box::pin(async_stream::try_stream! {
         let allows_account_state_mutation = request.lease.allows_account_state_mutation();
         let failure_context = OpenAiFailureContext {
-            request_id: request.context.request_id().as_str(),
             client: &request.client,
             selector: &request.selector,
             quota: &request.quota,
             response_origin: &request.response_origin,
             cyber_policy_scope: None,
             allows_account_state_mutation,
-            allows_capacity_feedback: !request.context.is_diagnostic_required_account(),
         };
         let active_account = request.lease.account().clone();
         let cookie_header = build_cookie_header(request.lease.cookies())?;
@@ -787,14 +789,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let cyber_policy_scope = lease.cyber_policy_scope().cloned();
         let allows_account_state_mutation = lease.allows_account_state_mutation();
         let failure_context = OpenAiFailureContext {
-            request_id: context.request_id().as_str(),
             client: &client,
             selector: &selector,
             quota: &quota,
             response_origin: &response_origin,
             cyber_policy_scope: cyber_policy_scope.as_ref(),
             allows_account_state_mutation,
-            allows_capacity_feedback: !context.is_diagnostic_required_account(),
         };
         let mut active_account = lease.account().clone();
         let cookie_header = build_cookie_header(lease.cookies())?;
@@ -827,7 +827,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &authorization,
                 cookie_header.as_ref(),
                 account_selection,
-            ).with_trace(&trace),
+            ).with_trace(&trace).with_response_control(context.response_control()),
             active_account.id().as_str(),
             context.deadline(),
             &cancellation,

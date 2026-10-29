@@ -8,6 +8,7 @@ import { useI18n } from 'vue-i18n'
 defineProps<{
   prefix: string
   revealing: boolean
+  copying: boolean
 }>()
 
 const emit = defineEmits<{
@@ -25,7 +26,7 @@ const { t } = useI18n({ useScope: 'global' })
     <ZIconButton
       size="small"
       :aria-label="t('keys.fields.copyFullKey')"
-      :loading="revealing"
+      :loading="copying"
       :disabled="revealing"
       @click="emit('copy')"
     >

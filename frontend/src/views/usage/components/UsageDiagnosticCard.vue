@@ -150,12 +150,14 @@ function diagnosticNameDisplay(name: string) {
     class="max-h-105 min-w-0 w-full xl:h-full"
   >
     <template #actions>
-      <ZSegmented
-        v-model="dimension"
-        :aria-label="t('usage.diagnostics.diagnosticDimension')"
-        :options="dimensionOptions"
-        :disabled="loading"
-      />
+      <div class="flex justify-end">
+        <ZSegmented
+          v-model="dimension"
+          :aria-label="t('usage.diagnostics.diagnosticDimension')"
+          :options="dimensionOptions"
+          :disabled="loading"
+        />
+      </div>
     </template>
 
     <template #body>

@@ -400,13 +400,13 @@ fn middleware_gateway_error(error: MiddlewareError) -> GatewayError {
         MiddlewareError::Rejected | MiddlewareError::Remote { rejected: true, .. } => {
             GatewayError::new(
                 GatewayErrorKind::PolicyDenied,
-                "request middleware rejected the request",
+                "Request middleware rejected the request.",
             )
         }
         MiddlewareError::Fault | MiddlewareError::Remote { .. } | MiddlewareError::InvalidState => {
             GatewayError::new(
                 GatewayErrorKind::Internal,
-                "request middleware returned an invalid response",
+                "Request middleware returned an invalid response.",
             )
         }
     }
@@ -779,7 +779,7 @@ pub(super) async fn send_control(
             connection,
             &GatewayError::new(
                 GatewayErrorKind::InvalidRequest,
-                "No upstream WebSocket connection is available for control messages",
+                "No upstream WebSocket connection is available for control messages.",
             ),
             request_id,
         )

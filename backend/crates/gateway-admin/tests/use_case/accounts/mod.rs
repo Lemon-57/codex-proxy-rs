@@ -617,7 +617,6 @@ pub(super) struct FakeAccountStore {
     automations: Mutex<
         BTreeMap<String, gateway_admin::model::reset_credit_automation::ResetCreditAutomation>,
     >,
-    pub(super) lowered_limits: Mutex<Vec<(String, u32)>>,
 }
 
 impl FakeAccountStore {
@@ -638,7 +637,6 @@ impl FakeAccountStore {
             quota_window_queries: Mutex::new(Vec::new()),
             quota_forecast_history: Mutex::new(QuotaForecastHistory::default()),
             update_commands: Mutex::new(Vec::new()),
-            lowered_limits: Mutex::new(Vec::new()),
             automations: Mutex::default(),
         })
     }
@@ -720,6 +718,7 @@ impl FakeAccountStore {
             last_error_message: account.last_error_message.clone(),
         };
         AccountPageItem {
+            protection_rules: Vec::new(),
             capacity: gateway_admin::model::accounts::AccountCapacity {
                 used_slots: None,
                 total_slots: account
@@ -1036,35 +1035,6 @@ impl AccountStore for FakeAccountStore {
         })
     }
 
-    async fn lower_concurrency_limit(
-        &self,
-        account_id: &ProviderAccountId,
-        limit: gateway_core::account::AccountConcurrencyLimit,
-        _: &MutationContext,
-    ) -> AdminStoreResult<Option<AccountUpdateResult>> {
-        let mut accounts = self.accounts.lock().expect("accounts");
-        let Some(account) = accounts
-            .iter_mut()
-            .find(|account| account.id == account_id.as_str())
-        else {
-            return Ok(None);
-        };
-        if !account.enabled
-            || account.concurrency_limit.map_or(5, |value| value.get()) <= limit.get()
-        {
-            return Ok(None);
-        }
-        account.concurrency_limit = Some(limit);
-        self.lowered_limits
-            .lock()
-            .expect("lowered limits")
-            .push((account.id.clone(), limit.get()));
-        Ok(Some(AccountUpdateResult {
-            config_revision: revision(2),
-            account_id: account_id.clone(),
-        }))
-    }
-
     async fn recover_account(
         &self,
         account_id: &ProviderAccountId,
@@ -1198,13 +1168,7 @@ impl SettingsStore for StaticSettingsStore {
                 usage_retention_days: 30,
                 ops_event_retention_days: 30,
                 audit_retention_days: 30,
-                account_auto_freeze_enabled: true,
-                account_auto_freeze_threshold: 12,
-                account_auto_freeze_window_seconds: 600,
-                account_auto_freeze_duration_seconds: 7_200,
-                account_auto_freeze_probe_enabled: true,
-                account_auto_freeze_probe_model: None,
-                account_auto_freeze_adaptive_concurrency: true,
+                account_error_protection: gateway_core::account::AccountErrorProtection::default(),
                 account_warmup_enabled: false,
                 account_warmup_schedule_time: "08:00".to_owned(),
                 account_warmup_model: None,
@@ -3159,7 +3123,7 @@ async fn accounts_refresh_should_not_expose_the_provider_failure_message() {
         .expect_err("Provider preparation must fail");
 
     assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Conflict);
-    assert_eq!(error.to_string(), "Provider 资源状态冲突，请刷新后重试");
+    assert_eq!(error.to_string(), "服务商资源状态冲突，请刷新后重试");
     assert!(!error.to_string().contains(upstream_message));
     assert_eq!(
         recorded(&events),
@@ -3720,6 +3684,7 @@ impl AccountRuntimeStore for CapacityRuntime {
             return Err(store_unavailable());
         }
         Ok(AccountRuntimeSnapshot {
+            protection_rules: std::collections::BTreeMap::new(),
             in_flight: self.counts.clone(),
             ..Default::default()
         })
@@ -3728,10 +3693,6 @@ impl AccountRuntimeStore for CapacityRuntime {
     async fn active_freezes(
         &self,
     ) -> AdminStoreResult<BTreeMap<String, gateway_admin::model::accounts::AccountFreeze>> {
-        Ok(BTreeMap::new())
-    }
-
-    async fn capacity_peaks(&self, _: &[String]) -> AdminStoreResult<BTreeMap<String, u32>> {
         Ok(BTreeMap::new())
     }
 

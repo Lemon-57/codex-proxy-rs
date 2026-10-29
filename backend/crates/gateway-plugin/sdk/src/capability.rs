@@ -29,12 +29,12 @@ impl Capability {
             Self::Middleware => &[6],
             Self::FrontendAuthentication
             | Self::ModelRouter
+            | Self::ModelCatalog
             | Self::RetryPolicy
             | Self::Observer
             | Self::Management => &[2],
             Self::Scheduler => &[3],
             Self::UpstreamAdapter => &[5],
-            Self::ModelCatalog => &[1, 2],
             Self::CommandLine | Self::Maintenance => &[1],
         }
     }

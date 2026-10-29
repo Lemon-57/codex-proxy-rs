@@ -69,7 +69,7 @@ mod personal_info {
     fn personal_info_response_preserves_unknown_subscription_and_profile_error() {
         let response = AccountPersonalInfoData::from((
             AccountPersonalInfo {
-                profile: Err(AdminError::unavailable("Provider 服务暂不可用")),
+                profile: Err(AdminError::unavailable("服务商暂不可用")),
                 subscription: None,
             },
             gateway_api::TimePresenter::new(Default::default()),
@@ -78,7 +78,7 @@ mod personal_info {
             serde_json::to_value(response).unwrap(),
             json!({
                 "profile": null,
-                "profileError": "Provider 服务暂不可用",
+                "profileError": "服务商暂不可用",
                 "subscription": null,
             })
         );

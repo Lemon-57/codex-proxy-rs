@@ -4,6 +4,8 @@ import { computed, shallowRef, watch } from 'vue'
 
 import { getAccountPersonalInfo } from '@/api'
 import { useRequestState } from '@/composables/useRequestState'
+import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
 
 export function useAccountPersonalInfo({ accountId, open, capabilities }: {
   accountId: Ref<string>
@@ -33,6 +35,11 @@ export function useAccountPersonalInfo({ accountId, open, capabilities }: {
         return
       // 单项失败仍更新其他信息；仅在当前打开周期保留上次可用的统计。
       info.value = { ...result, profile: result.profile ?? info.value?.profile ?? null }
+      if (capabilities.value.profile && (result.profileError || result.profile?.hasStatsError)) {
+        ZNotification.error({
+          message: result.profileError || t('accounts.profile.statisticsUnavailable'),
+        })
+      }
     }
     catch (cause) {
       request.fail(version, cause)

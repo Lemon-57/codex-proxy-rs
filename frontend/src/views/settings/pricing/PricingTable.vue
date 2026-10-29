@@ -58,9 +58,6 @@ function summaryBand(row: PricingRow) {
 
 <template>
   <ZTable class="[--cp-table-row-height:50px]" :columns="columns" :data="rows" row-key="model" :loading="loading" :selected-row-keys="selected" :empty-text="t('settings.pricing.noMatchingModel')" show-header-when-empty>
-    <template v-if="$slots.empty" #empty>
-      <slot name="empty" />
-    </template>
     <template #header-select>
       <ZCheckbox :aria-label="t('settings.pricing.selectModelOnThisPage')" :disabled="disabled || !rows.length" :model-value="!!rows.length && rows.every(row => selected.includes(row.model))" :indeterminate="rows.some(row => selected.includes(row.model)) && !rows.every(row => selected.includes(row.model))" @update:model-value="$emit('togglePage', $event)" />
     </template>

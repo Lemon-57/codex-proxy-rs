@@ -128,7 +128,6 @@ export function usePricing() {
     preview,
     syncOpen,
     syncCatalog,
-    load,
     save,
     startSync,
     confirmSync,

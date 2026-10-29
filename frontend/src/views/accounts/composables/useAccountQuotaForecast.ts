@@ -5,7 +5,6 @@ import { getAccountQuotaForecast, refreshAccountQuota } from '@/api'
 import { useRequestState } from '@/composables/useRequestState'
 import { t } from '@/i18n'
 import { notification as ZNotification } from '@/utils/notification'
-import { errorMessage } from '@/utils/operation'
 
 export function useAccountQuotaForecast(
   accountId: Ref<string>,
@@ -14,7 +13,7 @@ export function useAccountQuotaForecast(
 ) {
   const report = shallowRef<AccountQuotaForecastResponse | null>(null)
   const request = useRequestState()
-  const { loading, error } = request
+  const { loading } = request
   const refreshing = shallowRef(false)
   let disposed = false
 
@@ -44,7 +43,6 @@ export function useAccountQuotaForecast(
     const targetAccountId = accountId.value
     request.invalidate()
     refreshing.value = true
-    error.value = ''
     try {
       // 刷新属于现有额度动作；预测查询本身始终只读。
       const result = await refreshAccountQuota({ accountId: targetAccountId })
@@ -57,11 +55,8 @@ export function useAccountQuotaForecast(
         })
       }
     }
-    catch (cause) {
-      if (!disposed && accountId.value === targetAccountId) {
-        if (!report.value)
-          error.value = errorMessage(cause)
-      }
+    catch {
+      // 请求层统一提示失败，保留上次可用的预测
     }
     finally {
       refreshing.value = false
@@ -73,7 +68,6 @@ export function useAccountQuotaForecast(
     if (!isOpen)
       return
     report.value = null
-    error.value = ''
     void load()
   }, { immediate: true })
 
@@ -85,8 +79,6 @@ export function useAccountQuotaForecast(
     report,
     loading,
     refreshing,
-    error,
-    load,
     refresh,
   }
 }

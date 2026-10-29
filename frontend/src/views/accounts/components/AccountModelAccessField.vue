@@ -121,7 +121,7 @@ async function load(refresh = false) {
   try {
     const result = await (refresh ? refreshAccountModels : getAccountModels)(
       { accountId },
-      { signal: request.signal, silent: true },
+      { signal: request.signal },
     )
     if (request.isCurrent(requestId))
       catalog.value = result.models
@@ -222,7 +222,6 @@ watch(search, () => {
         {{ t('accounts.modelAccess.loadingModel') }}
       </p>
       <ZEmpty v-else-if="!error" :title="search ? t('accounts.modelAccess.noMatchingModels') : t('accounts.modelAccess.noModels')" :icon="search ? Search : undefined" size="small" surface="none" />
-      <ZEmpty v-if="error" :title="t('accounts.modelAccess.modelListLoadingFailed')" :description="t('accounts.modelAccess.retryHint')" size="small" surface="none" role="alert" />
     </template>
   </div>
 </template>

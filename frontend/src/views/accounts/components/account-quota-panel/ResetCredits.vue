@@ -207,10 +207,9 @@ function handleRequestConsume(creditId: string) {
           </ZIconButton>
         </div>
 
-        <div :aria-busy="loading || consuming">
-          <ZEmpty v-if="loadError" :title="t('accounts.quotaReset.resetCardLoadingFailed')" :description="t('accounts.quotaReset.refreshRequired')" size="small" surface="none" role="alert" />
+        <div v-if="!loadError" :aria-busy="loading || consuming">
           <p
-            v-else-if="loading && !hasSnapshot"
+            v-if="loading && !hasSnapshot"
             class="m-0 px-4 py-4 text-cp-xs font-emphasis text-cp-text-secondary"
             role="status"
           >

@@ -653,6 +653,7 @@ pub struct DashboardAccountUsage {
     pub authentication_kind: String,
     pub name: String,
     pub email: Option<String>,
+    pub notes: Option<String>,
     pub plan_type: Option<String>,
     /// Admin 按 Provider 补齐的套餐展示名称
     pub plan_type_display: Option<String>,
@@ -1260,38 +1261,44 @@ pub struct UsageInsightsHealth {
     pub points: Vec<UsageInsightsHealthPoint>,
 }
 
+/// 一个时间桶内按重叠时长加权的逻辑请求并发
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageConcurrencyPoint {
+    pub bucket_start: DateTime<Utc>,
+    pub average_concurrency: f64,
+    pub peak_concurrency: u64,
+}
+
+/// 请求并发与调度等待的负载指标
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsightsLoad {
+    pub average_concurrency: f64,
+    pub peak_concurrency: u64,
+    pub admission_decision_p95_ms: Option<PercentileMilliseconds>,
+    pub account_selection_wait_p95_ms: Option<PercentileMilliseconds>,
+}
+
 /// 洞察性能时间点
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UsageInsightsPerformancePoint {
     pub bucket_start: DateTime<Utc>,
     pub latency_percentiles: LatencyPercentiles,
     pub first_token_latency_percentiles: LatencyPercentiles,
-    pub admission_decision_percentiles: LatencyPercentiles,
-    pub account_selection_wait_percentiles: LatencyPercentiles,
     pub output_throughput_p10: Option<u64>,
     pub output_throughput_p50: Option<u64>,
     pub output_throughput_p90: Option<u64>,
-    pub capacity_utilization_avg_basis_points: Option<u64>,
-    pub capacity_utilization_p95_basis_points: Option<u64>,
+    pub load: UsageInsightsLoad,
 }
 
-/// 洞察性能汇总与可观测覆盖率
+/// 洞察性能汇总
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageInsightsPerformance {
     pub latency_percentiles: LatencyPercentiles,
     pub first_token_latency_percentiles: LatencyPercentiles,
-    pub latency_coverage: f64,
-    pub first_token_coverage: f64,
-    pub admission_decision_percentiles: LatencyPercentiles,
-    pub account_selection_wait_percentiles: LatencyPercentiles,
-    pub admission_decision_coverage: f64,
-    pub account_selection_wait_coverage: f64,
     pub output_throughput_p10: Option<u64>,
     pub output_throughput_p50: Option<u64>,
     pub output_throughput_p90: Option<u64>,
-    pub capacity_utilization_avg_basis_points: Option<u64>,
-    pub capacity_utilization_p95_basis_points: Option<u64>,
-    pub capacity_coverage: f64,
+    pub load: UsageInsightsLoad,
     pub points: Vec<UsageInsightsPerformancePoint>,
 }
 

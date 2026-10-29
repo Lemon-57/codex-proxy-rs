@@ -12,13 +12,12 @@ use gateway_plugin_sdk::Stage;
 #[tokio::test]
 async fn adapted_catalog_freezes_adapter_accounts_and_preserves_the_active_generation() {
     use gateway_admin::model::plugins::instances::{PluginCapabilityBinding, PluginFailurePolicy};
-    let mut catalog = crate::support::contribution(
+    let catalog = crate::support::contribution(
         Capability::ModelCatalog,
         vec![Stage::Registration],
         vec![],
         vec![],
     );
-    catalog.1.version = 2;
     let adapter = crate::support::contribution(
         Capability::UpstreamAdapter,
         vec![Stage::Upstream],
@@ -46,7 +45,7 @@ async fn adapted_catalog_freezes_adapter_accounts_and_preserves_the_active_gener
             "paths":[{"path":"responses","purpose":"inference"}], "authentication_kinds":["oauth"],
             "account_ids":["acct_b"], "models":["shared-model"], "transport":"http_sse","protocol":"openai"
         }]},
-        "model_catalog":{"aliases":[],"models":[{
+        "model_catalog":{"aliases":[{"id":"native-alias","provider":"openai","model":"native-model"}],"models":[{
             "id":"shared-model","adapter_id":"example","features":["tools"],"presentation":{"display_name":"Shared"}
         }]}
     });
@@ -59,7 +58,8 @@ async fn adapted_catalog_freezes_adapter_accounts_and_preserves_the_active_gener
         active.models()[0].accounts.iter().next().unwrap().as_str(),
         "acct_b"
     );
-    assert!(active.model_aliases().is_empty());
+    assert_eq!(active.model_aliases().len(), 1);
+    assert_eq!(active.model_aliases()[0].id.as_str(), "native-alias");
     for scenario in ["accounts", "model", "binding", "key", "group"] {
         let mut invalid = snapshot.clone();
         invalid.config_revision = Revision::new(2).unwrap();
@@ -168,13 +168,12 @@ async fn adapted_catalog_freezes_adapter_accounts_and_preserves_the_active_gener
 
 #[tokio::test]
 async fn adapted_catalog_requires_its_registered_adapter() {
-    let mut catalog = crate::support::contribution(
+    let catalog = crate::support::contribution(
         Capability::ModelCatalog,
         vec![Stage::Registration],
         vec![],
         vec![],
     );
-    catalog.1.version = 2;
     let (cache, store, runtime) =
         super::super::setup_with_contributions(Contributions::from([catalog])).await;
     let mut snapshot = store.snapshot.lock().unwrap().clone();
@@ -214,7 +213,7 @@ async fn initial_registration_http_uses_the_prepared_settings_without_a_publicat
             .await;
         store.snapshot.lock().unwrap().instances[0].configuration = serde_json::json!({
             "registration_http": {"params": {"method":"POST", "url":server.uri(), "headers":[]}, "body":"x".repeat(64)},
-            "model_catalog":{"models":[{"id":"fixture-alias","provider":"openai","model":"fixture-upstream"}]}
+            "model_catalog":{"aliases":[{"id":"fixture-alias","provider":"openai","model":"fixture-upstream"}],"models":[]}
         });
         let prepared = ExtensionPreparationPort::prepare_with_request_body_limit(
             &runtime,
@@ -242,7 +241,7 @@ async fn model_catalog_is_frozen_without_entering_the_request_chain() {
     ]))
     .await;
     store.snapshot.lock().unwrap().instances[0].configuration = serde_json::json!({
-        "model_catalog": {"models": [{"id": "my-model", "provider": "openai", "model": "upstream-model"}]}
+        "model_catalog": {"aliases": [{"id": "my-model", "provider": "openai", "model": "upstream-model"}], "models": []}
     });
     let generation = ExtensionPreparationPort::prepare(&runtime, ConfigRevision::new(1).unwrap())
         .await
@@ -297,7 +296,7 @@ async fn model_catalog_is_frozen_without_entering_the_request_chain() {
 
 #[tokio::test]
 async fn model_catalog_prepares_plugin_aliases_without_semantic_validation() {
-    for models in [
+    for aliases in [
         serde_json::json!([{"id":"alias","provider":"custom","model":"target"}]),
         serde_json::json!([{"id":"alias","provider":"openai","model":"alias"}]),
         serde_json::json!([
@@ -318,8 +317,8 @@ async fn model_catalog_prepares_plugin_aliases_without_semantic_validation() {
             .await;
         let mut snapshot = store.snapshot.lock().unwrap().clone();
         snapshot.instances[0].configuration =
-            serde_json::json!({"model_catalog":{"models":models}});
-        let expected = models.as_array().unwrap().len();
+            serde_json::json!({"model_catalog":{"aliases":aliases,"models":[]}});
+        let expected = aliases.as_array().unwrap().len();
         let prepared = PluginPreparation::prepare(&runtime, snapshot)
             .await
             .unwrap();
@@ -340,7 +339,7 @@ async fn model_catalog_prepares_plugin_aliases_without_semantic_validation() {
     .await;
     let mut snapshot = store.snapshot.lock().unwrap().clone();
     snapshot.instances[0].configuration = serde_json::json!({
-        "model_catalog":{"models":[{"id":"alias","provider":"openai","model":"target"}]}
+        "model_catalog":{"aliases":[{"id":"alias","provider":"openai","model":"target"}],"models":[]}
     });
     let mut other = snapshot.instances[0].clone();
     other.id = "instance-two".into();

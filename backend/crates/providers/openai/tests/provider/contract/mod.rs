@@ -1,11 +1,11 @@
 //! OpenAI 执行合同测试入口，以及协议转换与发送前校验测试
 
+mod account_eligibility;
 mod account_isolation;
 mod capacity;
 mod cookies;
 mod correlation;
 mod error_details;
-mod image_account_eligibility;
 mod image_model_access;
 mod model_account_eligibility;
 mod outbound;
@@ -61,7 +61,6 @@ use gateway_core::operation::{
     OperationKind, ProtocolPayload, ProviderSessionState, RawJsonPayload, StandaloneSearchRequest,
 };
 use gateway_core::policy::ClientApiKeyId;
-use gateway_core::provider_ports::ProviderLeasePort;
 use gateway_core::routing::extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference};
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ModelServiceTier,
@@ -146,7 +145,7 @@ async fn account_client_preparation_keeps_ca_read_cause_without_exposing_path() 
     assert!(diagnostic.as_str().contains("OS cause:"));
     assert!(!diagnostic.as_str().contains("PRIVATE_"));
     let gateway = gateway_core::error::GatewayError::from_provider(&snapshot);
-    assert_eq!(gateway.safe_message(), "upstream service is unavailable");
+    assert_eq!(gateway.safe_message(), "Upstream service is unavailable.");
     assert_eq!(gateway.diagnostic(), Some(diagnostic));
 }
 
@@ -1247,7 +1246,6 @@ fn provider_and_quota_with_runtime_ports(
         http.clone(),
         base_url.clone(),
         cooldowns,
-        Arc::clone(&leases) as Arc<dyn ProviderLeasePort>,
         policy,
     ));
     let account_feedback = Arc::new(AccountFeedbackStats::default());
@@ -4433,130 +4431,6 @@ async fn websocket_idle_timeout_diagnosis_survives_ambiguous_send_wrapping() {
         error.diagnostic().map(|diagnostic| diagnostic.as_str()),
         Some("OpenAI WebSocket receive idle timeout after 300s"),
     );
-}
-
-#[tokio::test]
-async fn websocket_pong_timeout_diagnosis_survives_ambiguous_send_wrapping() {
-    for reuse in [false, true] {
-        const ACCOUNT_ID: &str = "acct_abrupt_disconnect";
-        let store = Arc::new(MemoryAccountStore::default());
-        create_account(&store, ACCOUNT_ID).await;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let (ping_seen_tx, ping_seen_rx) = oneshot::channel();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut websocket = accept_codex_test_websocket(stream).await;
-            websocket.next().await.unwrap().unwrap();
-            if reuse {
-                websocket
-                    .send(Message::Text(
-                        json!({
-                            "type": "response.completed",
-                            "response": {
-                                "id": "resp_warmup",
-                                "model": "gpt-5.4",
-                                "status": "completed",
-                                "output": [],
-                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-                            }
-                        })
-                        .to_string()
-                        .into(),
-                    ))
-                    .await
-                    .unwrap();
-                websocket.next().await.unwrap().unwrap();
-            }
-            for event in [
-                json!({"type": "response.created", "response": {"id": "resp_pong", "model": "gpt-5.4"}}),
-                json!({"type": "response.output_text.delta", "delta": "private-response-body"}),
-            ] {
-                websocket
-                    .send(Message::Text(event.to_string().into()))
-                    .await
-                    .unwrap();
-            }
-            std::assert_matches!(websocket.next().await.unwrap().unwrap(), Message::Ping(_));
-            ping_seen_tx.send(()).unwrap();
-            // 停止 poll，避免 tungstenite 自动回 Pong，复现本地保活超时
-            futures::future::pending::<()>().await;
-        });
-        let operation = Operation::Generate(generate_with_persisted_session_context(
-            ACCOUNT_ID,
-            "conversation-pong-timeout",
-            "session-pong-timeout",
-            "turn-pong-timeout",
-        ));
-        let provider = provider_with_base_url(&store, base_url);
-        if reuse {
-            let mut warmup = Arc::clone(&provider)
-                .execute(
-                    planned_request("openai", operation.clone()),
-                    context("req_pong_warmup", CancellationToken::new()),
-                )
-                .await
-                .unwrap();
-            while let Some(event) = warmup.next().await {
-                event.unwrap();
-            }
-        }
-        let mut stream = provider
-            .execute(
-                planned_request("openai", operation),
-                context("req_pong_timeout", CancellationToken::new()),
-            )
-            .await
-            .unwrap();
-        let mut pool_kind = None;
-        loop {
-            let event = stream.next().await.unwrap().unwrap();
-            if let Some(observation) = event.response_observation() {
-                pool_kind = observation.websocket_pool().or(pool_kind);
-            }
-            if event.has_client_event() {
-                break;
-            }
-        }
-        assert_eq!(
-            pool_kind,
-            Some(if reuse {
-                WebSocketPoolKind::Reuse
-            } else {
-                WebSocketPoolKind::New
-            })
-        );
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(25)).await;
-        ping_seen_rx.await.unwrap();
-        tokio::time::advance(Duration::from_secs(31)).await;
-        let error = loop {
-            match stream.next().await {
-                Some(Ok(_)) => {}
-                Some(Err(error)) => break error,
-                None => panic!("Pong timeout must surface a provider error"),
-            }
-        };
-        server.abort();
-        tokio::time::resume();
-        assert_eq!(error.send_state(), UpstreamSendState::Ambiguous);
-        assert!(!error.replay_is_safe());
-        assert_eq!(error.pre_delivery_retry(), None);
-        assert_eq!(error.kind(), ProviderErrorKind::Transport);
-        assert_eq!(
-            error.connection_observation().unwrap().exit_reason(),
-            "pong_timeout"
-        );
-        let diagnostic = error.diagnostic().unwrap();
-        assert_eq!(diagnostic.code(), Some("pong_timeout"));
-        assert_eq!(diagnostic.stage(), Some("receive"));
-        assert_eq!(
-            diagnostic.as_str(),
-            "OpenAI WebSocket stream ended before a terminal response (pong_timeout); local keepalive timeout after 30s; last event type: response.output_text.delta",
-        );
-        assert!(error.raw_upstream_error().is_none());
-        assert!(error.client_visible_upstream_error().is_none());
-    }
 }
 
 #[tokio::test]
@@ -8686,8 +8560,7 @@ async fn request_rejections_should_not_retry_or_cool_down_accounts() {
         } else {
             http_generate_operation()
         };
-        let (provider, _) =
-            provider_with_capacity_tracking(&store, server.uri(), Arc::clone(&cooldowns));
+        let (provider, _) = provider_with_cooldowns(&store, server.uri(), Arc::clone(&cooldowns));
         let mut stream = provider
             .execute(
                 planned_request("openai", operation),
@@ -8759,7 +8632,7 @@ fn capacity_websocket_operation() -> Operation {
     )
 }
 
-fn provider_with_capacity_tracking(
+fn provider_with_cooldowns(
     store: &Arc<MemoryAccountStore>,
     base_url: String,
     cooldowns: Arc<MemoryCooldownPort>,
@@ -8771,126 +8644,82 @@ fn provider_with_capacity_tracking(
         Arc::new(TestLeaseCoordinator::default()),
         0,
         cooldowns,
-        crate::support::StaticFreezePolicy::policy_port(
-            gateway_core::provider_ports::ProviderFreezePolicy::try_new(
-                true, 12, 600, 7_200, true, None, true,
-            )
-            .expect("freeze policy"),
-        ),
+        crate::support::runtime_policy(),
     );
     (provider, pool)
 }
 
 #[tokio::test]
-async fn capacity_feedback_only_counts_overload_rejections_and_excludes_diagnostic_probes() {
-    use gateway_core::provider_ports::ProviderCooldownPort as _;
-
+async fn http_and_websocket_rejections_preserve_original_protection_fields() {
     for websocket in [false, true] {
-        for (status, code, capacity) in [
-            (429, "slow_down", true),
-            (503, "server_is_overloaded", true),
-            (500, "server_error", false),
-            (502, "server_error", false),
-            (503, "service_unavailable_error", false),
+        for (status, code) in [
+            (400, "invalid_prompt"),
+            (429, "slow_down"),
+            (503, "server_is_overloaded"),
+            (500, "server_error"),
         ] {
-            for diagnostic in [false, true] {
-                let store = Arc::new(MemoryAccountStore::default());
-                let account_id = "acct_provider_contract";
-                create_account(&store, account_id).await;
-                let account = store.account(account_id).expect("account");
-                let cooldowns = Arc::new(MemoryCooldownPort::new());
-                let server = MockServer::start().await;
-                Mock::given(method(if websocket { "GET" } else { "POST" }))
-                    .and(path("/codex/responses"))
-                    .respond_with(
-                        ResponseTemplate::new(status).set_body_json(json!({"error": {
-                            "code": code,
-                            "message": "Upstream temporarily unavailable"
-                        }})),
-                    )
-                    .expect(2)
-                    .mount(&server)
-                    .await;
-                let (provider, _) =
-                    provider_with_capacity_tracking(&store, server.uri(), Arc::clone(&cooldowns));
-                // 同时验证窗口证据已过期与尚未过期：探测不能重建峰值，也不能改写原计数
-                for existing_evidence in [None, Some((4, 20))] {
-                    if let Some((count, peak)) = existing_evidence {
-                        for index in 0..count {
-                            cooldowns
-                                .record_capacity_failure(
-                                    account.id(),
-                                    &format!("req_seed_{index}"),
-                                    Duration::from_secs(600),
-                                    peak,
-                                )
-                                .await
-                                .expect("seed normal-request evidence");
-                        }
-                    }
-                    let before = cooldowns.capacity_evidence(account.id());
-                    let attempt = if diagnostic {
-                        diagnostic_context("req_capacity_feedback_probe", account_id)
-                    } else {
-                        context(
-                            if existing_evidence.is_some() {
-                                "req_capacity_feedback_seeded"
-                            } else {
-                                "req_capacity_feedback_business"
-                            },
-                            CancellationToken::new(),
-                        )
-                    };
-                    let operation = if websocket {
-                        capacity_websocket_operation()
-                    } else {
-                        http_generate_operation()
-                    };
-                    let mut stream = Arc::clone(&provider)
-                        .execute(planned_request("openai", operation), attempt)
-                        .await
-                        .expect("prepare upstream attempt");
-                    let error = loop {
-                        match stream.next().await {
-                            Some(Ok(_)) => {}
-                            Some(Err(error)) => break error,
-                            None => panic!("expected upstream rejection"),
-                        }
-                    };
-                    assert_eq!(
-                        error.upstream_status(),
-                        Some(status),
-                        "unexpected upstream error: {error:?}"
-                    );
-                    let after = cooldowns.capacity_evidence(account.id());
-                    if diagnostic || !capacity {
-                        assert_eq!(
-                            after, before,
-                            "only explicit overload from ordinary requests may change capacity evidence: {status}/{code}"
-                        );
-                    } else {
-                        assert_eq!(
-                            after.map(|(count, _)| count),
-                            Some(before.map_or(1, |(count, _)| count + 1))
-                        );
-                    }
+            let store = Arc::new(MemoryAccountStore::default());
+            create_account(&store, "acct_provider_contract").await;
+            let server = MockServer::start().await;
+            Mock::given(method(if websocket { "GET" } else { "POST" }))
+                .and(path("/codex/responses"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(json!({"error": {
+                        "code": code, "type": "explicit_type", "message": "original message"
+                    }})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let (provider, pool) =
+                provider_with_cooldowns(&store, server.uri(), Arc::new(MemoryCooldownPort::new()));
+            let operation = if websocket {
+                capacity_websocket_operation()
+            } else {
+                http_generate_operation()
+            };
+            let mut stream = provider
+                .execute(
+                    planned_request("openai", operation),
+                    context("req_original_fields", CancellationToken::new()),
+                )
+                .await
+                .expect("attempt");
+            assert_eq!(
+                stream.metadata().credential_revision(),
+                Some(store.account("acct_provider_contract").unwrap().revision())
+            );
+            let error = loop {
+                match stream.next().await {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => break error,
+                    None => panic!("upstream rejection"),
                 }
-            }
+            };
+            assert_eq!(
+                error.upstream_failure_fields(),
+                Some(&gateway_core::upstream::UpstreamFailureFields {
+                    status: Some(status),
+                    code: Some(code.to_owned()),
+                    error_type: Some("explicit_type".to_owned()),
+                    message: Some("original message".to_owned()),
+                })
+            );
+            drop(stream);
+            pool.shutdown().await;
         }
     }
 }
 
 #[tokio::test]
-async fn local_websocket_connection_cancellation_does_not_supply_capacity_evidence() {
+async fn local_websocket_connection_cancellation_has_no_upstream_failure_fields() {
     let store = Arc::new(MemoryAccountStore::default());
     let account_id = "acct_provider_contract";
     create_account(&store, account_id).await;
-    let account = store.account(account_id).expect("account");
     let cooldowns = Arc::new(MemoryCooldownPort::new());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let base_url = format!("http://{}", listener.local_addr().expect("address"));
-    let (provider, pool) =
-        provider_with_capacity_tracking(&store, base_url, Arc::clone(&cooldowns));
+    let (provider, pool) = provider_with_cooldowns(&store, base_url, Arc::clone(&cooldowns));
     let operation = capacity_websocket_operation();
     let mut stream = provider
         .execute(
@@ -8925,7 +8754,7 @@ async fn local_websocket_connection_cancellation_does_not_supply_capacity_eviden
         error.diagnostic().and_then(|diagnostic| diagnostic.code()),
         Some("shared_connect_failed")
     );
-    assert_eq!(cooldowns.capacity_evidence(account.id()), None);
+    assert!(error.upstream_failure_fields().is_none());
     pool.shutdown().await;
 }
 
@@ -8966,9 +8795,7 @@ async fn websocket_usage_limit_rejection_preserves_quota_state_for_account_rotat
 }
 
 #[tokio::test]
-async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
-    use gateway_core::provider_ports::{ProviderCooldownKind, ProviderCooldownPort as _};
-
+async fn stream_failures_preserve_error_fields_independent_of_retry_classification() {
     for (use_websocket, (code, message, expected_kind, scored)) in
         [false, true].into_iter().flat_map(|websocket| {
             [
@@ -9021,21 +8848,7 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
         for semantic_output in [false, true] {
             let store = Arc::new(MemoryAccountStore::default());
             create_account(&store, "acct_provider_contract").await;
-            let account = store.account("acct_provider_contract").expect("account");
             let cooldowns = Arc::new(MemoryCooldownPort::new());
-            // 距离冻结阈值只差一次，验证非容量错误不会把可调度账号推入冷却
-            for index in 0..11 {
-                cooldowns
-                    .record_capacity_failure(
-                        account.id(),
-                        &format!("req_seed_{index}"),
-                        Duration::from_secs(600),
-                        20,
-                    )
-                    .await
-                    .expect("seed capacity evidence");
-            }
-            let before = cooldowns.capacity_evidence(account.id());
             let mut events = vec![
                 json!({"type": "response.created", "response": {"id": "resp_capacity", "model": "gpt-5.4"}}),
             ];
@@ -9089,7 +8902,7 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
                 http_generate_operation()
             };
             let (provider, pool) =
-                provider_with_capacity_tracking(&store, base_url, Arc::clone(&cooldowns));
+                provider_with_cooldowns(&store, base_url, Arc::clone(&cooldowns));
             let mut stream = provider
                 .execute(
                     planned_request("openai", operation),
@@ -9129,29 +8942,15 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
                 provider_openai::openai_failure_affects_account_score(&error),
                 scored
             );
-            let cooldown = cooldowns.read(account.id()).await.expect("read cooldown");
-            if capacity {
-                assert_eq!(
-                    cooldowns
-                        .capacity_evidence(account.id())
-                        .map(|(count, _)| count),
-                    Some(12)
-                );
-                assert_eq!(
-                    cooldown.expect("capacity cooldown").kind(),
-                    ProviderCooldownKind::CapacityFreezeProbe
-                );
-            } else {
-                assert_eq!(
-                    cooldowns.capacity_evidence(account.id()),
-                    before,
-                    "non-capacity error {code} changed capacity evidence"
-                );
-                assert!(
-                    cooldown.is_none(),
-                    "non-capacity error {code} froze the account"
-                );
-            }
+            assert_eq!(
+                error.upstream_failure_fields(),
+                Some(&gateway_core::upstream::UpstreamFailureFields {
+                    status: None,
+                    code: Some(code.to_owned()),
+                    error_type: None,
+                    message: Some(message.to_owned()),
+                })
+            );
             assert_eq!(
                 serde_json::from_str::<Value>(
                     error.raw_upstream_error().expect("raw error").as_str()
@@ -10266,6 +10065,183 @@ fn request_observation_preserves_the_raw_reasoning_effort() {
         let client_key_id = ClientApiKeyId::new("key_openai_observation").unwrap();
         let observation = provider(&store).request_observation(&operation, &client_key_id);
         assert_eq!(observation.reasoning_effort.as_deref(), Some(expected));
+    }
+}
+
+#[tokio::test]
+async fn reasoning_effort_observation_follows_configuration_updates_across_continuations() {
+    fn completed(index: usize) -> Value {
+        json!({"type":"response.completed","response":{
+            "id":format!("resp_effort_{index}"),"model":"gpt-5.4","status":"completed",
+            "output":[],"reasoning":{"effort":if index == 4 { "high" } else { "medium" }},
+            "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+        }})
+    }
+
+    for use_websocket in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_provider_contract").await;
+        let http = MockServer::start().await;
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .respond_with(move |_: &wiremock::Request| {
+                let index = count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("data: {}\n\n", completed(index)))
+            })
+            .mount(&http)
+            .await;
+        let (base_url, websocket_server) = if use_websocket {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut websocket = accept_codex_test_websocket(socket).await;
+                let mut frames = Vec::new();
+                for index in 0..5 {
+                    let message = websocket.next().await.unwrap().unwrap();
+                    let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    assert_eq!(frame["type"], "response.create");
+                    frames.push(frame);
+                    websocket
+                        .send(Message::Text(completed(index).to_string().into()))
+                        .await
+                        .unwrap();
+                }
+                frames
+            });
+            (base_url, Some(server))
+        } else {
+            (http.uri(), None)
+        };
+        let provider = provider_with_base_url(&store, base_url);
+        let client_key = ClientApiKeyId::new("key_openai_contract").unwrap();
+        let mut session_state = Some(
+            ProviderSessionState::new(
+                "openai",
+                json!({
+                    "account_id":"acct_provider_contract",
+                    "conversation_id":"effort-observation",
+                    "continuation_scope":if use_websocket { "connection_local" } else { "persisted" },
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .unwrap(),
+        );
+        let mut originals = Vec::new();
+        for (index, (baseline, update, expected)) in [
+            ("medium", Some("high"), "high"),
+            ("medium", None, "high"),
+            ("medium", Some("low"), "low"),
+            ("medium", None, "medium"),
+            ("high", None, "high"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut input = Vec::new();
+            if let Some(effort) = update {
+                input.push(json!({"type":"configuration_update","reasoning":{"effort":effort}}));
+            }
+            input.push(json!({"type":"message","role":"user","content":"next turn"}));
+            let mut body = json!({
+                "model":"gpt-5.4","input":input,"reasoning":{"effort":baseline},
+                "session_id":"effort-observation","store":!use_websocket,
+            });
+            let previous = (index > 0 && index != 3).then(|| format!("resp_effort_{}", index - 1));
+            if let Some(previous) = &previous {
+                body["previous_response_id"] = json!(previous);
+            }
+            let mut protocol_context =
+                Map::from_iter([("use_websocket".to_owned(), json!(use_websocket))]);
+            if use_websocket {
+                protocol_context.insert(
+                    "downstream_websocket_connection_id".to_owned(),
+                    json!("ws_effort"),
+                );
+            }
+            let mut generate = GenerateRequest::from_protocol_payload(
+                ProtocolPayload::json_object("openai", body.as_object().unwrap().clone())
+                    .unwrap()
+                    .with_context(protocol_context),
+            );
+            if let Some(state) = session_state.take() {
+                generate = generate.with_provider_session_state(state);
+            }
+            let operation = Operation::Generate(generate);
+            let observation = provider.request_observation(&operation, &client_key);
+            assert_eq!(observation.reasoning_effort.as_deref(), Some(expected));
+            let binding = previous.as_ref().map(|previous| {
+                ContinuationBinding::Pinned(NativeContinuationPin::new(
+                    PreviousResponseId::new(previous),
+                    PreviousResponseId::new(previous),
+                    client_key.clone(),
+                    ProviderKind::new("openai").unwrap(),
+                    ProviderAccountId::new("acct_provider_contract").unwrap(),
+                ))
+            });
+            let context = AttemptContext::new(
+                RequestAttemptContext::new(
+                    ModelRequestId::new(format!("req_effort_{index}")).unwrap(),
+                    client_key.clone(),
+                ),
+                NonZeroU32::new(1).unwrap(),
+                SystemTime::now() + Duration::from_secs(30),
+                account_policy(),
+                AccountAttemptContext::new(BTreeSet::new(), None, None)
+                    .with_account_scope(contract_account_scope()),
+                binding,
+                CancellationToken::new(),
+            )
+            .with_continuation_attempt(if previous.is_some() {
+                ContinuationAttempt::Native
+            } else {
+                ContinuationAttempt::None
+            });
+            let mut stream = Arc::clone(&provider)
+                .execute(planned_request("openai", operation), context)
+                .await
+                .unwrap();
+            while let Some(event) = timeout(Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+            {
+                let event = event.unwrap_or_else(|error| {
+                    panic!("use_websocket={use_websocket}, turn={index}: {error:?}")
+                });
+                if let Some(update) = event.session_update() {
+                    session_state = Some(update.clone());
+                }
+            }
+            assert!(session_state.is_some());
+            originals.push(body);
+        }
+        let forwarded = if let Some(server) = websocket_server {
+            timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            http.received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(captured_request_body)
+                .collect()
+        };
+        assert_eq!(forwarded.len(), originals.len());
+        for (forwarded, original) in forwarded.iter().zip(&originals) {
+            assert_eq!(forwarded["input"], original["input"]);
+            assert_eq!(forwarded["reasoning"], original["reasoning"]);
+            assert_eq!(
+                forwarded.get("previous_response_id"),
+                original.get("previous_response_id")
+            );
+        }
     }
 }
 

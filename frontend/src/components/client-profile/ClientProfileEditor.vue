@@ -5,10 +5,11 @@ import type {
   ClientProfileSelection,
 } from '@/api/modules/settings/profiles'
 
-import { ZButton, ZEmpty, ZSegmented } from '@codex-proxy/ui'
+import { ZSegmented } from '@codex-proxy/ui'
 import { computed, onMounted, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getClientProfileOptions, previewClientProfile } from '@/api/modules/settings/profiles'
+import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage } from '@/utils/operation'
 import ClientProfilePresetFields from './ClientProfilePresetFields.vue'
 import ClientProfilePreviewPanel from './ClientProfilePreviewPanel.vue'
@@ -26,7 +27,6 @@ const options = shallowRef<ClientProfileOptions>()
 const preview = shallowRef<ClientProfilePreview>()
 const loading = shallowRef(true)
 const loadError = shallowRef('')
-const previewError = shallowRef('')
 const previewing = shallowRef(false)
 const independentDraft = shallowRef<ClientProfileSelection>()
 const effective = computed(() => model.value ?? options.value?.globalConfiguration)
@@ -78,7 +78,6 @@ watch([
     return
   let cancelled = false
   preview.value = undefined
-  previewError.value = ''
   previewing.value = !needsInput.value
   if (needsInput.value)
     return
@@ -89,8 +88,12 @@ watch([
         preview.value = result
     }
     catch (error) {
-      if (!cancelled)
-        previewError.value = errorMessage(error).replaceAll('User-Agent', t('settings.clientProfile.userAgent'))
+      if (!cancelled) {
+        ZNotification.error({
+          message: errorMessage(error).replaceAll('User-Agent', t('settings.clientProfile.userAgent')),
+          deduplicate: true,
+        })
+      }
     }
     finally {
       if (!cancelled)
@@ -121,20 +124,12 @@ onMounted(() => load())
       />
       <slot name="source-extra" />
     </div>
-    <ZEmpty v-if="loadError" :title="t('settings.clientProfile.presetLoadingFailed')" :description="loadError" size="small" surface="none" role="alert">
-      <template #action>
-        <ZButton size="small" :disabled="disabled || loading" @click="load()">
-          {{ t('common.actions.retry') }}
-        </ZButton>
-      </template>
-    </ZEmpty>
     <ClientProfilePresetFields
       v-if="!loadError && !inherited"
       :model-value="effective ?? null"
       :presets="options?.presets ?? []"
       :preview="preview"
       :previewing="previewing"
-      :error="previewError"
       :disabled="disabled || loading"
       :max-version-lag="options?.maxVersionLag"
       :aria-busy="loading || undefined"
@@ -145,7 +140,6 @@ onMounted(() => load())
       :preview="preview"
       :previewing="previewing"
       :needs-version-input="!!needsInput"
-      :error="previewError"
     />
   </div>
 </template>

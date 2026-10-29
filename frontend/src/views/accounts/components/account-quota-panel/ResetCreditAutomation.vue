@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import type { AccountResetCreditAutomation } from '@/api'
 
-import { ZButton, ZEmpty, ZIconButton, ZPopover, ZSwitch } from '@codex-proxy/ui'
+import { ZButton, ZIconButton, ZPopover, ZSwitch } from '@codex-proxy/ui'
 import { CircleHelp, Clock3 } from '@lucide/vue'
 import { computed, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { getAccountResetCreditAutomation, setAccountResetCreditAutomation } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
-import { errorMessage } from '@/utils/operation'
 
 const props = defineProps<{ accountId: string }>()
 
@@ -16,9 +15,8 @@ const { t } = useI18n({ useScope: 'global' })
 
 const router = useRouter()
 const status = shallowRef<AccountResetCreditAutomation>()
-const loadError = shallowRef('')
 const switchEnabled = shallowRef(false)
-const loadAction = useAsyncAction({ errorText: false })
+const loadAction = useAsyncAction()
 const saveAction = useAsyncAction()
 const busy = computed(() => loadAction.loading.value || saveAction.loading.value)
 const resultText = computed(() => {
@@ -38,18 +36,11 @@ const resultText = computed(() => {
 
 async function load() {
   const accountId = props.accountId
-  loadError.value = ''
   await loadAction.run(async () => {
-    try {
-      const result = await getAccountResetCreditAutomation({ accountId }, { silent: true })
-      if (props.accountId === accountId) {
-        status.value = result
-        switchEnabled.value = result.enabled
-      }
-    }
-    catch (error) {
-      if (props.accountId === accountId)
-        loadError.value = errorMessage(error)
+    const result = await getAccountResetCreditAutomation({ accountId })
+    if (props.accountId === accountId) {
+      status.value = result
+      switchEnabled.value = result.enabled
     }
   })
 }
@@ -114,13 +105,6 @@ watch(() => props.accountId, () => {
     <p v-if="resultText" class="text-cp-xs text-cp-warning" role="status">
       {{ resultText }}
     </p>
-    <ZEmpty v-if="loadError" :title="t('accounts.quotaReset.autoUsageSettingsFailedToLoad')" :description="loadError" size="small" surface="none" role="alert">
-      <template #action>
-        <ZButton size="small" variant="plain" :loading="loadAction.loading.value" @click="load">
-          {{ t('common.actions.retry') }}
-        </ZButton>
-      </template>
-    </ZEmpty>
   </section>
 </template>
 

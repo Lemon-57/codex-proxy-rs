@@ -82,10 +82,6 @@ const trendKind = defineModel<DashboardTrendKind>('trendKind', { required: true 
       </template>
     </ZPageHeader>
 
-    <p v-if="analyticsError" class="mt-4 text-cp-sm text-cp-warning-text" role="alert">
-      {{ analytics ? t('dashboard.refresh.failed') : t('dashboard.refresh.unavailable') }}
-    </p>
-
     <template v-if="!analyticsError || analytics">
       <section
         class="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4 2xl:gap-6"

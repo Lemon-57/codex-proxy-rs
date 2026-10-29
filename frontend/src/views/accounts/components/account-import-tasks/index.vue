@@ -17,7 +17,7 @@ const props = defineProps<{
   error: string
 }>()
 
-const emit = defineEmits<{ select: [id: string], refresh: [], stop: [], viewAccounts: [] }>()
+const emit = defineEmits<{ select: [id: string], stop: [], viewAccounts: [] }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -49,14 +49,8 @@ function handleRetentionKeydown(event: KeyboardEvent) {
 
 <template>
   <ZDialog v-model="open" :title="t('accounts.filters.importTasks')" :description="t('accounts.importTasks.description')" width="48rem">
-    <div v-if="error" role="alert" class="mb-4 flex items-center justify-between gap-3 rounded-cp bg-cp-warning-container p-3 text-xs text-cp-warning-on-container">
-      <span>{{ t('accounts.importTasks.progressUnavailable', { value: error.replace(/[。.]\s*$/u, '') }) }}</span>
-      <ZButton size="small" :loading="loading" @click="emit('refresh')">
-        {{ t('common.actions.retry') }}
-      </ZButton>
-    </div>
-    <ZEmpty v-if="!tasks.length" class="min-h-[min(20rem,50dvh)] content-center" :icon="ListTodo" :title="loading ? t('accounts.importTasks.loadingImportTasks') : t('accounts.importTasks.noImportTasks')" :description="t('accounts.importTasks.empty')" />
-    <div v-else class="min-h-[min(20rem,50dvh)] min-w-0">
+    <ZEmpty v-if="!tasks.length && !error" class="min-h-[min(20rem,50dvh)] content-center" :icon="ListTodo" :title="loading ? t('accounts.importTasks.loadingImportTasks') : t('accounts.importTasks.noImportTasks')" :description="t('accounts.importTasks.empty')" />
+    <div v-else-if="tasks.length" class="min-h-[min(20rem,50dvh)] min-w-0">
       <div v-if="tasks.length > 1" class="mb-5">
         <ZSelect
           :model-value="selectedId"
@@ -68,7 +62,7 @@ function handleRetentionKeydown(event: KeyboardEvent) {
         />
       </div>
       <TaskDetail v-if="detail" :task="detail" :stopping="stopping" @stop="emit('stop')" @view-accounts="emit('viewAccounts')" />
-      <ZEmpty v-else class="min-h-[min(16rem,40dvh)] content-center" :title="loading ? t('accounts.importTasks.loadingItemResults') : t('accounts.importTasks.selectTask')" surface="none" />
+      <ZEmpty v-else-if="!error" class="min-h-[min(16rem,40dvh)] content-center" :title="loading ? t('accounts.importTasks.loadingItemResults') : t('accounts.importTasks.selectTask')" surface="none" />
     </div>
     <template #footer>
       <div class="flex w-full flex-wrap items-center justify-between gap-3">

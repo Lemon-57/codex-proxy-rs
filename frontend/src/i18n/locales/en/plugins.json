@@ -203,11 +203,9 @@
       "identityMappingDescription": "Identity mapping description",
       "identityHelp": "Match the identity returned by the plugin exactly, each identity can be mapped once",
       "keyHelp": "Select the client API key for this identity, disabled or deleted keys grant no access",
-      "reloadClientKey": "Reload client Key",
       "addMapping": "Add mapping",
       "identityMark": "Identity mark",
       "identityPlaceholder": "Enter the identity returned by the plugin",
-      "failedToLoadTryAgain": "Failed to load, try again",
       "selectClientApiKey": "Select a client API key",
       "noClientKeyYet": "No client Key yet",
       "removeIdentityMapping": "Remove identity mapping {value}"
@@ -305,7 +303,6 @@
       "pluginDataLoadingFailed": "Plugin data loading failed"
     },
     "frame": {
-      "pluginPageCannotBeLoaded": "Plugin page cannot be loaded",
       "versionChanged": "Plugin page version changed, refreshing",
       "navigationBlocked": "The plugin page tried to leave its isolated document, loading stopped",
       "invalidQueryParameter": "Invalid query parameter",
@@ -381,7 +378,6 @@
       "configurationDescription": "Use plugin features with configuration “{name}”",
       "description": "Open management pages from enabled plugins",
       "unpublished": "This configuration or page is unavailable, it may have been disabled or switched to another version",
-      "refreshFailed": "Failed to refresh the page directory, showing the last loaded version: {loadError}",
       "loadingPage": "Loading page"
     },
     "refreshPage": "Refresh page",
@@ -392,7 +388,6 @@
       "multipleSelectionsAllowed": "{label} (multiple selections allowed)",
       "unlimitedPlaceholder": "Unlimited, multiple selections allowed",
       "loading": "Loading",
-      "isTemporarilyUnavailable": "{label} is temporarily unavailable",
       "noMatches": "No matches",
       "no": "No {label}",
       "createOneInFirst": "Create one in {value} first"
