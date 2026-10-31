@@ -116,6 +116,8 @@ function handleExplanationKeydown(event: KeyboardEvent) {
         <ZPopover v-model="explanationOpen" trigger="hover-click" placement="top-start" :hover-delay="240">
           <template #reference>
             <ZIconButton
+              variant="link"
+              :title="undefined"
               :aria-label="t('accounts.quotaForecast.forecastDescription')"
               size="small"
               :aria-expanded="explanationOpen"

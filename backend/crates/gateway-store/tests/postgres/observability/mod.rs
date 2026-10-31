@@ -1,5 +1,6 @@
 //! 观测存储测试入口，以及查询范围、过滤与端口合同测试
 
+mod metric;
 mod projection;
 
 use std::{
@@ -157,6 +158,7 @@ async fn output_throughput_uses_official_response_duration_without_local_fallbac
                 range,
                 UsageRecordFilter::default(),
                 gateway_admin::model::observability::Granularity::Hour,
+                true,
             )
             .await
             .map(|snapshot| snapshot.overview)
@@ -1172,6 +1174,7 @@ async fn recovered_continuation_failure_should_be_visible_in_ops_but_hidden_from
             range,
             UsageRecordFilter::default(),
             gateway_admin::model::observability::Granularity::Hour,
+            true,
         )
         .await
         .map(|snapshot| snapshot.overview)
@@ -1538,6 +1541,7 @@ async fn calculated_usage_billing_facts_keep_only_completed_calculated_costs() {
             range,
             UsageRecordFilter::default(),
             admin_observability::Granularity::FifteenMinutes,
+            true,
         )
         .await
         .expect("projected costs");
@@ -1556,6 +1560,7 @@ async fn calculated_usage_billing_facts_keep_only_completed_calculated_costs() {
             admin_observability::TimeRange::new(range.start, range.end).unwrap(),
             admin_observability::UsageFilter::default(),
             admin_observability::Granularity::FifteenMinutes,
+            true,
         )
         .await
         .expect("admin projected costs");
@@ -1844,6 +1849,7 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
             range,
             admin_observability::UsageFilter::default(),
             gateway_admin::model::observability::Granularity::Hour,
+            true,
         )
         .await
         .map(|snapshot| snapshot.overview)
@@ -2332,6 +2338,7 @@ async fn observability_queries_preserve_request_account_cost_and_diagnostic_fact
             range,
             UsageRecordFilter::default(),
             gateway_admin::model::observability::Granularity::Hour,
+            true,
         )
         .await
         .map(|snapshot| snapshot.overview)
@@ -2359,6 +2366,7 @@ async fn observability_queries_preserve_request_account_cost_and_diagnostic_fact
                 ..UsageRecordFilter::default()
             },
             gateway_admin::model::observability::Granularity::Hour,
+            true,
         )
         .await
         .map(|snapshot| snapshot.overview)
@@ -2694,6 +2702,7 @@ async fn calendar_trends_share_exact_day_boundaries_for_requests_costs_and_empty
                 range,
                 Default::default(),
                 admin_observability::Granularity::Day,
+                true,
             )
             .await
             .expect("calendar cost buckets");
@@ -3004,7 +3013,7 @@ async fn observability_store_executes_caller_selection_without_replacing_policy(
             .unwrap();
         super::drain_analytics(&database.pool).await;
         let facts = store
-            .usage_insights_observation(range, UsageFilter::default(), granularity)
+            .usage_insights_observation(range, UsageFilter::default(), granularity, true)
             .await
             .unwrap();
         let facts = facts

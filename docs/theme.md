@@ -418,6 +418,7 @@ utility / arbitrary variant；Vue Transition、跨浏览器 Range、动态富文
 - 表格斑马纹使用 `table-row-stripe-bg`；选中行悬停使用 `table-row-selected-hover-bg`，不被普通 Hover 覆盖
 - 结构化浮层头部使用 `popover-header-bg`，明暗模式分别检查它与表格背景的区分
 - Card 和选项默认不增加装饰性边框；键盘焦点必须保留可见反馈
+- 帮助与说明图标常态、Hover 和 Active 均保持透明背景，按钮使用 `variant="link"`，保留键盘焦点反馈；已有说明浮层时不重复显示原生 `title` 提示
 - 阴影保持中性，`shadowStrength` 只调节层级强弱，不给阴影染品牌色
 
 ## 扩展指南

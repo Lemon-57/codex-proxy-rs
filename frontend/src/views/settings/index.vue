@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ZButton, ZConfirmDialog, ZIconButton, ZPageHeader, ZSegmented, ZSelect } from '@codex-proxy/ui'
+import { ZButton, ZConfirmDialog, ZIconButton, ZPageHeader, ZSegmented } from '@codex-proxy/ui'
 
 import { Save, Undo2 } from '@lucide/vue'
 
@@ -133,14 +133,7 @@ watch(section, (value) => {
       <ZSegmented
         :model-value="section"
         :aria-label="t('settings.page.sectionsLabel')"
-        class="hidden! bg-(--cp-input-bg)! sm:inline-grid!"
-        :options="sectionOptions"
-        @update:model-value="switchSection"
-      />
-      <ZSelect
-        :model-value="section"
-        :aria-label="t('settings.page.sectionsLabel')"
-        class="w-full sm:hidden"
+        class="w-full sm:w-auto"
         :options="sectionOptions"
         @update:model-value="switchSection"
       />

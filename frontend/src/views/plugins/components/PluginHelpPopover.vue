@@ -22,6 +22,7 @@ function handleKeydown(event: KeyboardEvent) {
   <ZPopover v-model="open" trigger="hover-click" placement="top-start" :hover-delay="240" class="shrink-0">
     <template #reference>
       <ZIconButton
+        variant="link"
         :aria-label="label"
         size="small"
         class="size-5!"

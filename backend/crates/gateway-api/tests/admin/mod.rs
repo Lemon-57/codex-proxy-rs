@@ -113,6 +113,7 @@ pub(super) struct AdminTestFixture {
     pub dashboard_summary_range: Arc<Mutex<Option<TimeRange>>>,
     pub provider_error: Arc<Mutex<Option<ProviderAdminError>>>,
     pub provider_quota: Arc<Mutex<Option<ProviderQuota>>>,
+    pub provider_models: Arc<Mutex<Option<ProviderModels>>>,
     pub account: Arc<Mutex<Option<AccountPageItem>>>,
     pub account_usage: Arc<Mutex<Vec<AccountUsage>>>,
 }
@@ -189,16 +190,19 @@ impl AdminTestFixture {
             plugin_ports.clone(),
         );
         let provider_quota = Arc::new(Mutex::new(None));
+        let provider_models = Arc::new(Mutex::new(None));
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
             Arc::new(UnusedProvider::new(
                 "openai",
                 Arc::clone(&provider_error),
                 Arc::clone(&provider_quota),
+                Arc::clone(&provider_models),
             )),
             Arc::new(UnusedProvider::new(
                 "xai",
                 Arc::clone(&provider_error),
                 Arc::clone(&provider_quota),
+                Arc::clone(&provider_models),
             )),
         ];
         let bundle = gateway_admin::initialize(
@@ -247,6 +251,7 @@ impl AdminTestFixture {
             dashboard_summary_range,
             provider_error,
             provider_quota,
+            provider_models,
             account,
             account_usage,
         }
@@ -693,6 +698,7 @@ pub(super) struct MemoryObservations {
     pub trend: Option<Vec<RequestMetricPoint>>,
     pub concurrency: Vec<gateway_admin::model::observability::UsageConcurrencyPoint>,
     pub summaries: Vec<(TimeRange, UsageFilter)>,
+    pub concurrency_selections: Vec<bool>,
     pub trends: Vec<(TimeRange, UsageFilter)>,
     pub records: Vec<UsageQuery>,
     pub errors: Vec<OpsErrorQuery>,
@@ -1491,8 +1497,10 @@ impl ObservabilityStore for UnusedStore {
         range: TimeRange,
         filter: UsageFilter,
         _: Granularity,
+        include_concurrency: bool,
     ) -> AdminStoreResult<gateway_admin::model::observability::UsageInsightsObservation> {
         let mut data = self.observations.lock().expect("observations");
+        data.concurrency_selections.push(include_concurrency);
         data.summaries.push((range, filter.clone()));
         data.trends.push((range, filter));
         Ok(
@@ -1507,9 +1515,29 @@ impl ObservabilityStore for UnusedStore {
                     .clone()
                     .ok_or_else(|| unavailable("usage trend"))?,
                 costs: Vec::new(),
-                concurrency: data.concurrency.clone(),
+                concurrency: if include_concurrency {
+                    data.concurrency.clone()
+                } else {
+                    Vec::new()
+                },
             },
         )
+    }
+
+    async fn usage_metric_observation(
+        &self,
+        range: gateway_admin::model::observability::TimeRange,
+        filter: gateway_admin::model::observability::UsageFilter,
+        granularity: gateway_admin::model::observability::Granularity,
+        metric: gateway_admin::model::observability::UsageInsightMetric,
+    ) -> AdminStoreResult<gateway_admin::model::observability::UsageInsightsObservation> {
+        self.usage_insights_observation(
+            range,
+            filter,
+            granularity,
+            metric == gateway_admin::model::observability::UsageInsightMetric::Load,
+        )
+        .await
     }
 
     async fn list_usage_records(&self, query: UsageQuery) -> AdminStoreResult<UsagePage> {
@@ -1584,6 +1612,7 @@ struct UnusedProvider {
     kind: ProviderKind,
     error: Arc<Mutex<Option<ProviderAdminError>>>,
     quota: Arc<Mutex<Option<ProviderQuota>>>,
+    models: Arc<Mutex<Option<ProviderModels>>>,
 }
 
 impl UnusedProvider {
@@ -1591,11 +1620,13 @@ impl UnusedProvider {
         kind: &str,
         error: Arc<Mutex<Option<ProviderAdminError>>>,
         quota: Arc<Mutex<Option<ProviderQuota>>>,
+        models: Arc<Mutex<Option<ProviderModels>>>,
     ) -> Self {
         Self {
             kind: ProviderKind::new(kind).expect("provider kind"),
             error,
             quota,
+            models,
         }
     }
 }
@@ -1706,7 +1737,11 @@ impl ProviderAdmin for UnusedProvider {
         _: &ProviderAccountId,
         _: bool,
     ) -> Result<ProviderModels, ProviderAdminError> {
-        Err(unsupported_provider())
+        self.models
+            .lock()
+            .expect("provider models")
+            .clone()
+            .ok_or_else(unsupported_provider)
     }
 
     async fn export_credentials(

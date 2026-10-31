@@ -335,6 +335,7 @@ impl<'a> AnalyticsSnapshot<'a> {
         filter: &UsageRecordFilter,
         granularity: ObservationGranularity,
         timezone: gateway_core::time::DeploymentTimeZone,
+        include_concurrency: bool,
     ) -> StoreResult<(
         UsageOverview,
         Vec<RequestMetricPoint>,
@@ -345,19 +346,13 @@ impl<'a> AnalyticsSnapshot<'a> {
             .load(range, filter, None, Some(granularity), timezone, true)
             .await?;
         let trend = metric_points(range, granularity, timezone, &states, true)?;
-        let costs = states
-            .iter()
-            .map(|((bucket_start, _), state)| {
-                Ok(admin_observability::UsageProjectedCostPoint {
-                    bucket_start: *bucket_start,
-                    standard_amount: state.projected_cost("standard_usd")?,
-                    no_cache_amount: state.projected_cost("no_cache_usd")?,
-                })
-            })
-            .collect::<StoreResult<Vec<_>>>()?;
-        let concurrency = self
-            .concurrency(range, filter, granularity, timezone)
-            .await?;
+        let costs = projected_cost_points(&states)?;
+        let concurrency = if include_concurrency {
+            self.concurrency(range, filter, granularity, timezone)
+                .await?
+        } else {
+            Vec::new()
+        };
         // 趋势已包含可合并的完整指标和情景费用，概览直接复用同一份状态
         // 精确分位数不可跨桶合并，明细回退时仍按完整区间单独计算概览
         let overview = if states.values().any(MetricState::has_exact_percentiles) {
@@ -367,6 +362,107 @@ impl<'a> AnalyticsSnapshot<'a> {
                 .await?
         };
         Ok((overview, trend, costs, concurrency))
+    }
+
+    pub async fn metric(
+        &mut self,
+        range: ObservabilityRange,
+        filter: &UsageRecordFilter,
+        granularity: ObservationGranularity,
+        timezone: gateway_core::time::DeploymentTimeZone,
+        metric: admin_observability::UsageInsightMetric,
+    ) -> StoreResult<admin_observability::UsageInsightsObservation> {
+        use admin_observability::UsageInsightMetric;
+        let distribution_names: &[&str] = match metric {
+            UsageInsightMetric::Latency => &["latency_ms"],
+            UsageInsightMetric::FirstToken => &["first_token_ms"],
+            UsageInsightMetric::Throughput => &["throughput"],
+            UsageInsightMetric::Load => &["admission_decision_ms", "account_selection_wait_ms"],
+            _ => &[],
+        };
+        let costs = matches!(
+            metric,
+            UsageInsightMetric::Cost | UsageInsightMetric::Savings | UsageInsightMetric::Cache
+        );
+        let counters: &[&str] = match metric {
+            UsageInsightMetric::Health => &[
+                "request_count",
+                "success_count",
+                "failure_count",
+                "cancelled_count",
+                "incomplete_count",
+                "caller_error_count",
+            ],
+            // 成本视图均显示费用、节省、溢价、单次成功费用与覆盖率汇总
+            UsageInsightMetric::Cost | UsageInsightMetric::Savings => &[
+                "request_count",
+                "success_count",
+                "provider_reported_count",
+                "calculated_count",
+                "unavailable_count",
+            ],
+            UsageInsightMetric::Cache => &[
+                "request_count",
+                "success_count",
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_hit_request_count",
+                "cache_eligible_request_count",
+                "provider_reported_count",
+                "calculated_count",
+                "unavailable_count",
+            ],
+            _ => &["request_count"],
+        };
+        let selection = ReadSelection {
+            distributions: if distribution_names.is_empty() {
+                DistributionRead::None
+            } else {
+                DistributionRead::Full
+            },
+            costs,
+            keys: None,
+            counters: Some(counters),
+            distribution_names: Some(distribution_names),
+        };
+        let states = self
+            .load_selected(range, filter, None, Some(granularity), timezone, selection)
+            .await?;
+        let trend = metric_points(range, granularity, timezone, &states, costs)?;
+        let projected_costs = if costs {
+            projected_cost_points(&states)?
+        } else {
+            Vec::new()
+        };
+        // 明细筛选的精确分位数仍需按完整范围读取，不能合并各桶分位数
+        let total = if states.values().any(MetricState::has_exact_percentiles) {
+            merge_states(
+                self.load_selected(range, filter, None, None, timezone, selection)
+                    .await?
+                    .into_values(),
+            )?
+        } else {
+            merge_states(states.into_values())?
+        };
+        let concurrency = if metric == UsageInsightMetric::Load {
+            self.concurrency(range, filter, granularity, timezone)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let overview = UsageOverview {
+            range,
+            requests: total.request_metrics()?,
+            attempts: total.attempts()?,
+            providers: Vec::new(),
+            analytics: self.metadata(),
+        };
+        Ok(admin_observability::UsageInsightsObservation {
+            overview: admin_usage_overview(overview),
+            trend: trend.into_iter().map(admin_request_metric_point).collect(),
+            costs: projected_costs,
+            concurrency,
+        })
     }
 
     async fn concurrency(
@@ -1070,6 +1166,21 @@ pub(super) fn push_summary_buckets(
             .push_bind(buckets.to_vec())
             .push(")");
     }
+}
+
+fn projected_cost_points(
+    states: &BTreeMap<(DateTime<Utc>, String), MetricState>,
+) -> StoreResult<Vec<admin_observability::UsageProjectedCostPoint>> {
+    states
+        .iter()
+        .map(|((bucket_start, _), state)| {
+            Ok(admin_observability::UsageProjectedCostPoint {
+                bucket_start: *bucket_start,
+                standard_amount: state.projected_cost("standard_usd")?,
+                no_cache_amount: state.projected_cost("no_cache_usd")?,
+            })
+        })
+        .collect()
 }
 
 fn metric_points(

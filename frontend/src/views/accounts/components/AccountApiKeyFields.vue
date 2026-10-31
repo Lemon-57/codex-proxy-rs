@@ -3,7 +3,6 @@ import type { ApiKeyAccountForm } from '../utils/upstreamApiKey'
 
 import { ZFormItem, ZInput, ZSegmented } from '@codex-proxy/ui'
 
-import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 defineProps<{ disabled?: boolean, editing?: boolean }>()
@@ -11,13 +10,10 @@ defineProps<{ disabled?: boolean, editing?: boolean }>()
 const { t } = useI18n({ useScope: 'global' })
 
 const form = defineModel<ApiKeyAccountForm>({ required: true })
-const transportOptions = computed(() => ([
-  { label: 'HTTP / SSE', value: 'http' },
-  {
-    label: t('accounts.credentials.wsFirst'),
-    value: 'prefer_websocket',
-  },
-]))
+const transportOptions = [
+  { label: 'SSE', value: 'http' },
+  { label: 'WS', value: 'prefer_websocket' },
+]
 </script>
 
 <template>

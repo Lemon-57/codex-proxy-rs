@@ -112,7 +112,7 @@ function confirm() {
                 {{ field.label }}
                 <ZPopover trigger="hover-click" placement="top-start">
                   <template #reference="{ open: helpOpen }">
-                    <ZIconButton :aria-label="t('settings.scheduling.about', { label: field.label })" :title="undefined" :aria-expanded="helpOpen" class="size-6! hover:bg-transparent! active:bg-transparent!">
+                    <ZIconButton variant="link" :aria-label="t('settings.scheduling.about', { label: field.label })" :title="undefined" :aria-expanded="helpOpen" class="size-6!">
                       <CircleHelp class="size-3.5" />
                     </ZIconButton>
                   </template>

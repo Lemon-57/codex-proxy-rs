@@ -118,7 +118,6 @@
       "noModelsAvailable": "没有可测试模型"
     },
     "credentials": {
-      "wsFirst": "WS 优先",
       "accountName": "账号名称",
       "enterUpstreamName": "输入上游名称",
       "baseUrlHelp": "填写 API 前缀，接口路径会自动追加",
@@ -126,7 +125,7 @@
       "apiKeyPlaceholder": "留空保留当前密钥",
       "enterUpstreamKey": "输入上游密钥",
       "transportLabel": "传输方式",
-      "webSocketHelp": "WS 优先需要上游支持 Responses WebSocket",
+      "webSocketHelp": "WS 需要上游支持 Responses WebSocket",
       "nameRequired": "请输入账号名称",
       "validation": {
         "urlLength": "上游 API 地址不能超过 2048 个字符",
@@ -163,7 +162,6 @@
     "editor": {
       "title": "编辑账号",
       "transportLabel": "上游传输方式",
-      "upstreamConnection": "上游连接",
       "loadError": "上游设置读取失败",
       "notesHelp": "最多 500 字，留空可清除备注",
       "oauthUnavailable": "该账号没有 OAuth 上游设置",
@@ -188,9 +186,12 @@
       "reserve": "保留",
       "allowlist": "白名单",
       "blocklist": "黑名单",
-      "modelLimitations": "模型限制",
+      "modelCatalog": "模型目录",
       "refreshModel": "刷新模型",
       "modelRestrictionMode": "模型限制模式",
+      "catalogHelpTitle": "模型目录说明",
+      "catalogObservedAtHelp": "时间表示最近一次成功获取上游目录的时间",
+      "catalogDescription": "目录仅提供模型 ID，端点能力请通过实际请求确认，连接测试仅验证测试所用端点",
       "searchOrAddModels": "搜索或添加模型",
       "searchOrEnterIdAndPressEnter": "搜索或输入 ID，回车添加",
       "selectModel": "选择模型",
@@ -230,6 +231,7 @@
     },
     "scheduling": {
       "scheduling": "调度",
+      "preserve": "保留",
       "switchAccountSchedule": "切换账号调度",
       "concurrencyLimit": "并发限制",
       "accountConcurrencyLimit": "账号并发限制",

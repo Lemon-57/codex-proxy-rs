@@ -15,10 +15,10 @@ const infoId = useId()
   <ZPopover v-model="infoOpen" placement="bottom-start" trigger="hover-click">
     <template #reference>
       <ZIconButton
+        variant="link"
         size="small"
         :aria-label="t('settings.pricing.unitHelp')"
         :title="undefined"
-        class="hover:bg-transparent! active:bg-transparent!"
         :aria-expanded="infoOpen"
         :aria-controls="infoOpen ? infoId : undefined"
       >

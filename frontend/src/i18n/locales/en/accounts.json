@@ -118,7 +118,6 @@
       "noModelsAvailable": "No models available for testing"
     },
     "credentials": {
-      "wsFirst": "WS first",
       "accountName": "Account name",
       "enterUpstreamName": "Enter the upstream name",
       "baseUrlHelp": "Enter the API base URL, endpoint paths are appended automatically",
@@ -126,7 +125,7 @@
       "apiKeyPlaceholder": "Leave blank to keep the current key",
       "enterUpstreamKey": "Enter the upstream key",
       "transportLabel": "Transport",
-      "webSocketHelp": "WS first requires upstream support for Responses WebSocket",
+      "webSocketHelp": "WS requires upstream support for Responses WebSocket",
       "nameRequired": "Enter an account name",
       "validation": {
         "urlLength": "Upstream API URL must not exceed 2,048 characters",
@@ -163,7 +162,6 @@
     "editor": {
       "title": "Edit account",
       "transportLabel": "Upstream transport",
-      "upstreamConnection": "Upstream connection",
       "loadError": "Could not load upstream settings",
       "notesHelp": "Up to 500 characters, leave blank to clear notes",
       "oauthUnavailable": "This account has no OAuth upstream settings",
@@ -188,9 +186,12 @@
       "reserve": "Reserve",
       "allowlist": "Allowlist",
       "blocklist": "Blocklist",
-      "modelLimitations": "Model limitations",
+      "modelCatalog": "Model catalog",
       "refreshModel": "Refresh model",
       "modelRestrictionMode": "Model restriction mode",
+      "catalogHelpTitle": "Model catalog details",
+      "catalogObservedAtHelp": "The time shows when the upstream catalog was last successfully fetched",
+      "catalogDescription": "The catalog lists model IDs, verify endpoint support with an actual request — a connection test only checks the endpoint it uses",
       "searchOrAddModels": "Search or add models",
       "searchOrEnterIdAndPressEnter": "Search or enter ID and press Enter to add",
       "selectModel": "Select model",
@@ -229,6 +230,7 @@
       "outboundTunnel": "Outbound tunnel"
     },
     "scheduling": {
+      "preserve": "Keep unchanged",
       "scheduling": "Scheduling",
       "switchAccountSchedule": "Switch account schedule",
       "concurrencyLimit": "Concurrency limit",

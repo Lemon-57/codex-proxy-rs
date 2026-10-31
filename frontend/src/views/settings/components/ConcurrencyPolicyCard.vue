@@ -41,7 +41,7 @@ const openaiGuardianReservedConcurrency = defineModel<string>('openaiGuardianRes
         <template #label-extra>
           <ZPopover class="-my-1" trigger="hover-click" placement="top-start">
             <template #reference="{ open }">
-              <ZIconButton :aria-label="t('settings.concurrency.queueTimeoutHelpTitle')" :title="undefined" :aria-expanded="open" class="size-6! hover:bg-transparent! active:bg-transparent!">
+              <ZIconButton variant="link" :aria-label="t('settings.concurrency.queueTimeoutHelpTitle')" :title="undefined" :aria-expanded="open" class="size-6!">
                 <CircleAlert class="size-3.5" aria-hidden="true" />
               </ZIconButton>
             </template>
@@ -56,7 +56,7 @@ const openaiGuardianReservedConcurrency = defineModel<string>('openaiGuardianRes
         <template #label-extra>
           <ZPopover class="-my-1" trigger="hover-click" placement="top-start">
             <template #reference="{ open }">
-              <ZIconButton :aria-label="t('settings.concurrency.autoReview.helpTitle')" :title="undefined" :aria-expanded="open" class="size-6! hover:bg-transparent! active:bg-transparent!">
+              <ZIconButton variant="link" :aria-label="t('settings.concurrency.autoReview.helpTitle')" :title="undefined" :aria-expanded="open" class="size-6!">
                 <CircleAlert class="size-3.5" aria-hidden="true" />
               </ZIconButton>
             </template>

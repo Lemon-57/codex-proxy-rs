@@ -118,7 +118,6 @@
       "noModelsAvailable": "沒有可測試模型"
     },
     "credentials": {
-      "wsFirst": "WS 優先",
       "accountName": "賬號名稱",
       "enterUpstreamName": "輸入上游名稱",
       "baseUrlHelp": "填寫 API 前綴，接口路徑會自動追加",
@@ -126,7 +125,7 @@
       "apiKeyPlaceholder": "留空保留當前密鑰",
       "enterUpstreamKey": "輸入上游密鑰",
       "transportLabel": "傳輸方式",
-      "webSocketHelp": "WS 優先需要上游支持 Responses WebSocket",
+      "webSocketHelp": "WS 需要上游支持 Responses WebSocket",
       "nameRequired": "請輸入賬號名稱",
       "validation": {
         "urlLength": "上游 API 地址不能超過 2048 個字符",
@@ -163,7 +162,6 @@
     "editor": {
       "title": "編輯賬號",
       "transportLabel": "上游傳輸方式",
-      "upstreamConnection": "上游連接",
       "loadError": "上游設置讀取失敗",
       "notesHelp": "最多 500 字，留空可清除備註",
       "oauthUnavailable": "該賬號沒有 OAuth 上游設置",
@@ -188,9 +186,12 @@
       "reserve": "保留",
       "allowlist": "白名單",
       "blocklist": "黑名單",
-      "modelLimitations": "模型限制",
+      "modelCatalog": "模型目錄",
       "refreshModel": "刷新模型",
       "modelRestrictionMode": "模型限制模式",
+      "catalogHelpTitle": "模型目錄說明",
+      "catalogObservedAtHelp": "時間表示最近一次成功取得上游目錄的時間",
+      "catalogDescription": "目錄僅提供模型 ID，端點能力請透過實際請求確認，連線測試僅驗證測試所用端點",
       "searchOrAddModels": "搜索或添加模型",
       "searchOrEnterIdAndPressEnter": "搜索或輸入 ID，回車添加",
       "selectModel": "選擇模型",
@@ -229,6 +230,7 @@
       "outboundTunnel": "出站隧道"
     },
     "scheduling": {
+      "preserve": "保留",
       "scheduling": "調度",
       "switchAccountSchedule": "切換賬號調度",
       "concurrencyLimit": "併發限制",

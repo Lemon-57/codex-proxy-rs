@@ -58,7 +58,7 @@ function connectionLogClass(tone: string) {
       <section
         class="flex items-center justify-between gap-4 rounded-cp-card bg-cp-fill-quaternary px-4 py-3"
       >
-        <AccountIdentityCell :account="account" size="lg" show-plan />
+        <AccountIdentityCell :account="account" size="lg" show-plan show-notes />
         <AccountStatusBadge
           :status="account.status"
           :error-reason="account.errorReason"

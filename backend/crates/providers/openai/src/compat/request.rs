@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 
 /// 非官方客户端及跨客户端历史回填的兼容入口；调用方必须已选定 Codex/OAuth 上游
 /// 只处理已验证被拒绝的字段，不根据客户端品牌推断整份历史是否合法
-pub(crate) fn normalize_non_codex_request_body(body: &mut Map<String, Value>) {
+pub(super) fn normalize_non_codex_request_body(body: &mut Map<String, Value>) {
     let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
         return;
     };
@@ -37,7 +37,7 @@ pub(crate) fn normalize_non_codex_request_body(body: &mut Map<String, Value>) {
 ///
 /// 兼容基准是 Codex Core/Desktop 的模型请求，不是公开 OpenAI Responses API
 /// 未知字段继续透传，不能因官方请求结构中没有某个字段就将其列入过滤规则
-pub(in crate::transport) fn normalize_codex_request_body(body: &mut Map<String, Value>) {
+pub(crate) fn normalize_codex_request_body(body: &mut Map<String, Value>) {
     // 官方 Core/Desktop 显式发送 store=false；仅为缺字段的下游请求补齐，保留显式值
     body.entry("store").or_insert(Value::Bool(false));
 

@@ -8824,6 +8824,12 @@ async fn stream_failures_preserve_error_fields_independent_of_retry_classificati
                     false,
                 ),
                 (
+                    "unsupported_parameter",
+                    "Hosted tool 'web_search' requires authorization and metering that are not supported by rustponsesapi.",
+                    ProviderErrorKind::InvalidRequest,
+                    false,
+                ),
+                (
                     "invalid_prompt",
                     "Invalid prompt: we've limited access to this content for safety reasons.",
                     ProviderErrorKind::InvalidRequest,
@@ -8856,9 +8862,21 @@ async fn stream_failures_preserve_error_fields_independent_of_retry_classificati
                 events.push(json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "hello"}));
             }
             let mut original = json!({"type": "response.failed", "response": {"id": "resp_capacity", "error": {"code": code, "message": message}}});
+            if code == "unsupported_parameter" {
+                original = json!({"type":"error","status":400,"error":{
+                    "type":"invalid_request_error","code":code,"message":message,"param":"tools"
+                }});
+            }
             if code == "turn_rate_limit_exceeded" {
                 original["response"]["error"]["headers"] = json!({"retry-after": "7"});
             }
+            let expected_status = original["status"]
+                .as_u64()
+                .map(|status| u16::try_from(status).expect("valid upstream status"));
+            let expected_error_type = original.get("error").unwrap_or(&original["response"]["error"])
+                ["type"]
+                .as_str()
+                .map(str::to_owned);
             events.push(original.clone());
             let (base_url, _http_server, websocket_server) = if use_websocket {
                 let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
@@ -8922,6 +8940,7 @@ async fn stream_failures_preserve_error_fields_independent_of_retry_classificati
                     None => panic!("expected upstream failure"),
                 }
             };
+            assert!(error.continuation_recovery_disposition().is_none());
             let capacity = expected_kind == ProviderErrorKind::UpstreamCapacityUnavailable;
             assert_eq!(
                 error.kind(),
@@ -8929,7 +8948,7 @@ async fn stream_failures_preserve_error_fields_independent_of_retry_classificati
                 "unexpected error for {code}, websocket={use_websocket}, semantic_output={semantic_output}: {error:?}"
             );
             assert_eq!(error.replay_is_safe(), capacity && !semantic_output);
-            assert_eq!(error.upstream_status(), None);
+            assert_eq!(error.upstream_status(), expected_status);
             if code == "turn_rate_limit_exceeded" {
                 assert!(error.retry_is_prohibited());
                 assert_eq!(error.retry_after(), Some(Duration::from_secs(7)));
@@ -8945,9 +8964,9 @@ async fn stream_failures_preserve_error_fields_independent_of_retry_classificati
             assert_eq!(
                 error.upstream_failure_fields(),
                 Some(&gateway_core::upstream::UpstreamFailureFields {
-                    status: None,
+                    status: expected_status,
                     code: Some(code.to_owned()),
-                    error_type: None,
+                    error_type: expected_error_type,
                     message: Some(message.to_owned()),
                 })
             );
@@ -11116,8 +11135,6 @@ const API_KEY_DOWNSTREAM_HEADERS: &[&str] = &[
     "referer",
     "sec-ch-ua",
     "sec-fetch-site",
-    "x-grok-turn-idx",
-    "x-xai-future-field",
     "session_id",
     "x-openai-actor-authorization",
     "authorization",
@@ -11126,6 +11143,8 @@ const API_KEY_DOWNSTREAM_HEADERS: &[&str] = &[
 ];
 
 const API_KEY_BUSINESS_HEADERS: &[&str] = &[
+    "x-grok-turn-idx",
+    "x-xai-future-field",
     "session-id",
     "thread-id",
     "x-codex-future",
@@ -12553,130 +12572,40 @@ pub(crate) async fn assert_local_connection_capacity_is_not_an_upstream_failure(
     assert!(failure.pre_delivery_retry().is_none());
 }
 
-const GROK_PASSTHROUGH_HEADERS_CONTEXT_KEY: &str = "opaque_request_headers";
-
-fn grok_marked_context() -> Map<String, Value> {
-    Map::from_iter([(
-        GROK_PASSTHROUGH_HEADERS_CONTEXT_KEY.to_owned(),
-        json!([["X-Grok-Model-Override", "dGVzdA=="]]),
-    )])
-}
-
 #[tokio::test]
-async fn grok_marked_request_removes_only_exact_leading_instruction_identity() {
-    let original = "You are Grok released by xAI.\nKeep Grok tool names and xAI examples.";
-    for (content, expected) in [
-        (json!("You are Grok released by xAI."), json!("")),
-        (
+async fn downstream_client_markers_preserve_instruction_content() {
+    let original = "You are Grok released by xAI.\nKeep tool names and examples.";
+    for api_key in [false, true] {
+        for content in [
             json!(original),
-            json!("\nKeep Grok tool names and xAI examples."),
-        ),
-        (
             json!([
-                {"type": "input_text", "text": original, "future": "Grok"},
-                {"type": "input_text", "text": original}
+                {"type": "input_text", "text": original, "future": "keep"},
+                {"type": "input_text", "text": "Keep the second block."}
             ]),
-            json!([
-                {"type": "input_text", "text": "\nKeep Grok tool names and xAI examples.", "future": "Grok"},
-                {"type": "input_text", "text": original}
-            ]),
-        ),
-    ] {
-        let mut body = json!({
-            "instructions": "Keep top-level instructions.",
-            "input": [{"type": "message", "role": "developer", "content": content}],
-            "tools": [{"type": "function", "name": "grok", "description": original}]
-        })
-        .as_object()
-        .expect("request object")
-        .clone();
-        body = capture_grok_request(body, grok_marked_context(), false).await;
-        assert_eq!(body["input"][0]["content"], expected);
-        assert_eq!(body["instructions"], "Keep top-level instructions.");
-        assert_eq!(body["tools"][0]["description"], original);
-        let once = body.clone();
-        body = capture_grok_request(body, grok_marked_context(), false).await;
-        assert_eq!(body, once);
-    }
-}
-
-#[tokio::test]
-async fn grok_unrelated_text_and_unmarked_requests_are_preserved() {
-    let original = "You are Grok released by xAI. Be concise.";
-    for (role, content, context) in [
-        ("user", original, grok_marked_context()),
-        (
-            "developer",
-            "Quoted example: You are Grok released by xAI.",
-            grok_marked_context(),
-        ),
-        ("developer", original, Map::new()),
-        (
-            "developer",
-            original,
-            Map::from_iter([(
-                GROK_PASSTHROUGH_HEADERS_CONTEXT_KEY.to_owned(),
-                json!([["X-Grok-Future-Field", "dGVzdA=="]]),
-            )]),
-        ),
-        (
-            "developer",
-            original,
-            Map::from_iter([(
-                GROK_PASSTHROUGH_HEADERS_CONTEXT_KEY.to_owned(),
-                json!([["X-AuthenticateResponse", "dGVzdA=="]]),
-            )]),
-        ),
-    ] {
-        let mut body = json!({
-            "model": "gpt-5.4", "store": false, "stream": true,
-            "input": [{"type": "message", "role": role, "content": content}]
-        })
-        .as_object()
-        .expect("request object")
-        .clone();
-        let original_body = body.clone();
-        body = capture_grok_request(body, context, false).await;
-        assert_eq!(body, original_body);
-    }
-}
-
-#[tokio::test]
-async fn grok_downstream_identity_should_only_change_selected_codex_oauth_requests() {
-    let original = "You are Grok released by xAI. Be concise.";
-    let original_body = json!({
-        "model": "gpt-5.4",
-        "store": false,
-        "stream": true,
-        "instructions": "Preserve original instructions.",
-        "input": [{"type": "message", "role": "developer", "content": original}]
-    });
-    for (api_key, marked, expected) in [
-        (false, true, " Be concise."),
-        (false, false, original),
-        (true, true, original),
-    ] {
-        let sent = capture_grok_request(
-            original_body.as_object().expect("request object").clone(),
-            if marked {
-                grok_marked_context()
-            } else {
-                Map::new()
-            },
-            api_key,
-        )
-        .await;
-
-        assert_eq!(sent["input"][0]["content"], expected);
-        if !marked || api_key {
-            for (key, expected) in original_body.as_object().expect("request object") {
-                assert_eq!(sent.get(key), Some(expected), "client field: {key}");
-            }
+        ] {
+            let body = json!({
+                "model": "gpt-5.4", "store": false, "stream": true,
+                "instructions": original,
+                "input": [
+                    {"type": "message", "role": "developer", "content": content},
+                    {"type": "message", "role": "user", "content": original}
+                ],
+                "tools": [{"type": "function", "name": "echo", "description": original}]
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let context = Map::from_iter([(
+                "opaque_request_headers".to_owned(),
+                json!([["X-Grok-Model-Override", STANDARD.encode(b"test")]]),
+            )]);
+            let sent = capture_client_request(body.clone(), context, api_key).await;
+            assert_eq!(sent, body);
         }
     }
 }
 
-async fn capture_grok_request(
+async fn capture_client_request(
     body: Map<String, Value>,
     mut protocol_context: Map<String, Value>,
     api_key: bool,
@@ -12717,7 +12646,7 @@ async fn capture_grok_request(
                 "openai",
                 Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
             ),
-            context("req_grok_boundary", CancellationToken::new()),
+            context("req_client_body", CancellationToken::new()),
         )
         .await
         .expect("request preparation");

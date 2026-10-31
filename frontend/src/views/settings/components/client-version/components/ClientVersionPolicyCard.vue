@@ -36,9 +36,10 @@ const minCodexCliVersion = defineModel<string>('minCodexCliVersion', { required:
       <span class="inline-flex items-center gap-1.5">
         <span>{{ t('settings.clientVersion.clientVersionRestrictions') }}</span>
         <ZIconButton
+          variant="link"
           :aria-label="t('settings.clientVersion.openGuide')"
           :title="undefined"
-          class="size-6! hover:bg-transparent! active:bg-transparent!"
+          class="size-6!"
           @click="emit('help')"
         >
           <CircleHelp class="size-3.5" aria-hidden="true" />

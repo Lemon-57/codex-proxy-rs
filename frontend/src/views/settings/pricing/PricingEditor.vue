@@ -162,7 +162,7 @@ function submit() {
     <template #footer>
       <ZPopover v-model="helpOpen" class="mr-auto self-center" placement="top-start" trigger="hover-click">
         <template #reference>
-          <ZButton variant="text" :aria-expanded="helpOpen" :aria-controls="helpOpen ? helpId : undefined">
+          <ZButton variant="link" :aria-expanded="helpOpen" :aria-controls="helpOpen ? helpId : undefined">
             <template #icon>
               <Info class="size-3.5" aria-hidden="true" />
             </template>

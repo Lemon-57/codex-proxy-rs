@@ -481,7 +481,7 @@ watch(
         />
         <ZPopover placement="top-start">
           <template #reference>
-            <ZButton variant="text" size="small" square :aria-label="t('systemUpdate.channels.help')">
+            <ZButton variant="link" size="small" square :aria-label="t('systemUpdate.channels.help')">
               <CircleHelp class="size-4" />
             </ZButton>
           </template>

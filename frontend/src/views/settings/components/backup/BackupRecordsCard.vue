@@ -138,7 +138,7 @@ function canDelete(record: BackupRecord): boolean {
         <span>{{ t('settings.backup.backupRecords') }}</span>
         <ZPopover trigger="hover-click" placement="bottom-start">
           <template #reference="{ open }">
-            <ZIconButton :aria-label="t('settings.backup.backupScopeDescription')" :title="undefined" :aria-expanded="open" class="size-6! hover:bg-transparent! active:bg-transparent!">
+            <ZIconButton variant="link" :aria-label="t('settings.backup.backupScopeDescription')" :title="undefined" :aria-expanded="open" class="size-6!">
               <CircleHelp class="size-3.5" aria-hidden="true" />
             </ZIconButton>
           </template>

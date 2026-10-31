@@ -69,6 +69,8 @@ function handleRetentionKeydown(event: KeyboardEvent) {
         <ZPopover v-model="retentionOpen" trigger="hover-click" placement="top-start" :hover-delay="240">
           <template #reference>
             <ZIconButton
+              variant="link"
+              :title="undefined"
               :aria-label="t('accounts.importTasks.taskRetentionInstructions')"
               size="small"
               :aria-expanded="retentionOpen"

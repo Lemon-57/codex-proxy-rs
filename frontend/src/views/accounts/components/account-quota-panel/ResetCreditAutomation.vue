@@ -73,7 +73,7 @@ watch(() => props.accountId, () => {
         </h3>
         <ZPopover trigger="click" placement="bottom-start" role="dialog">
           <template #reference="{ open, id }">
-            <ZIconButton size="small" class="size-6! p-0!" :aria-label="t('accounts.quotaReset.automaticUsageRules')" :aria-expanded="open" :aria-controls="id">
+            <ZIconButton variant="link" :title="undefined" size="small" class="size-6! p-0!" :aria-label="t('accounts.quotaReset.automaticUsageRules')" :aria-expanded="open" :aria-controls="id">
               <CircleHelp class="size-3.5" />
             </ZIconButton>
           </template>
