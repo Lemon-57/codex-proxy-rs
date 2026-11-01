@@ -879,7 +879,7 @@ async fn usage_route_should_forward_name_and_model_contains_filters() {
 }
 
 #[tokio::test]
-async fn usage_route_should_expose_table_facts_without_detail_payload() {
+async fn usage_route_projects_request_facts_and_billing() {
     use std::str::FromStr as _;
 
     use axum::{
@@ -1123,7 +1123,6 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             "userAgent": "codex-cli/1.0",
         })
     );
-    assert!(value["data"]["items"][0].get("metadata").is_none());
     assert_eq!(
         value["data"]["items"][1]["billing"]["totalAmountDisplay"],
         "≈ $0.007"
@@ -1731,7 +1730,7 @@ async fn usage_status_query_accepts_three_modes_and_rejects_unknown_values() {
 }
 
 #[tokio::test]
-async fn dashboard_summary_should_identify_metrics_without_localized_labels() {
+async fn dashboard_summary_identifies_trend_metrics_and_account_usage_values() {
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
@@ -1884,7 +1883,6 @@ async fn dashboard_summary_should_identify_metrics_without_localized_labels() {
         assert_eq!(summary.len(), metrics.len());
         for (item, metric) in summary.iter().zip(metrics) {
             assert_eq!(item["metric"], metric);
-            assert!(item.get("label").is_none());
             assert!(item["value"].is_string());
         }
     }

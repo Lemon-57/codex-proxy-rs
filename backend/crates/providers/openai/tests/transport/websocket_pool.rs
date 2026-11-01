@@ -1123,9 +1123,9 @@ async fn concurrent_pool_transport_counts(max_connecting: usize) -> (usize, usiz
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let mut websocket_streams = Vec::new();
-        let mut http_count = 0;
+        let mut http_streams = Vec::new();
         for _ in 0..REQUEST_COUNT {
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
             let method = timeout(Duration::from_secs(2), async {
                 let mut prefix = [0_u8; 4];
                 loop {
@@ -1141,13 +1141,17 @@ async fn concurrent_pool_transport_counts(max_connecting: usize) -> (usize, usiz
             if method == *b"GET " {
                 websocket_streams.push(stream);
             } else {
-                let request = read_http_request(&mut stream).await;
-                assert!(request.starts_with("POST /codex/responses HTTP/1.1"));
-                write_completed_sse_response(&mut stream).await;
-                http_count += 1;
+                http_streams.push(stream);
             }
         }
 
+        // 收齐建连尝试后再响应，避免 HTTP 连接复用或重试干扰 opening 名额断言
+        let http_count = http_streams.len();
+        for mut stream in http_streams {
+            let request = read_http_request_with_body(&mut stream).await;
+            assert!(request.starts_with(b"POST /codex/responses HTTP/1.1"));
+            write_completed_sse_response(&mut stream).await;
+        }
         let websocket_count = websocket_streams.len();
         for (index, stream) in websocket_streams.into_iter().enumerate() {
             let mut websocket = accept_codex_test_websocket(stream).await;

@@ -1282,7 +1282,8 @@ RUST_MIN_STACK=16777216 cargo +1.99.1 nextest run --manifest-path backend/Cargo.
 ```
 
 测试使用 [nextest](https://nexte.st/docs/installation/pre-built-binaries/)，版本与[质量工作流](../.github/workflows/_quality.yml)一致
-各 crate 的 `main` 测试入口统一构建，用例按可用 CPU 数跨 crate 并发执行
+各 crate 的 `main` 测试入口统一构建，用例跨 crate 并发执行；本地默认按可用 CPU 数调度，
+CI 使用 `--test-threads 8` 并发推进数据库、子进程和网络等待
 局部验证可追加 `-E 'package(=gateway-store) & test(/^redis::/)'` 等过滤条件；资源受限时用
 `--test-threads 4` 限制同时运行的用例数，编译并发另由 `--build-jobs` 控制
 未安装 nextest 时可使用 `cargo +1.99.1 test --manifest-path backend/Cargo.toml --test main --locked`，
