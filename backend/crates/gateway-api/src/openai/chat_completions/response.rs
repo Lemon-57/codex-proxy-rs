@@ -8,7 +8,7 @@ use gateway_protocol::openai::sse::encode_sse_event;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::openai::responses::{ProtocolError, ProtocolErrorBody};
+use crate::client_error::{ProtocolError, ProtocolErrorBody};
 
 #[derive(Debug, Clone, Serialize)]
 pub(in crate::openai) struct ChatIdentity {

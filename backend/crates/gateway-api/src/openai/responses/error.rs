@@ -1,38 +1,7 @@
 //! OpenAI Responses adapter 的稳定错误 contract
 
-use serde::Serialize;
-use serde_json::Value;
+use crate::client_error::{ProtocolError, ProtocolErrorBody};
 use thiserror::Error;
-
-/// OpenAI 风格的协议错误 JSON
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ProtocolErrorBody {
-    /// 错误对象
-    pub error: ProtocolError,
-}
-
-/// 不包含请求正文或 prompt 的错误对象
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ProtocolError {
-    /// OpenAI 错误类别
-    #[serde(rename = "type")]
-    pub kind: &'static str,
-    /// 稳定机器码
-    pub code: &'static str,
-    /// 安全的可读信息
-    pub message: String,
-    /// 出错字段；不包含字段值
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub param: Option<String>,
-}
-
-impl ProtocolErrorBody {
-    /// 序列化为 JSON value
-    #[must_use]
-    pub fn into_value(self) -> Value {
-        serde_json::json!({ "error": self.error })
-    }
-}
 
 /// Responses 请求解码错误
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

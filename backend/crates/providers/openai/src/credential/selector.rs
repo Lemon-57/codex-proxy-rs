@@ -17,10 +17,11 @@ use gateway_core::account::{
 use gateway_core::concurrency::{CapacityWait, ConcurrencyWaitQueue, QueueRejection, WaitPriority};
 use gateway_core::engine::{AttemptContext, ContinuationAttempt, policy::AccountPolicyError};
 use gateway_core::provider_ports::{
-    ProviderConcurrencyPool, ProviderLeaseAcquisition, ProviderLeaseGuard, ProviderLeasePort,
-    ProviderLeaseRequest, ProviderSchedulingLeaseRequest, ProviderSessionAffinityKey,
-    ProviderSessionAffinityPort, ProviderSessionBinding, ProviderSessionExclusionPort,
-    ProviderSessionExclusions, ProviderStoreError,
+    ProviderConcurrencyPool, ProviderCooldownPort, ProviderCooldownScope, ProviderLeaseAcquisition,
+    ProviderLeaseGuard, ProviderLeasePort, ProviderLeaseRequest, ProviderSchedulingLeaseRequest,
+    ProviderScopedCooldown, ProviderSessionAffinityKey, ProviderSessionAffinityPort,
+    ProviderSessionBinding, ProviderSessionExclusionPort, ProviderSessionExclusions,
+    ProviderStoreError,
 };
 use gateway_core::routing::ProviderKind;
 use secrecy::ExposeSecret;
@@ -28,12 +29,13 @@ use thiserror::Error;
 use url::Url;
 
 use super::affinity::CodexSessionAffinity;
+use super::catalog::CodexCredentialCatalogService;
+use super::codec::CodexRuntimeAuthentication;
 use super::cookie::CodexCookiePolicy;
 use super::eligibility::CodexSelectionModel;
 use super::quota::CodexCredentialQuotaService;
 use super::refresh::refresh_recovery_deadline;
 use super::repository::{CodexCredentialRepository, CredentialRepositoryError};
-use super::security::CodexRuntimeAuthentication;
 use super::types::{
     CODEX_AUTHENTICATION_KIND_OAUTH, CodexCookie, CodexCookieCaptureOutcome, RuntimeCodexCookie,
 };
@@ -52,6 +54,8 @@ const CYBER_POLICY_TIMEOUT: Duration = Duration::from_millis(100);
 const CYBER_POLICY_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
 const MAX_ACCOUNT_SNAPSHOT_RETRIES: u32 = 3;
 const COOLDOWN_READ_CONCURRENCY: usize = 128;
+// 套餐权限可能变化，明确拒绝只作有界的账号模型排除，不冻结整个账号
+const MODEL_UNSUPPORTED_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexAccountFailure {
@@ -135,6 +139,8 @@ pub struct CodexCredentialSelector {
     session_affinity: Arc<dyn ProviderSessionAffinityPort>,
     session_exclusions: Arc<dyn ProviderSessionExclusionPort>,
     quota: Arc<CodexCredentialQuotaService>,
+    catalog: Arc<CodexCredentialCatalogService>,
+    cooldowns: Arc<dyn ProviderCooldownPort>,
     upstream_info: Option<Arc<dyn gateway_core::account::UpstreamInfoSource>>,
     cookie_policy: CodexCookiePolicy,
     risk_recovery: Mutex<HashMap<String, RiskRecoveryState>>,
@@ -273,6 +279,8 @@ impl CodexCredentialSelector {
         session_affinity: Arc<dyn ProviderSessionAffinityPort>,
         session_exclusions: Arc<dyn ProviderSessionExclusionPort>,
         quota: Arc<CodexCredentialQuotaService>,
+        catalog: Arc<CodexCredentialCatalogService>,
+        cooldowns: Arc<dyn ProviderCooldownPort>,
         account_feedback: Arc<AccountFeedbackStats>,
         cookie_policy: CodexCookiePolicy,
     ) -> Self {
@@ -283,6 +291,8 @@ impl CodexCredentialSelector {
             session_affinity,
             session_exclusions,
             quota,
+            catalog,
+            cooldowns,
             upstream_info: None,
             cookie_policy,
             risk_recovery: Mutex::new(HashMap::new()),
@@ -619,6 +629,14 @@ impl CodexCredentialSelector {
                 })
                 .collect::<Vec<_>>();
             let mut eligible = Vec::with_capacity(accounts.len());
+            let catalog_excluded = match model {
+                CodexSelectionModel::Requested(model) if !diagnostic => self
+                    .catalog
+                    .scheduling_exclusions(&accounts, model, SystemTime::now()),
+                _ => Default::default(),
+            };
+            let mut catalog_rejected = 0_usize;
+            let mut native_accounts = std::collections::BTreeSet::new();
             for account in accounts {
                 let adapter = if let Some(model) = adapter_model.as_ref() {
                     match request.attempt.upstream_adapter_for_account(
@@ -637,6 +655,14 @@ impl CodexCredentialSelector {
                     !adapter.supports_authentication(account.authentication_kind())
                 }) {
                     continue;
+                }
+                // 受管适配器拥有其上游模型合同，不套用原生目录与拒绝反馈
+                if adapter.is_none() {
+                    if catalog_excluded.contains(account.id()) {
+                        catalog_rejected += 1;
+                        continue;
+                    }
+                    native_accounts.insert(account.id().clone());
                 }
                 if request.requires_websocket
                     && adapter.is_none()
@@ -667,6 +693,12 @@ impl CodexCredentialSelector {
                 eligible.push(account);
             }
             let accounts = eligible;
+            if catalog_rejected > 0 && request.attempt.trace().is_enabled() {
+                request.attempt.trace().record(
+                    "account.model_catalog",
+                    serde_json::json!({"rejectedCount": catalog_rejected}),
+                );
+            }
             if model_access_rejected > 0 && request.attempt.trace().is_enabled() {
                 request.attempt.trace().record(
                     "account.model_access",
@@ -677,13 +709,48 @@ impl CodexCredentialSelector {
                 self.quota.prepare_scheduling(&accounts).await;
             }
             let mut rate_limits = HashMap::with_capacity(accounts.len());
+            let model_scope = match model {
+                CodexSelectionModel::Requested(model) => {
+                    gateway_core::routing::UpstreamModelId::new(model)
+                        .ok()
+                        .map(ProviderCooldownScope::upstream_model)
+                }
+                _ => None,
+            };
             if !diagnostic {
                 // 同一批候选并发读取实时冷却，避免逐账号累加 Redis 往返
                 // 分批限制在途读取，取消选号时直接释放本批 future，不启动后续批次
                 for batch in accounts.chunks(COOLDOWN_READ_CONCURRENCY) {
                     rate_limits.extend(
                         futures::future::join_all(batch.iter().map(|account| async {
-                            let until = self.quota.cooldown(account.id()).await.unwrap_or(None);
+                            let account_cooldown = self.quota.cooldown(account.id());
+                            let model_cooldown = async {
+                                let scope = model_scope.as_ref()?;
+                                if !native_accounts.contains(account.id()) {
+                                    return None;
+                                }
+                                self.cooldowns
+                                    .read_scoped(account.id(), scope)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .filter(|cooldown| {
+                                        cooldown.credential_revision() == account.revision()
+                                            && cooldown.until() > SystemTime::now()
+                                    })
+                            };
+                            let (account_cooldown, model_cooldown) =
+                                futures::join!(account_cooldown, model_cooldown);
+                            // 保留账号保护的探测语义，同时覆盖两种冷却中较晚的到期时间
+                            let mut until = account_cooldown.unwrap_or(None);
+                            if let Some(model_cooldown) = model_cooldown {
+                                let cooldown =
+                                    until.get_or_insert(gateway_core::account::AccountCooldown {
+                                        until: model_cooldown.until(),
+                                        kind: gateway_core::account::AccountCooldownKind::RateLimit,
+                                    });
+                                cooldown.until = cooldown.until.max(model_cooldown.until());
+                            }
                             (account.id().clone(), until)
                         }))
                         .await,
@@ -1094,6 +1161,23 @@ impl CodexCredentialSelector {
                 }
             }
         }
+    }
+
+    pub(crate) async fn record_model_unsupported(
+        &self,
+        account: &ProviderAccount,
+        model: &gateway_core::routing::UpstreamModelId,
+    ) -> Result<(), ProviderStoreError> {
+        let now = SystemTime::now();
+        self.cooldowns
+            .put_scoped_if_later(ProviderScopedCooldown::new(
+                account.id().clone(),
+                account.revision(),
+                ProviderCooldownScope::upstream_model(model.clone()),
+                now.checked_add(MODEL_UNSUPPORTED_COOLDOWN).unwrap_or(now),
+            ))
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn remember_turn(

@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
-use crate::credential::discovery::MAX_OAUTH_RESPONSE_BYTES;
+use crate::oauth_http::MAX_OAUTH_RESPONSE_BYTES;
 use crate::{
     GrokBillingRequest, GrokBillingTransport, GrokBillingTransportError,
     GrokBillingTransportErrorKind, GrokBillingTransportFuture, GrokBillingTransportResponse,
@@ -34,7 +34,9 @@ use gateway_core::event::UpstreamHttpVersion;
 use gateway_core::upstream::UpstreamSendState;
 
 use super::egress::{EgressCache, MAX_CACHED_EGRESS_STATES};
-use super::{GrokQuotaFailureKind, classify_grok_quota_failure, scrub_account_fingerprints};
+use super::upstream_error::{
+    GrokQuotaFailureKind, classify_grok_quota_failure, scrub_account_fingerprints,
+};
 use gateway_core::account::OutboundProxy;
 
 pub(crate) const OFFICIAL_OAUTH_HOST: &str = "auth.x.ai";

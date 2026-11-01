@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::plugin_update::{ConfirmedPluginRestart, PluginSystemUpdatePreflight};
+use super::system_preflight::{ConfirmedPluginRestart, PluginSystemUpdatePreflight};
 use crate::model::{MutationContext, system::SystemRestartPlan};
 use async_trait::async_trait;
 

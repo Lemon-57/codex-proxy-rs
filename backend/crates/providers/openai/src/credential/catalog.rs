@@ -29,6 +29,8 @@ use crate::transport::{CodexBackendClient, CodexCatalogModel, CodexRequestContex
 
 const MAX_RESPONSE_ETAG_BYTES: usize = 256;
 const PLAN_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+// 调度证据覆盖默认 15 分钟刷新周期及抖动，长期未刷新时恢复上游验证
+const SCHEDULING_CATALOG_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 const MAX_CATALOG_FETCH_ATTEMPTS: usize = 3;
 const MAX_PLAN_CATALOG_MODELS: usize = 2_048;
 const MAX_CLIENT_CATALOGS: usize = 32;
@@ -535,6 +537,41 @@ impl CodexCredentialCatalogService {
         snapshot
             .account_models(account)
             .map(|models| models.map(<[String]>::to_vec))
+    }
+
+    /// 有效目录约束账号模型资格，缺失目录或未知套餐继续交由上游判断
+    pub(crate) fn scheduling_exclusions(
+        &self,
+        accounts: &[ProviderAccount],
+        model: &str,
+        now: SystemTime,
+    ) -> BTreeSet<ProviderAccountId> {
+        let Ok(cache) = self.cache.read() else {
+            return BTreeSet::new();
+        };
+        let Some(snapshot) = cache.snapshot.as_ref().filter(|snapshot| {
+            now.duration_since(snapshot.observed_at)
+                .is_ok_and(|age| age < SCHEDULING_CATALOG_MAX_AGE)
+        }) else {
+            return BTreeSet::new();
+        };
+        // OAuth 按套餐共享，API Key 按账号与凭据版本隔离，不能借用其他来源的模型资格
+        let excluded_scopes = snapshot
+            .scope_catalogs
+            .iter()
+            .filter(|(scope, catalog)| {
+                scope.as_str() != "plan:unknown" && !catalog.models.iter().any(|id| id == model)
+            })
+            .map(|(scope, _)| scope)
+            .collect::<BTreeSet<_>>();
+        accounts
+            .iter()
+            .filter(|account| {
+                CodexCatalogScope::for_account(account)
+                    .is_ok_and(|scope| excluded_scopes.contains(&scope))
+            })
+            .map(|account| account.id().clone())
+            .collect()
     }
 
     /// 优先读取套餐目录 cache；缺失时才用当前账号所属套餐的有限候选集实时填充

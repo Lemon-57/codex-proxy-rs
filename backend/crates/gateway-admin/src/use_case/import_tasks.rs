@@ -9,7 +9,10 @@ use std::{
 
 use chrono::Utc;
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture, stream::FuturesUnordered};
-use gateway_core::task::{DaemonTask, WorkerDaemonContext, WorkerTaskError};
+use gateway_core::task::{
+    DaemonRestartPolicy, DaemonTask, WorkerContribution, WorkerDaemonContext, WorkerId, WorkerKind,
+    WorkerRegistration, WorkerRunnable, WorkerTaskError,
+};
 use tokio::{sync::Notify, time::Instant};
 use uuid::Uuid;
 
@@ -327,6 +330,24 @@ impl ImportTasksService for DefaultImportTasksService {
 }
 
 pub(crate) struct ImportTaskWorker(pub Arc<DefaultImportTasksService>);
+
+impl ImportTaskWorker {
+    pub(crate) fn into_worker(self) -> Result<WorkerContribution, AdminError> {
+        let id = WorkerId::try_new(WorkerKind::AccountImport, "admin")
+            .map_err(|_| AdminError::internal("导入 Worker ID 不合法"))?;
+        let restart = DaemonRestartPolicy::try_new(Duration::from_secs(1), Duration::from_secs(60))
+            .map_err(|_| AdminError::internal("导入 Worker 重启策略不合法"))?;
+        let registration = WorkerRegistration::try_new(
+            id,
+            WorkerRunnable::Daemon {
+                restart,
+                task: Box::new(self),
+            },
+        )
+        .map_err(|_| AdminError::internal("导入 Worker 注册信息不合法"))?;
+        Ok(WorkerContribution::Registration(registration))
+    }
+}
 
 impl DaemonTask for ImportTaskWorker {
     fn run(&self, context: WorkerDaemonContext) -> BoxFuture<'_, Result<(), WorkerTaskError>> {

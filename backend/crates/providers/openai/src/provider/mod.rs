@@ -128,8 +128,6 @@ const WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES: usize = 15 * 1024 * 1024;
 const MAX_COOKIE_HEADER_BYTES: usize = 16 * 1024;
 // 额度拒绝后的 usage 补查自身执行时长上限；结算等待的随机延迟见 jitter 模块
 const QUOTA_FAILURE_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
-pub const OFFICIAL_CODEX_BASE_PATH: &str = "/backend-api";
-pub const OFFICIAL_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexProviderTransport {

@@ -25,8 +25,8 @@ use super::admin::{
     CodexCredentialAdmin, CodexCredentialAdminError, PreparedCodexCredentialRotation,
     UnresolvedCodexOAuthCredential,
 };
+use super::codec::CodexCredentialCodec;
 use super::recovery_log::{CodexOAuthRecoveryOperation, record_oauth_recovery};
-use super::security::CodexCredentialCodec;
 use super::token_client::{
     AuthorizationCodeExchangeError, AuthorizationCodeExchanger, AuthorizationCodeGrant,
     OFFICIAL_CODEX_OAUTH_CLIENT_ID, OFFICIAL_CODEX_REDIRECT_URI,

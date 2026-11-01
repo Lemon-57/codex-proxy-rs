@@ -629,6 +629,7 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
             response_origin: &request.response_origin,
             cyber_policy_scope: None,
             allows_account_state_mutation,
+            upstream_model: None,
         };
         let active_account = request.lease.account().clone();
         let cookie_header = build_cookie_header(request.lease.cookies())?;
@@ -797,6 +798,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             response_origin: &response_origin,
             cyber_policy_scope: cyber_policy_scope.as_ref(),
             allows_account_state_mutation,
+            upstream_model: Some(&upstream_model),
         };
         let mut active_account = lease.account().clone();
         let cookie_header = build_cookie_header(lease.cookies())?;
@@ -940,6 +942,15 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     {
                         active_account = current;
                     }
+                }
+                // 迟到响应不能覆盖已更新的凭据，版本冲突属于正常跳过而非存储故障
+                Err(CredentialSelectionError::RevisionConflict(_)) => {
+                    tracing::debug!(
+                        request_id = %request_id,
+                        account_id = %active_account.id(),
+                        credential_revision = active_account.revision().get(),
+                        "Skipped OpenAI response cookies after credential revision changed"
+                    );
                 }
                 Err(error) => {
                     tracing::warn!(

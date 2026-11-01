@@ -36,10 +36,9 @@ jobs:
         with:
           path: ${{ runner.temp }}/container-cargo
           # 同一平台和依赖复用快照，源码变化由 Cargo 指纹判定是否重编译
-          key: container-cargo-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml', 'backend/**/Cargo.toml', 'backend/.cargo/config.toml', 'deploy/Dockerfile', '.github/actions/cargo-cache/Dockerfile') }}
+          key: container-cargo-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml', 'backend/**/Cargo.toml', 'backend/.cargo/config.toml', 'deploy/Dockerfile', '.github/actions/cargo-cache/Dockerfile') }}
           restore-keys: |
-            container-cargo-v3-${{ runner.os }}-${{ runner.arch }}-
-            container-cargo-v2-${{ runner.os }}-${{ runner.arch }}-
+            container-cargo-v4-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Restore Cargo mounts to BuildKit
         id: cargo-restore
@@ -49,6 +48,9 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           path: ${{ runner.temp }}/container-cargo
           architecture: amd64
+
+      - name: Release restored Cargo snapshot
+        run: rm -rf "$RUNNER_TEMP/container-cargo"
 
       - name: Build runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

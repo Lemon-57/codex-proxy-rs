@@ -2,7 +2,7 @@
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use super::{HostClient, HostReply, SessionError, read::PendingRead};
+use super::{HostClient, HostReply, SessionError, pending_read::PendingRead};
 use crate::{
     ErrorCode, PluginFault,
     call::{
