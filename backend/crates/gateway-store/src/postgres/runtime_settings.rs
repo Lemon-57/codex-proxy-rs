@@ -453,7 +453,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
                 .reset_credit_max_weekly_remaining_percent
                 .map(i64::from)
     {
-        sqlx::query("update provider_accounts set reset_credit_next_run_at = least(reset_credit_next_run_at, now()), reset_credit_automation_json = jsonb_set(reset_credit_automation_json, '{revision}', to_jsonb((reset_credit_automation_json ->> 'revision')::bigint + 1)) where reset_credit_automation_json ->> 'enabled' = 'true' or reset_credit_automation_json #>> '{state,inherits_default}' = 'true' ")
+        sqlx::query("update provider_accounts set reset_credit_next_run_at = least(reset_credit_next_run_at, now()), reset_credit_automation_json = jsonb_set(reset_credit_automation_json, '{revision}', to_jsonb((reset_credit_automation_json ->> 'revision')::bigint + 1)) where coalesce(reset_credit_automation_json ->> 'enabled_v2', reset_credit_automation_json ->> 'enabled') = 'true' or reset_credit_automation_json #>> '{state,inherits_default}' = 'true' ")
             .execute(&mut **transaction).await
             .map_err(|source| postgres_unavailable("reschedule reset-credit automation", source))?;
     }

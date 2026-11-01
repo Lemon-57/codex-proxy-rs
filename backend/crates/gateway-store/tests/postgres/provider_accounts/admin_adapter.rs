@@ -661,6 +661,7 @@ async fn reset_credit_automation_persists_pending_checks_cas_and_follows_account
         .unwrap()
         .unwrap();
     assert_eq!(loaded.state, record.state);
+    assert_eq!(loaded.enabled, record.enabled);
     use gateway_store::postgres::{PgRuntimeSettingsRepository, RuntimeSettingsRepository as _};
     let settings = PgRuntimeSettingsRepository::new(database.pool.clone());
     assert_eq!(

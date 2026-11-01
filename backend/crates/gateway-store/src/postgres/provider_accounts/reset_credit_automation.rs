@@ -12,6 +12,9 @@ use gateway_admin::{
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredResetCreditAutomation {
     enabled: bool,
+    // 新计划的开关是唯一执行事实，旧扫描器只见关闭，排空时不会重写新版状态
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled_v2: Option<bool>,
     revision: u64,
     state: ResetCreditAutomationState,
 }
@@ -35,7 +38,7 @@ impl ResetCreditAutomationStore for PgAdminAccountStore {
             .map(|stored| {
                 Ok(ResetCreditAutomation {
                     account_id: account_id.to_owned(),
-                    enabled: stored.enabled,
+                    enabled: stored.enabled_v2.unwrap_or(stored.enabled),
                     revision: stored.revision,
                     next_run_at: row.try_get("reset_credit_next_run_at").map_err(|source| {
                         automation_error("decode reset-credit deadline", source)
@@ -51,7 +54,7 @@ impl ResetCreditAutomationStore for PgAdminAccountStore {
         now: DateTime<Utc>,
         limit: u32,
     ) -> AdminStoreResult<Vec<String>> {
-        sqlx::query_scalar("select a.id from provider_accounts a cross join runtime_settings s where s.id=1 and (a.reset_credit_next_run_at <= $1 or a.reset_credit_automation_json is null) and ((a.enabled and a.provider_kind='openai' and a.authentication_kind='oauth' and case when a.reset_credit_automation_json is null or a.reset_credit_automation_json #>> '{state,inherits_default}'='true' then s.reset_credit_default_enabled else a.reset_credit_automation_json->>'enabled'='true' end) or a.reset_credit_automation_json #> '{state,quota_refresh}' is not null and a.reset_credit_automation_json #> '{state,quota_refresh}' <> 'null'::jsonb) order by a.reset_credit_next_run_at nulls first, a.id limit $2")
+        sqlx::query_scalar("select a.id from provider_accounts a cross join runtime_settings s where s.id=1 and (a.reset_credit_next_run_at <= $1 or a.reset_credit_automation_json is null or (a.reset_credit_automation_json #>> '{state,next_quota_check_at}' is null and a.reset_credit_automation_json #>> '{state,quota_refresh}' is null and a.reset_credit_automation_json #>> '{state,pending}' is null)) and ((a.enabled and a.provider_kind='openai' and a.authentication_kind='oauth' and case when a.reset_credit_automation_json is null or a.reset_credit_automation_json #>> '{state,inherits_default}'='true' then s.reset_credit_default_enabled else coalesce(a.reset_credit_automation_json->>'enabled_v2',a.reset_credit_automation_json->>'enabled')='true' end) or a.reset_credit_automation_json #> '{state,quota_refresh}' is not null and a.reset_credit_automation_json #> '{state,quota_refresh}' <> 'null'::jsonb) order by a.reset_credit_next_run_at nulls first, a.id limit $2")
             .bind(now).bind(i64::from(limit)).fetch_all(&self.pool).await
             .map_err(|source| automation_error("list due reset-credit automation", source))
     }
@@ -82,7 +85,8 @@ impl ResetCreditAutomationStore for PgAdminAccountStore {
             .and_then(|value| u64::try_from(value).ok())
             .ok_or_else(invalid_automation_revision)?;
         let stored = StoredResetCreditAutomation {
-            enabled: record.enabled,
+            enabled: false,
+            enabled_v2: Some(record.enabled),
             revision: next,
             state: record.state.clone(),
         };
