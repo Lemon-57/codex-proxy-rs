@@ -409,8 +409,8 @@ Responses 也不透传 `x-stainless-*`、`Origin`、`Referer`、`sec-ch-ua*` 和
 两者同时存在时仍优先使用 `session-id`。正文中的 `client_metadata.session_id`、
 `prompt_cache_key` 不受这条请求头规则影响。
 `thread-id`、turn metadata 等 Codex 协议字段及未知业务扩展不受下游环境头过滤规则影响；
-出站移除下游的 `traceparent`、`tracestate` 及 WS metadata 中对应的
-`ws_request_header_traceparent`、`ws_request_header_tracestate`
+出站移除下游的 `traceparent`、`tracestate`、`sentry-trace`、`baggage`，
+以及 WS metadata 中对应的 `ws_request_header_*` 副本
 
 会话、线程、窗口及父子线程引用在出站时按本次安装身份稳定映射为 UUID；
 默认使用账号安装身份，同账号保留引用关系，换账号使用不同标识。HTTP 请求头、正文 metadata、WS 副本及
@@ -1886,6 +1886,10 @@ JSON 路径支持 `$`、`.成员`、`["带特殊字符的键"]`、`[索引]`、`
 `rename_key` 替换所选对象的直接键名，重名时失败；`remove_field` 删除所选字段或数组项，不能删除作用范围根节点。
 删除动作的 `pattern: null` 表示无条件删除，字符串模式表示只删除字符串值匹配的字段或数组项。
 请求头规则生成的值必须是 ASCII 文本，以保持 HTTP 与 WebSocket opening 的一致性；metadata 范围会自动转义 Unicode
+
+WebSocket 请求头在握手时发送。隐私规则改变握手头时，普通请求按对应连接身份选择连接，
+处理结果稳定时可继续复用，不因每次执行删除动作而重连。
+依赖原连接的精确续接保留原连接，规则变更不能撤回已有握手发送的值
 
 例如，`turn_metadata` 范围的 `$.workspaces` 配合 `remove_field` 删除整个工作区映射；
 `$.workspaces.*.associated_remote_urls.*` 配合 `remove_field` 和 `pattern: "private-org"` 只删除命中的远端；
