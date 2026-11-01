@@ -25,8 +25,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::api_key::{ApiKeyCredentialData, CODEX_AUTHENTICATION_KIND_API_KEY};
+use super::codec::CodexCredentialCodec;
 use super::recovery_log::{CodexOAuthRecoveryOperation, record_oauth_recovery};
-use super::security::CodexCredentialCodec;
 use super::token_client::{
     OpenAiTokenClient, PersonalAccessTokenError, RefreshFailure, TokenRefresher,
 };

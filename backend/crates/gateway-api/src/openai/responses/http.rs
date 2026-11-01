@@ -943,7 +943,7 @@ impl StreamingExecutionBody {
             Bytes::from(response_failed_sse_event_with_id(
                 self.encoder.response_id(),
                 error.client_error_type().unwrap_or(default_type),
-                super::super::error::client_error_code(
+                crate::client_error::client_error_code(
                     error.client_error_code().unwrap_or(default_code),
                 ),
                 error.client_message(),

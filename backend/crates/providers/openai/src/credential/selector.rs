@@ -28,12 +28,12 @@ use thiserror::Error;
 use url::Url;
 
 use super::affinity::CodexSessionAffinity;
+use super::codec::CodexRuntimeAuthentication;
 use super::cookie::CodexCookiePolicy;
 use super::eligibility::CodexSelectionModel;
 use super::quota::CodexCredentialQuotaService;
 use super::refresh::refresh_recovery_deadline;
 use super::repository::{CodexCredentialRepository, CredentialRepositoryError};
-use super::security::CodexRuntimeAuthentication;
 use super::types::{
     CODEX_AUTHENTICATION_KIND_OAUTH, CodexCookie, CodexCookieCaptureOutcome, RuntimeCodexCookie,
 };

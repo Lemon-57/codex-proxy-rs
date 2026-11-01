@@ -44,7 +44,6 @@ use serde_json::{Map, Number, Value};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::XaiWireProfileState;
 use crate::credential::{
     FailureClass, GrokAccountProfile, GrokCredentialAdmin, GrokCredentialCatalogError,
     GrokCredentialCatalogService, GrokCredentialQuotaService, GrokCredentialRefreshError,
@@ -53,10 +52,11 @@ use crate::credential::{
     GrokOAuthImportMetadata, GrokOAuthImportTokens, GrokOAuthSecret, GrokQuotaError,
     GrokQuotaPeriodKind, GrokQuotaSnapshot, OAuthError, PendingAuthorization,
     PreparedGrokCredentialRotation, PreparedGrokCredentialRotationGuard, RedirectUriAllowlist,
-    RotateManagedGrokCredential, SecretValue, VerifiedGrokAccount, VerifiedTokenSet,
+    RotateManagedGrokCredential, VerifiedGrokAccount, VerifiedTokenSet,
 };
 use crate::transport::profile::{GrokCliReleaseSnapshot, GrokCliReleaseStatus};
 use crate::transport::{GROK_CLI_BASE_URL, XAI_PROVIDER_NAME, grok_billing_breakdown_with_tier};
+use crate::{SecretValue, XaiWireProfileState};
 
 const PENDING_SCHEMA_VERSION: u64 = 3;
 const PENDING_TTL: TimeDelta = TimeDelta::minutes(30);

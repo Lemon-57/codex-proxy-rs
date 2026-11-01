@@ -4,6 +4,7 @@ mod admin;
 mod affinity;
 mod api_key;
 mod catalog;
+mod codec;
 mod cookie;
 mod eligibility;
 mod oauth;
@@ -12,7 +13,6 @@ mod quota;
 mod recovery_log;
 mod refresh;
 mod repository;
-mod security;
 mod selector;
 pub mod token_client;
 mod types;
@@ -41,6 +41,10 @@ pub use catalog::{
     CodexCatalogScope, CodexCredentialCatalogError, CodexCredentialCatalogService,
     CodexCredentialCatalogSnapshot, CodexPlanCatalog,
 };
+pub use codec::{
+    CodexCredentialCodec, CodexCredentialDataError, CodexRuntimeAuthentication,
+    CodexRuntimeCredential,
+};
 pub use cookie::{CodexCookiePolicy, CookiePolicyError};
 pub use oauth::{
     CodexOAuthAdmin, CodexOAuthAdminError, CodexOAuthAdminService, CodexOAuthAuthorizationStarted,
@@ -62,10 +66,6 @@ pub use refresh::{
     DueCodexCredential,
 };
 pub use repository::{CodexCredentialRepository, CredentialRepositoryError};
-pub use security::{
-    CodexCredentialCodec, CodexCredentialDataError, CodexRuntimeAuthentication,
-    CodexRuntimeCredential,
-};
 pub use selector::{
     CodexAccountFailure, CodexCredentialLease, CodexCredentialSelector, CredentialSelectionError,
     SelectCodexCredential,

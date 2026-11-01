@@ -14,7 +14,7 @@ use gateway_core::routing::ProviderKind;
 use secrecy::ExposeSecret;
 use thiserror::Error;
 
-use super::security::{CodexCredentialCodec, CodexCredentialDataError, CodexRuntimeCredential};
+use super::codec::{CodexCredentialCodec, CodexCredentialDataError, CodexRuntimeCredential};
 use super::types::{CodexCredentialData, CodexOAuthSecret};
 
 const PROVIDER_NAME: &str = "openai";

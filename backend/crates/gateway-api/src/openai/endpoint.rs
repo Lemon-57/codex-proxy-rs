@@ -16,6 +16,7 @@ use gateway_core::{
     operation::Operation,
 };
 
+use crate::client_error::{ProtocolError, ProtocolErrorBody};
 use crate::middleware::headers::encode_headers;
 use crate::openai::middleware::{
     ExpectedBody, PendingExecution, RequestInput, buffered_response, error_response,
@@ -25,7 +26,6 @@ use gateway_core::event::{ProviderEvent, ProviderResponseHeader};
 
 use super::{
     error::{engine_error_response, gateway_error_response, protocol_error_response},
-    responses::{ProtocolError, ProtocolErrorBody},
     service::OpenAiService,
 };
 

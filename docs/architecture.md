@@ -368,6 +368,7 @@ Client Key 费用账本独立累计各次 attempt 的实际费用，不能因请
 | 入口 | 职责 |
 | --- | --- |
 | `api/modules/` | 页面 HTTP 合同，模块名对应 `views/` 一级目录；复杂模块在同名目录内按功能拆分，业务类型由所属模块定义 |
+| `api/types/` | 跨业务模块共享的接口类型，如时间展示与请求位置；不依赖请求实现或业务模块 |
 | `api/request/` | 请求入口与插件链；负责会话恢复、重试、错误提示、错误归一化和原始／流式响应处理，页面不重复解释响应信封 |
 | `stores/modules/`、`router/`、`plugins/` | 应用级登录与界面状态、路由和初始化；服务端数据的权威仍在后端 |
 | `views/<页面>/index.vue`、`views/<页面>/components/` | 页面组合与局部交互；复杂组件按职责拆成目录入口和相邻模块 |
@@ -1143,7 +1144,7 @@ Worker 由各 Bundle 贡献、由 Host 统一监督：
 - Host：历史保留任务，持有调度、单轮行数/批数/时长预算、取消和日志；Admin 校验[保留窗口](api.md#历史保留)，Store 执行有界批量删除
 - Core：`runtime` owner 的 RuntimeSnapshot 周期对账和 Redis change 订阅
 - Admin：S3/R2 备份 daemon，负责调度、执行、删除收敛与保留清理；
-  以及账号错误保护恢复 worker（到期解除或探测恢复）、公共 CPR 互联同步
+  以及账号错误保护恢复 worker（到期解除或探测恢复）、重置卡自动使用和公共 CPR 互联同步
 - Provider：credential refresh、quota/catalog 健康、账号预热和官方版本/etag 检查
 
 互联同步使用账号出口的受管 HTTP 客户端，不跟随跳转；网络等待不持有数据库事务。
