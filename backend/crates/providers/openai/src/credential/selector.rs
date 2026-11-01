@@ -656,7 +656,7 @@ impl CodexCredentialSelector {
                 }) {
                     continue;
                 }
-                // 受管适配器拥有其上游模型合同，不套用官方 OAuth 目录与拒绝反馈
+                // 受管适配器拥有其上游模型合同，不套用原生目录与拒绝反馈
                 if adapter.is_none() {
                     if catalog_excluded.contains(account.id()) {
                         catalog_rejected += 1;

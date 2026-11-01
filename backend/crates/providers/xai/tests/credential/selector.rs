@@ -948,6 +948,58 @@ async fn explicit_catalog_non_membership_excludes_only_unsupported_account() {
 }
 
 #[tokio::test]
+async fn catalog_rejects_unlisted_models_but_does_not_share_unknown_plan_entitlements() {
+    let fixture = SelectorFixture::new(&["catalog-account"]).await;
+    let id = account_id("catalog-account");
+    let account = fixture.store.account(&id).unwrap();
+    let seed = GrokCredentialCatalogSeed::new(["grok-4.5"], None).unwrap();
+    fixture
+        .cache
+        .replace(GrokPlanCatalog::new(
+            GrokCatalogScope::for_account(&account).unwrap(),
+            Utc::now(),
+            seed.clone(),
+        ))
+        .await
+        .unwrap();
+    let request = || {
+        fixture.request_for_model_with_policy(
+            "grok-unlisted",
+            BTreeSet::new(),
+            None,
+            RotationStrategy::Smart,
+        )
+    };
+    assert!(matches!(
+        fixture.selector.select(request()).await,
+        Err(GrokSessionSelectorError::NoEligibleSession)
+    ));
+    assert!(fixture.coordinator.requests.lock().unwrap().is_empty());
+    fixture
+        .store
+        .update_account(ProviderAccountUpdate {
+            account_id: id.clone(),
+            name: account.name().to_owned(),
+            email: account.email().map(str::to_owned),
+            plan_type: None,
+        })
+        .await
+        .unwrap();
+    let account = fixture.store.account(&id).unwrap();
+    fixture
+        .cache
+        .replace(GrokPlanCatalog::new(
+            GrokCatalogScope::for_account(&account).unwrap(),
+            Utc::now(),
+            seed,
+        ))
+        .await
+        .unwrap();
+    let session = fixture.selector.select(request()).await.unwrap();
+    assert_eq!(session.account_id(), &id);
+}
+
+#[tokio::test]
 async fn smart_strategy_uses_fresh_provider_quota_after_load_ties() {
     let fixture = SelectorFixture::new(&["aaa-low-quota", "zzz-high-quota"]).await;
     fixture

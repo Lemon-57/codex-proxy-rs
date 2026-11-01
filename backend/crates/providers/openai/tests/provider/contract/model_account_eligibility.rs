@@ -141,61 +141,96 @@ async fn unlisted_models_remain_available_without_catalog_discovery() {
 }
 
 #[tokio::test]
-async fn known_oauth_models_filter_plan_candidates_before_weight_and_keep_unknown_models() {
-    let server = MockServer::start().await;
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_provider_contract").await;
-    let mut free = profile("chatgpt-acct_scope_new");
-    free.plan_type = Some("free".to_owned());
-    store
-        .seed_oauth_credential(ImportCodexOAuthCredential {
-            account_id: "acct_scope_new".to_owned(),
-            name: "free".to_owned(),
-            secret: secret("test-free"),
-            verified_account: free,
-            next_refresh_at: Some(Utc::now() + chrono::Duration::minutes(30)),
-            enabled: true,
-        })
-        .await;
-    store.set_scheduling("acct_scope_new", None, AccountWeight::new(100).unwrap());
-    for (id, models) in [
-        (
-            "acct_scope_new",
-            json!([{"slug":"gpt-6-luna","display_name":"Luna"}]),
-        ),
-        (
-            "acct_provider_contract",
-            json!([{"slug":"gpt-6-luna","display_name":"Luna"},{"slug":"gpt-6-astra","display_name":"Astra"}]),
-        ),
-    ] {
-        Mock::given(method("GET"))
-            .and(path("/codex/models"))
-            .and(header("chatgpt-account-id", format!("chatgpt-{id}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models":models})))
-            .expect(1)
-            .mount(&server)
-            .await;
-    }
-    Mock::given(method("POST"))
-        .and(path("/codex/responses"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(CAPTURE_COMPLETED_SSE, "text/event-stream"),
-        )
-        .expect(3)
-        .mount(&server)
-        .await;
-    let affinity = Arc::new(MemorySessionAffinity::default());
-    let provider = provider_with_affinity_and_base_url(&store, affinity.clone(), server.uri());
-    provider.query_model_capabilities().await.unwrap();
-    for (model, expected) in [
-        ("gpt-6-luna", "acct_scope_new"),
-        ("gpt-6-astra", "acct_provider_contract"),
-        ("custom-unlisted", "acct_scope_new"),
-    ] {
-        let request_operation = if model == "custom-unlisted" {
-            operation(model)
-        } else {
-            Operation::Generate(GenerateRequest::from_protocol_payload(
+async fn catalog_membership_and_model_access_precede_weight_affinity_and_fixed_accounts() {
+    use gateway_core::account::{AccountModelAccess, AccountModelAccessMode};
+    use provider_openai::credential::ResponsesTransport;
+
+    for (primary_api, secondary_api) in [(false, false), (true, true), (true, false), (false, true)]
+    {
+        let native = MockServer::start().await;
+        let api_primary = MockServer::start().await;
+        let api_secondary = MockServer::start().await;
+        let store = Arc::new(MemoryAccountStore::default());
+        for (id, api, server, plan, models) in [
+            (
+                "acct_provider_contract",
+                primary_api,
+                &api_primary,
+                "pro",
+                vec!["gpt-6-luna", "gpt-6-astra"],
+            ),
+            (
+                "acct_scope_new",
+                secondary_api,
+                &api_secondary,
+                "free",
+                vec!["gpt-6-luna"],
+            ),
+        ] {
+            if api {
+                store
+                    .seed_api_key(id, server.uri(), ResponsesTransport::Http)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path("/models"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "data": models.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()
+                    })))
+                    .expect(1)
+                    .mount(server)
+                    .await;
+            } else {
+                let mut identity = profile(&format!("chatgpt-{id}"));
+                identity.plan_type = Some(plan.to_owned());
+                store
+                    .seed_oauth_credential(ImportCodexOAuthCredential {
+                        account_id: id.to_owned(),
+                        name: plan.to_owned(),
+                        secret: secret("test-access"),
+                        verified_account: identity,
+                        next_refresh_at: Some(Utc::now() + chrono::Duration::minutes(30)),
+                        enabled: true,
+                    })
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path("/codex/models"))
+                    .and(header("chatgpt-account-id", format!("chatgpt-{id}")))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "models": models.iter().map(|id| json!({"slug": id, "display_name": id})).collect::<Vec<_>>()
+                    })))
+                    .expect(1)
+                    .mount(&native).await;
+            }
+        }
+        for (server, endpoint) in [
+            (&native, "/codex/responses"),
+            (&api_primary, "/responses"),
+            (&api_secondary, "/responses"),
+        ] {
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_raw(CAPTURE_COMPLETED_SSE, "text/event-stream"),
+                )
+                .mount(server)
+                .await;
+        }
+        store.set_scheduling("acct_scope_new", None, AccountWeight::new(100).unwrap());
+        let affinity = Arc::new(MemorySessionAffinity::default());
+        let leases = Arc::new(TestLeaseCoordinator::default());
+        let provider = provider_with_affinity_and_base_url_and_leases(
+            &store,
+            affinity.clone(),
+            native.uri(),
+            leases.clone(),
+        );
+        provider.query_model_capabilities().await.unwrap();
+        for (model, expected) in [
+            ("gpt-6-luna", "acct_scope_new"),
+            ("gpt-6-astra", "acct_provider_contract"),
+        ] {
+            let request_operation = Operation::Generate(GenerateRequest::from_protocol_payload(
                 ProtocolPayload::json_object(
                     "openai",
                     json!({
@@ -210,52 +245,212 @@ async fn known_oauth_models_filter_plan_candidates_before_weight_and_keep_unknow
                 )
                 .unwrap()
                 .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))])),
-            ))
+            ));
+            let mut stream = provider
+                .clone()
+                .execute(
+                    planned_request_for_model("openai", request_operation, model),
+                    context("req_catalog_model", CancellationToken::new()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                stream.metadata().provider_account_id().as_str(),
+                expected,
+                "{model}: primary_api={primary_api}, secondary_api={secondary_api}"
+            );
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        }
+        assert_eq!(affinity.binding_count(), 1);
+        // 目录资格不能被固定账号、模型允许列表或另一个账号的目录放宽
+        for (model, required, disable_supported) in [
+            ("gpt-6-astra", Some("acct_scope_new"), false),
+            ("custom-unlisted", None, false),
+            ("gpt-6-astra", None, true),
+        ] {
+            let scope = if disable_supported {
+                Arc::new(FrozenAccountScope::new(
+                    Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
+                        (
+                            ProviderAccountId::new("acct_provider_contract").unwrap(),
+                            RuntimeAccount::new(
+                                ProviderKind::new("openai").unwrap(),
+                                BTreeSet::new(),
+                            )
+                            .with_model_access(
+                                AccountModelAccess::new(
+                                    AccountModelAccessMode::Denylist,
+                                    vec![model.to_owned()],
+                                )
+                                .unwrap(),
+                            ),
+                        ),
+                        (
+                            ProviderAccountId::new("acct_scope_new").unwrap(),
+                            RuntimeAccount::new(
+                                ProviderKind::new("openai").unwrap(),
+                                BTreeSet::new(),
+                            )
+                            .with_model_access(
+                                AccountModelAccess::new(
+                                    AccountModelAccessMode::Allowlist,
+                                    vec![model.to_owned()],
+                                )
+                                .unwrap(),
+                            ),
+                        ),
+                    ]))),
+                    ClientRoutingScope::all_accounts(),
+                ))
+            } else {
+                contract_account_scope()
+            };
+            let attempt = AttemptContext::new(
+                RequestAttemptContext::new(
+                    ModelRequestId::new("req_catalog_rejected").unwrap(),
+                    ClientApiKeyId::new("key_openai_contract").unwrap(),
+                ),
+                NonZeroU32::MIN,
+                SystemTime::now() + Duration::from_secs(30),
+                account_policy(),
+                AccountAttemptContext::new(
+                    BTreeSet::new(),
+                    required.map(|id| ProviderAccountId::new(id).unwrap()),
+                    None,
+                )
+                .with_account_scope(scope),
+                None,
+                CancellationToken::new(),
+            );
+            let acquisitions = leases.requests.lock().unwrap().len();
+            let error = provider
+                .clone()
+                .execute(
+                    planned_request_for_model("openai", operation(model), model),
+                    attempt,
+                )
+                .await
+                .err()
+                .expect("catalog and model access must both permit the account");
+            assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
+            assert_eq!(leases.requests.lock().unwrap().len(), acquisitions);
+        }
+        let sent = native
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .chain(api_primary.received_requests().await.unwrap())
+            .chain(api_secondary.received_requests().await.unwrap())
+            .filter(|request| request.method == "POST")
+            .count();
+        assert_eq!(sent, 2);
+    }
+}
+
+#[tokio::test]
+async fn missing_catalog_unknown_plan_and_rotated_api_credentials_preserve_upstream_validation() {
+    use gateway_core::account::{CredentialCasOutcome, CredentialCasUpdate, ProviderAccountUpdate};
+    use provider_openai::credential::ResponsesTransport;
+
+    for scenario in ["missing", "unknown_plan", "rotated"] {
+        let native = MockServer::start().await;
+        let api = MockServer::start().await;
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_provider_contract").await;
+        Mock::given(method("GET"))
+            .and(path("/codex/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "models": [{"slug": "gpt-6-luna", "display_name": "Luna"}]
+            })))
+            .mount(&native)
+            .await;
+        let endpoint = if scenario == "unknown_plan" {
+            let mut identity = profile("chatgpt-acct_scope_new");
+            identity.plan_type = None;
+            store
+                .seed_oauth_credential(ImportCodexOAuthCredential {
+                    account_id: "acct_scope_new".to_owned(),
+                    name: "unknown".to_owned(),
+                    secret: secret("test-access"),
+                    verified_account: identity,
+                    next_refresh_at: Some(Utc::now() + chrono::Duration::minutes(30)),
+                    enabled: true,
+                })
+                .await;
+            "/codex/responses"
+        } else {
+            store
+                .seed_api_key("acct_scope_new", api.uri(), ResponsesTransport::Http)
+                .await;
+            let response = if scenario == "missing" {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "gpt-6-luna"}]}))
+            };
+            Mock::given(method("GET"))
+                .and(path("/models"))
+                .respond_with(response)
+                .mount(&api)
+                .await;
+            "/responses"
         };
+        let upstream = if scenario == "unknown_plan" {
+            &native
+        } else {
+            &api
+        };
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(CAPTURE_COMPLETED_SSE, "text/event-stream"),
+            )
+            .expect(1)
+            .mount(upstream)
+            .await;
+        let provider = provider_with_base_url(&store, native.uri());
+        provider.query_model_capabilities().await.unwrap();
+        if scenario == "rotated" {
+            let account = store.account("acct_scope_new").unwrap();
+            let loaded = store.load_current_credential(account.id()).await.unwrap();
+            let update = CredentialCasUpdate::new(
+                account.id().clone(),
+                account.revision(),
+                ProviderAccountUpdate {
+                    account_id: account.id().clone(),
+                    name: account.name().to_owned(),
+                    email: None,
+                    plan_type: None,
+                },
+                loaded.credential,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(matches!(
+                store.compare_and_swap_credential(update).await.unwrap(),
+                CredentialCasOutcome::Updated(_)
+            ));
+        }
         let mut stream = provider
-            .clone()
             .execute(
-                planned_request_for_model("openai", request_operation, model),
-                context("req_plan_model", CancellationToken::new()),
+                planned_request_for_model("openai", operation("gpt-6-astra"), "gpt-6-astra"),
+                context("req_unknown_catalog", CancellationToken::new()),
             )
             .await
             .unwrap();
         assert_eq!(
             stream.metadata().provider_account_id().as_str(),
-            expected,
-            "{model}"
+            "acct_scope_new",
+            "{scenario}"
         );
         while let Some(event) = stream.next().await {
             event.unwrap();
         }
     }
-    assert_eq!(affinity.binding_count(), 1);
-    let pinned = AttemptContext::new(
-        RequestAttemptContext::new(
-            ModelRequestId::new("req_catalog_pin").unwrap(),
-            ClientApiKeyId::new("key_openai_contract").unwrap(),
-        ),
-        NonZeroU32::MIN,
-        SystemTime::now() + Duration::from_secs(30),
-        account_policy(),
-        AccountAttemptContext::new(
-            BTreeSet::new(),
-            Some(ProviderAccountId::new("acct_scope_new").unwrap()),
-            None,
-        )
-        .with_account_scope(contract_account_scope()),
-        None,
-        CancellationToken::new(),
-    );
-    let error = provider
-        .execute(
-            planned_request_for_model("openai", operation("gpt-6-astra"), "gpt-6-astra"),
-            pinned,
-        )
-        .await
-        .err()
-        .expect("a fixed account cannot escape model eligibility");
-    assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
 }
 
 #[tokio::test]

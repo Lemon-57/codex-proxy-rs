@@ -539,7 +539,7 @@ impl CodexCredentialCatalogService {
             .map(|models| models.map(<[String]>::to_vec))
     }
 
-    /// 新鲜 OAuth 套餐目录只约束已发现的模型，未知目录与模型继续交由上游判断
+    /// 有效目录约束账号模型资格，缺失目录或未知套餐继续交由上游判断
     pub(crate) fn scheduling_exclusions(
         &self,
         accounts: &[ProviderAccount],
@@ -555,26 +555,20 @@ impl CodexCredentialCatalogService {
         }) else {
             return BTreeSet::new();
         };
-        // API Key 的自定义目录不能为 OAuth 套餐生成排除证据
-        let plans = snapshot.scope_catalogs.iter().filter(|(scope, _)| {
-            scope.as_str().starts_with("plan:") && scope.as_str() != "plan:unknown"
-        });
-        if !plans
-            .clone()
-            .any(|(_, catalog)| catalog.models.iter().any(|id| id == model))
-        {
-            return BTreeSet::new();
-        }
-        let excluded_scopes = plans
-            .filter(|(_, catalog)| !catalog.models.iter().any(|id| id == model))
+        // OAuth 按套餐共享，API Key 按账号与凭据版本隔离，不能借用其他来源的模型资格
+        let excluded_scopes = snapshot
+            .scope_catalogs
+            .iter()
+            .filter(|(scope, catalog)| {
+                scope.as_str() != "plan:unknown" && !catalog.models.iter().any(|id| id == model)
+            })
             .map(|(scope, _)| scope)
             .collect::<BTreeSet<_>>();
         accounts
             .iter()
             .filter(|account| {
-                account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_OAUTH
-                    && CodexCatalogScope::for_account(account)
-                        .is_ok_and(|scope| excluded_scopes.contains(&scope))
+                CodexCatalogScope::for_account(account)
+                    .is_ok_and(|scope| excluded_scopes.contains(&scope))
             })
             .map(|account| account.id().clone())
             .collect()

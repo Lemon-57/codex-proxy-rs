@@ -11071,7 +11071,7 @@ async fn api_key_native_endpoints_preserve_bodies_headers_and_own_base_url() {
 }
 
 #[tokio::test]
-async fn api_key_responses_forward_lite_memgen_and_native_compaction_without_catalog_gates() {
+async fn api_key_responses_forward_lite_memgen_and_native_compaction_with_catalog_eligibility() {
     let upstream = MockServer::start().await;
     let store = Arc::new(MemoryAccountStore::default());
     store
@@ -11083,9 +11083,7 @@ async fn api_key_responses_forward_lite_memgen_and_native_compaction_without_cat
         .await;
     Mock::given(method("GET"))
         .and(path("/models"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"different-model"}]})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"gpt-5.4"}]})))
         .expect(1)
         .mount(&upstream)
         .await;
@@ -12671,7 +12669,7 @@ async fn capture_client_request(
 }
 
 #[tokio::test]
-async fn public_catalog_filters_each_api_account_before_union_without_gating_inference() {
+async fn public_catalog_filters_each_api_account_before_union_and_preserves_route_planning() {
     use gateway_core::account::{AccountModelAccess, AccountModelAccessMode};
     use gateway_core::engine::provider::{Provider, ProviderRegistry};
     use gateway_core::routing::snapshot::{
@@ -12796,7 +12794,7 @@ async fn public_catalog_filters_each_api_account_before_union_without_gating_inf
             let model = PublicModelId::new(id).unwrap();
             assert!(!snapshot.contains_public_model_for_scope(&model, &scope));
         }
-        // 目录来源只决定展示，发现型目录仍允许把请求交给政策合规的上游判断
+        // Core 按冻结政策编排路由，具体账号的目录资格由 Provider 在选号时检查
         for id in ["kimi-k2.5", "kimi-public", "not-yet-discovered"] {
             let model = PublicModelId::new(id).unwrap();
             assert_eq!(
