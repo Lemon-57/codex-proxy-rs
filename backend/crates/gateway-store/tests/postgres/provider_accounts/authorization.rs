@@ -205,6 +205,8 @@ async fn reauthorization_replay_keeps_the_committed_revision_and_later_profile_e
         )),
     };
     let rename = UpdateAccount {
+        supplier: None,
+        manual_expires_at: None,
         account_id: id.to_string(),
         name: Some("renamed team".to_owned()),
         notes: None,

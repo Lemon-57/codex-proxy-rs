@@ -469,6 +469,8 @@ async fn profile_changes_survive_inflight_background_and_manual_token_refresh() 
     admin_account_store(&database.pool)
         .update_account(
             UpdateAccount {
+                supplier: None,
+                manual_expires_at: None,
                 account_id: id.to_string(),
                 name: Some("renamed team".to_owned()),
                 notes: None,
@@ -1386,6 +1388,8 @@ async fn account_rename_preserves_facts_and_is_searchable() {
         request_id: "rename-account".to_owned(),
     };
     let command = UpdateAccount {
+        supplier: None,
+        manual_expires_at: None,
         account_id: "acct_rename".to_owned(),
         name: Some("  研发团队  ".to_owned()),
         notes: None,
@@ -1410,6 +1414,8 @@ async fn account_rename_preserves_facts_and_is_searchable() {
         let page = store
             .list_accounts(
                 AccountListQuery {
+                    supplier: None,
+                    plan_type: None,
                     page: 1,
                     page_size: PageSize::new(20).unwrap(),
                     provider_kind: None,
@@ -1537,8 +1543,6 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         .update_account(
             UpdateAccount {
                 notes: None,
-                supplier: None,
-                manual_expires_at: None,
                 ..command.clone()
             },
             &context,
