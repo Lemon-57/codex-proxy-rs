@@ -286,10 +286,12 @@
     },
     "quotaReset": {
       "title": "Quota reset credits",
-      "enableHelp": "Enable automatic use in the account's Quota reset panel",
+      "enableHelp": "Unconfigured accounts inherit the default; each account can override it in Quota reset",
       "description": "Global settings for accounts with automatic use enabled",
       "thresholdHelp": "Skip automatic use when the remaining quota exceeds this threshold, leave blank for no limit",
-      "weeklyQuotaLimit": "Reset credit remaining weekly quota threshold"
+      "weeklyQuotaLimit": "Reset credit remaining weekly quota threshold",
+      "defaultEnabled": "Use reset credits by default",
+      "defaultHelp": "New and unconfigured accounts inherit this setting; individually disabled accounts stay disabled. Exhausted weekly quotas trigger credit discovery, redemption and quota verification."
     },
     "advanceUsageTimeMinutes": "Advance usage time (min)",
     "resetCardAdvanceTime": "Reset card advance time",

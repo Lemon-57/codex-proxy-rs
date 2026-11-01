@@ -1094,10 +1094,11 @@ impl AccountsService for DefaultAccountsService {
             .await
             .map_err(|e| map_store_error(e, "reset-credit automation"))?
             .is_some_and(|record| {
-                record
-                    .state
-                    .pending
-                    .is_some_and(|pending| pending.credit.expires_at > Utc::now())
+                record.state.quota_refresh.is_some()
+                    || record
+                        .state
+                        .pending
+                        .is_some_and(|pending| pending.credit.expires_at > Utc::now())
             })
         {
             return Err(AdminError::new(
@@ -1105,7 +1106,19 @@ impl AccountsService for DefaultAccountsService {
                 "自动重置结果待确认，请稍后刷新",
             ));
         }
-        self.consume_reset_credit_upstream(context, command).await
+        let account_id = command.account_id.clone();
+        let baseline = self.quota_refresh_baseline(&account_id).await;
+        let result = self.consume_reset_credit_upstream(context, command).await?;
+        if matches!(result.code.as_str(), "reset" | "already_redeemed") {
+            self.remember_consumed_quota_refresh(&account_id, baseline, &result.code)
+                .await
+                .map_err(|_| {
+                    AdminError::upstream_result_unknown(
+                        "重置卡已返回确认结果，但额度核验任务尚未保存，请核对后沿用原操作编号",
+                    )
+                })?;
+        }
+        Ok(result)
     }
 
     async fn models(

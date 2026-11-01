@@ -15,8 +15,24 @@ pub struct PendingResetCredit {
     pub redeem_request_id: String,
 }
 
+/// 上游消费前的周窗口事实，按万分比保存以支持确定性的状态比较
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResetCreditQuotaRefresh {
+    pub previous_weekly_reset_at: Option<DateTime<Utc>>,
+    pub previous_weekly_used: Option<u32>,
+    pub next_attempt_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResetCreditAutomationState {
+    /// 未单独设置开关的账号动态继承全局默认值
+    #[serde(default)]
+    pub inherits_default: bool,
+    #[serde(default)]
+    pub next_quota_check_at: Option<DateTime<Utc>>,
+    /// 消费已确认后的独立额度核验任务，不得再次消费卡片
+    #[serde(default)]
+    pub quota_refresh: Option<ResetCreditQuotaRefresh>,
     pub next_discovery_at: DateTime<Utc>,
     pub credits: Vec<PlannedResetCredit>,
     pub pending: Option<PendingResetCredit>,

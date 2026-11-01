@@ -501,7 +501,8 @@
         "resetIncomplete": "The upstream service did not complete the last automatic reset",
         "scheduleHelp": "Check once a day at a random time, staggered across accounts",
         "verifyHelp": "Verify reset credits before expiry, automatically skip credits already used elsewhere",
-        "label": "Automatically use expiring reset credits"
+        "label": "Automatically use expiring reset credits",
+        "quotaRefreshPending": "Reset credit used; verifying quota without redeeming another credit"
       },
       "automaticallyUseResetCard": "Automatically use resets",
       "automaticallyUsed": "Auto use",

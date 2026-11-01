@@ -1690,13 +1690,15 @@ revision 变化时丢弃结果
 }
 ```
 
-消费响应只返回上游结果 `code` 和可选 `credit`。消费端确认成功后应重新 GET 卡片列表，并显式调用
-`POST /api/admin/accounts/quota/refresh` 回读上游额度；未提供 `quotaRefresh` 能力时不发起该查询。
+消费响应返回上游结果 `code` 和可选 `credit`。服务端确认 `reset` 或 `already_redeemed` 后保存独立的额度核验任务，立即回读上游额度。
+刷新失败或上游仍返回消费前的周窗口时，后台只重试额度查询，不重新消费卡片，服务重启后继续核验。
+客户端可重新 GET 卡片列表并刷新账号显示，无需承担唯一的额度刷新责任。
 不得因为消费成功直接改写本地 `resetAt` 或解除冻结。xAI 不支持该能力
 
 消费期间账号身份或凭据版本变化时返回结果未知，不将旧结果套用到新绑定账号
 
-自动使用通过 `/api/admin/accounts/reset-credits/automation` 按账号开启，默认关闭；账号本身停用时暂停执行。
+运行设置 `resetCreditDefaultEnabled` 控制未单独设置账号的默认自动用卡，初始为 `false`。新导入和现有未配置的账号动态继承，
+通过 `/api/admin/accounts/reset-credits/automation` 保存的单账号开关优先，单独关闭不会被全局开启覆盖。账号本身停用时不自动消费。
 GET 和 POST 均返回 `enabled`、`leadMinutes`、`nextDiscoveryAtDisplay`、`nextConsumeAtDisplay`、`lastResult`，
 时间展示沿用部署时区，无计划时为 `null`。运行设置 `resetCreditLeadMinutes` 默认 10，接受正整数分钟，不限制一天或一个月等业务时长，数值须在现有整数存储范围内（不超过 2147483647）
 
@@ -1704,12 +1706,14 @@ GET 和 POST 均返回 `enabled`、`leadMinutes`、`nextDiscoveryAtDisplay`、`n
 设置后，每次新的自动消费前刷新账号周额度；剩余比例大于上限或无法确认周额度时，保留卡片并在到期前错峰重查，
 等于上限时允许使用。仅采用账号级周窗口，不回退到短期、月度或模型专属额度；手动使用不受此上限影响
 
-开启后在一分钟内错峰执行首次发现，此后按部署时区每天随机发现一次，普通发现失败也等待下一日。
+自动用卡账号在约五至六分钟的错峰周期内核对周额度。周额度已耗尽时，即使从未打开卡片弹窗、原发现排程未到期或卡片未进入提前窗口，也会主动查询可用卡片。
+仅确认仍可用且未到期的卡片参与自动消费，消费前仍重新核对剩余周额度上限。卡片的日常发现和临近到期计划保留原有独立排程。
 已知且有明确到期时间的可用卡片在提前窗口内错峰执行，消费前重新查询；已在其他地方使用或已到期的卡片
 会移出计划，查询失败不直接消费。上游返回 `already_redeemed` 后结束该次操作，不切换另一张卡重试。
-无卡片 ID 或到期时间时不自动消费；每天发现一次可能错过两次发现之间发放并到期的卡片
+无卡片 ID 或到期时间时不自动消费。未耗尽的账号仍按日常发现和提前窗口判断，不把短期或模型专属额度触顶当作周额度耗尽
 
-`lastResult` 的 `pending` 表示消费结果待确认；重试沿用已持久化的幂等键，重启或关闭再开启也不换键。
+`lastResult` 的 `quota_refresh_pending` 表示消费已经确认但额度核验尚未完成，自动用卡关闭时也继续执行该只读核验。
+`pending` 表示消费结果待确认；重试沿用已持久化的幂等键，重启或关闭再开启也不换键。
 `expired_unknown` 表示未确认操作的卡片已经到期，停止重试；`reset`、`already_redeemed` 表示对应终态，
 `discovery_failed` 表示最近查询失败，`not_redeemed` 表示上游明确未完成消费。
 `weekly_quota_above_threshold` 表示剩余周额度高于上限，`weekly_quota_unavailable` 表示暂时无法确认周额度；

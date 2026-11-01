@@ -46,6 +46,7 @@ pub(super) fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettin
             account_warmup_enabled: false,
             account_warmup_schedule_time: "08:00".to_owned(),
             account_warmup_model: None,
+            reset_credit_default_enabled: false,
             reset_credit_lead_minutes: 10,
             reset_credit_max_weekly_remaining_percent: None,
         },

@@ -65,6 +65,7 @@ export interface RuntimeSettings {
   accountWarmupEnabled: boolean
   accountWarmupScheduleTime: string
   accountWarmupModel: string | null
+  resetCreditDefaultEnabled: boolean
   resetCreditLeadMinutes: number
   resetCreditMaxWeeklyRemainingPercent: number | null
   updatedAt: string

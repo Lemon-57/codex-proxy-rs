@@ -1126,6 +1126,7 @@ impl AccountStore for FakeAccountStore {
 }
 
 struct StaticSettingsStore {
+    reset_credit_default_enabled: bool,
     reset_credit_lead_minutes: u32,
     reset_credit_max_weekly_remaining_percent: Option<u32>,
 }
@@ -1133,6 +1134,7 @@ struct StaticSettingsStore {
 impl Default for StaticSettingsStore {
     fn default() -> Self {
         Self {
+            reset_credit_default_enabled: false,
             reset_credit_lead_minutes: 10,
             reset_credit_max_weekly_remaining_percent: None,
         }
@@ -1190,6 +1192,7 @@ impl SettingsStore for StaticSettingsStore {
                 account_warmup_enabled: false,
                 account_warmup_schedule_time: "08:00".to_owned(),
                 account_warmup_model: None,
+                reset_credit_default_enabled: self.reset_credit_default_enabled,
                 reset_credit_lead_minutes: self.reset_credit_lead_minutes,
                 reset_credit_max_weekly_remaining_percent: self
                     .reset_credit_max_weekly_remaining_percent,
@@ -2774,6 +2777,8 @@ async fn peer_account_usage_should_follow_budget_windows_without_borrowing_pool_
         let page = services
             .accounts()
             .list(AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: gateway_admin::model::PageSize::new(20).unwrap(),
                 provider_kind: None,

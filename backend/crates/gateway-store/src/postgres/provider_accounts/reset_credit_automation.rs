@@ -51,7 +51,7 @@ impl ResetCreditAutomationStore for PgAdminAccountStore {
         now: DateTime<Utc>,
         limit: u32,
     ) -> AdminStoreResult<Vec<String>> {
-        sqlx::query_scalar("select id from provider_accounts where enabled and reset_credit_automation_json ->> 'enabled' = 'true' and reset_credit_next_run_at <= $1 order by reset_credit_next_run_at, id limit $2")
+        sqlx::query_scalar("select a.id from provider_accounts a cross join runtime_settings s where s.id=1 and (a.reset_credit_next_run_at <= $1 or a.reset_credit_automation_json is null) and ((a.enabled and a.provider_kind='openai' and a.authentication_kind='oauth' and case when a.reset_credit_automation_json is null or a.reset_credit_automation_json #>> '{state,inherits_default}'='true' then s.reset_credit_default_enabled else a.reset_credit_automation_json->>'enabled'='true' end) or a.reset_credit_automation_json #> '{state,quota_refresh}' is not null and a.reset_credit_automation_json #> '{state,quota_refresh}' <> 'null'::jsonb) order by a.reset_credit_next_run_at nulls first, a.id limit $2")
             .bind(now).bind(i64::from(limit)).fetch_all(&self.pool).await
             .map_err(|source| automation_error("list due reset-credit automation", source))
     }

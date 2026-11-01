@@ -70,6 +70,7 @@ export function useSettingsForm() {
     accountWarmupEnabled: false,
     accountWarmupScheduleTime: '08:00',
     accountWarmupModel: '',
+    resetCreditDefaultEnabled: false,
     resetCreditLeadMinutes: 10 as number | null,
     resetCreditMaxWeeklyRemainingPercent: null as number | null,
   })
@@ -155,6 +156,7 @@ export function useSettingsForm() {
     form.accountWarmupEnabled = data.accountWarmupEnabled
     form.accountWarmupScheduleTime = data.accountWarmupScheduleTime ?? '08:00'
     form.accountWarmupModel = data.accountWarmupModel ?? ''
+    form.resetCreditDefaultEnabled = data.resetCreditDefaultEnabled
     form.resetCreditLeadMinutes = data.resetCreditLeadMinutes
     form.resetCreditMaxWeeklyRemainingPercent = data.resetCreditMaxWeeklyRemainingPercent
     mappings.value = Object.entries(data.modelMappings).map(([requestedModel, upstreamModel]) => ({
@@ -283,6 +285,7 @@ export function useSettingsForm() {
         accountWarmupEnabled: form.accountWarmupEnabled,
         accountWarmupScheduleTime: form.accountWarmupScheduleTime.trim(),
         accountWarmupModel: form.accountWarmupModel.trim() || null,
+        resetCreditDefaultEnabled: form.resetCreditDefaultEnabled,
         resetCreditLeadMinutes: resetCreditLeadMinutes!,
         resetCreditMaxWeeklyRemainingPercent,
       })

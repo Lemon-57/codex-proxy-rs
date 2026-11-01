@@ -501,7 +501,8 @@
         "resetIncomplete": "上游未完成最近一次自動重置",
         "scheduleHelp": "每天隨機查詢一次，各賬號錯開時間",
         "verifyHelp": "臨期使用前核對卡片，已在其他地方使用的會自動跳過",
-        "label": "自動使用臨期重置卡"
+        "label": "自動使用臨期重置卡",
+        "quotaRefreshPending": "重置卡已使用，正在核驗額度，期間不會再次用卡"
       },
       "automaticallyUseResetCard": "自動使用重置卡",
       "automaticallyUsed": "自動使用",

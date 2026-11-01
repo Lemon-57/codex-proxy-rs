@@ -219,6 +219,7 @@ watch(section, (value) => {
             v-model:model="form.accountWarmupModel"
           />
           <ResetCreditCard
+            v-model:default-enabled="form.resetCreditDefaultEnabled"
             v-model="resetCreditLeadMinutesValue"
             v-model:max-weekly-remaining-percent="resetCreditMaxWeeklyRemainingPercentValue"
           />

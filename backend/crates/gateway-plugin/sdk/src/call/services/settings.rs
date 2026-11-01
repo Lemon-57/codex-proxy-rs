@@ -160,6 +160,8 @@ pub struct RuntimeSettings {
     pub account_warmup_enabled: bool,
     pub account_warmup_schedule_time: String,
     pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_default_enabled: bool,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
     pub request_profiles: ProviderRequestProfiles,
@@ -195,6 +197,8 @@ pub struct ReplaceRuntimeSettings {
     pub account_warmup_enabled: bool,
     pub account_warmup_schedule_time: String,
     pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_default_enabled: bool,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
     /// 读取设置时的版本；与写入在同一事务内比较，防止覆盖并发更新
@@ -392,6 +396,7 @@ impl From<RuntimeSettings> for ReplaceRuntimeSettings {
             account_warmup_enabled: settings.account_warmup_enabled,
             account_warmup_schedule_time: settings.account_warmup_schedule_time,
             account_warmup_model: settings.account_warmup_model,
+            reset_credit_default_enabled: settings.reset_credit_default_enabled,
             reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
             reset_credit_max_weekly_remaining_percent: settings
                 .reset_credit_max_weekly_remaining_percent,
