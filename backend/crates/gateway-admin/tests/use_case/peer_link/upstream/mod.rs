@@ -390,14 +390,13 @@ impl PeerTransport for TestTransport {
             .push(account.id().as_str().to_owned());
         let now = Utc::now();
         Ok(serde_json::to_vec(&serde_json::json!({
-            "object":"cpr.peer", "schema_version":1,
+            "object":"cpr.peer", "schema_version":2,
             "observed_at":now.to_rfc3339(),
             "expires_at":(now + chrono::Duration::minutes(5)).to_rfc3339(),
             "capabilities":["key_usage"],
             "usage":{"status":"available","observed_at":now.to_rfc3339(),"data":{"unit":"USD","allowed":false,
-                "daily":{"total":"1","used":"1","remaining":"0","resetsAt":(now + chrono::Duration::days(1)).to_rfc3339()},
-                "weekly":{"total":"0","used":"0","remaining":"0"}}},
-            "pool":{"disclosure":"none"}, "quota":{"disclosure":"none"}, "models":[]
+                "windows":[{"key":"daily","total":"1","used":"1","remaining":"0","reset_at":(now + chrono::Duration::days(1)).to_rfc3339()}]}},
+            "models":[]
         })).unwrap())
     }
 }

@@ -243,10 +243,10 @@ async fn exports_scoped_observations_even_when_the_key_budget_is_exhausted_witho
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["object"], "cpr.peer");
-    assert_eq!(body["schema_version"], 1);
-    assert_eq!(body["usage"]["data"]["daily"]["remaining"], "0");
+    assert_eq!(body["schema_version"], 2);
+    assert_eq!(body["usage"]["data"]["windows"][0]["remaining"], "0");
     assert_eq!(body["usage"]["data"]["allowed"], false);
-    assert_eq!(body["usage"]["data"]["daily"]["limit_reached"], true);
+    assert_eq!(body["usage"]["data"]["windows"][0]["limit_reached"], true);
     assert_eq!(body["pool"]["account_count"], 1);
     assert!(body["pool"].get("plans").is_none());
     assert_eq!(
@@ -338,7 +338,7 @@ async fn current_field_permissions_and_direct_account_facts_narrow_the_frozen_sc
         .peer_sharing
         .share_quota = false;
     let body = response_json(query(&app, PATH, Some(RAW_KEY)).await).await;
-    assert_eq!(body["quota"], json!({ "disclosure": "none" }));
+    assert!(body.get("quota").is_none());
     assert!(body.get("models").is_none());
     fixture
         .account
@@ -511,7 +511,7 @@ async fn heavy_snapshots_reject_excess_concurrency_and_release_slots_on_completi
     .await
     .expect("budget-only queries do not consume heavy-query slots");
     assert_eq!(budget.status(), StatusCode::OK);
-    assert_eq!(response_json(budget).await["pool"]["disclosure"], "none");
+    assert!(response_json(budget).await.get("pool").is_none());
     let cancelled = requests.pop().unwrap();
     cancelled.abort();
     assert!(cancelled.await.unwrap_err().is_cancelled());

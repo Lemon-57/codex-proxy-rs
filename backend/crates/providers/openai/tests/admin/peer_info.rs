@@ -2,18 +2,24 @@
 
 use super::*;
 use crate::support::MemoryCooldownPort;
-use gateway_core::{account::UpstreamConnection, task::WorkerCycleContext};
+use gateway_core::{
+    account::{UpstreamConnection, UpstreamInfoSource},
+    task::WorkerCycleContext,
+};
 use provider_openai::credential::ResponsesTransport;
 
 fn peer_document() -> Value {
     let now = Utc::now();
     json!({
-        "object":"cpr.peer", "schema_version":1,
+        "object":"cpr.peer", "schema_version":2,
         "observed_at":now.to_rfc3339(), "expires_at":(now + chrono::Duration::minutes(5)).to_rfc3339(),
         "capabilities":["key_usage", "pool_summary"],
-        "usage":{"status":"available","observed_at":now.to_rfc3339(),"data":{"unit":"USD","allowed":true,"daily":{"limit_reached":false,"total":"10","used":"2","remaining":"8","resetsAt":(now + chrono::Duration::days(1)).to_rfc3339()},"weekly":{"limit_reached":false,"total":"50","used":"5","remaining":"45","resetsAt":(now + chrono::Duration::days(7)).to_rfc3339()}}},
-        "pool":{"disclosure":"summary","account_count":2,"states":{"ready":2,"cooldown":0,"exhausted":0,"disabled":0,"error":0,"unknown":0},"plans":[{"name":"plus","count":2}]},
-        "quota":{"disclosure":"none"},"models":[]
+        "usage":{"status":"available","observed_at":now.to_rfc3339(),"data":{"unit":"USD","allowed":true,"windows":[
+            {"key":"daily","label":"日额度","window_seconds":86400,"limit_reached":false,"total":"10","used":"2","remaining":"8","reset_at":(now + chrono::Duration::days(1)).to_rfc3339()},
+            {"key":"weekly","label":"周额度","window_seconds":604800,"limit_reached":false,"total":"50","used":"5","remaining":"45","reset_at":(now + chrono::Duration::days(7)).to_rfc3339()}
+        ]}},
+        "pool":{"account_count":2,"states":{"ready":2,"cooldown":0,"exhausted":0,"disabled":0,"error":0,"unknown":0},"plans":[{"name":"plus","count":2}]},
+        "models":[]
     })
 }
 
@@ -44,6 +50,11 @@ async fn peer_sync_restores_exhausted_accounts_only_from_current_key_budget_fact
         "amounts_disagree",
         "usage_unknown",
         "budget_only",
+        "access_only",
+        "access_only_denied",
+        "missing_usage",
+        "empty_windows",
+        "custom_window_exhausted",
         "old_usage",
         "old_snapshot",
         "unauthorized",
@@ -57,30 +68,31 @@ async fn peer_sync_restores_exhausted_accounts_only_from_current_key_budget_fact
         let older = DateTime::<Utc>::from(exhausted_at - Duration::from_secs(1)).to_rfc3339();
         match case {
             "unlimited" => {
-                for window in ["daily", "weekly"] {
-                    document["usage"]["data"][window] = json!({
-                        "total":null, "remaining":null, "used":"7", "resetsAt":null
+                for window in [0, 1] {
+                    document["usage"]["data"]["windows"][window] = json!({
+                        "key": (["daily", "weekly"][window]),
+                        "total":null, "remaining":null, "used":"7", "reset_at":null
                     });
                 }
             }
             "budget_exhausted" => {
                 document["usage"]["data"]["allowed"] = json!(false);
-                document["usage"]["data"]["daily"]["limit_reached"] = json!(true);
+                document["usage"]["data"]["windows"][0]["limit_reached"] = json!(true);
             }
             "weekly_exhausted" => {
                 document["usage"]["data"]
                     .as_object_mut()
                     .unwrap()
                     .remove("allowed");
-                document["usage"]["data"]["weekly"]["limit_reached"] = json!(true);
+                document["usage"]["data"]["windows"][1]["limit_reached"] = json!(true);
             }
             "expired_budget" => {
                 document["usage"]["data"]
                     .as_object_mut()
                     .unwrap()
                     .remove("allowed");
-                document["usage"]["data"]["daily"]["limit_reached"] = json!(true);
-                document["usage"]["data"]["daily"]["resetsAt"] = json!(older);
+                document["usage"]["data"]["windows"][0]["limit_reached"] = json!(true);
+                document["usage"]["data"]["windows"][0]["reset_at"] = json!(older);
             }
             "missing_allowed" => {
                 document["usage"]["data"]
@@ -94,20 +106,38 @@ async fn peer_sync_restores_exhausted_accounts_only_from_current_key_budget_fact
                     .as_object_mut()
                     .unwrap()
                     .remove("allowed");
-                for window in ["daily", "weekly"] {
-                    document["usage"]["data"][window]
+                for window in [0, 1] {
+                    document["usage"]["data"]["windows"][window]
                         .as_object_mut()
                         .unwrap()
                         .remove("limit_reached");
                 }
             }
             "amounts_disagree" => {
-                document["usage"]["data"]["daily"]["remaining"] = json!("0");
-                document["usage"]["data"]["daily"]["used"] = json!("10");
+                document["usage"]["data"]["windows"][0]["remaining"] = json!("0");
+                document["usage"]["data"]["windows"][0]["used"] = json!("10");
             }
-            "missing_remaining" => document["usage"]["data"]["daily"]["remaining"] = Value::Null,
+            "missing_remaining" => {
+                document["usage"]["data"]["windows"][0]["remaining"] = Value::Null
+            }
             "usage_unknown" => document["usage"]["status"] = json!("unknown"),
             "budget_only" => document["capabilities"] = json!(["key_usage"]),
+            "access_only" | "access_only_denied" => {
+                document["usage"]["data"] = json!({"allowed": case == "access_only"});
+                document.as_object_mut().unwrap().remove("pool");
+            }
+            "missing_usage" => {
+                document.as_object_mut().unwrap().remove("usage");
+            }
+            "empty_windows" => document["usage"]["data"] = json!({"windows": []}),
+            "custom_window_exhausted" => {
+                document["usage"]["data"] = json!({
+                    "unit":"USD", "windows":[{
+                        "key":"monthly", "used":"100", "total":"100", "remaining":"0",
+                        "limit_reached":true, "reset_at":(Utc::now() + chrono::Duration::days(3)).to_rfc3339()
+                    }]
+                });
+            }
             "old_usage" => document["usage"]["observed_at"] = json!(older),
             "old_snapshot" => document["observed_at"] = json!(older),
             _ => {}
@@ -132,12 +162,19 @@ async fn peer_sync_restores_exhausted_accounts_only_from_current_key_budget_fact
                 "available"
                     | "unlimited"
                     | "budget_only"
+                    | "access_only"
                     | "missing_remaining"
                     | "amounts_disagree"
             ),
             "{case}"
         );
         assert_eq!(account.credential_state(), CredentialState::Ready);
+        if matches!(
+            case,
+            "access_only" | "access_only_denied" | "empty_windows" | "missing_usage"
+        ) {
+            assert!(quota(&bundle, &id).await.windows.is_empty(), "{case}");
+        }
         assert!(
             server
                 .received_requests()
@@ -361,11 +398,11 @@ async fn key_usage_retains_unlimited_windows_without_pool_disclosure() {
         let server = MockServer::start().await;
         let mut document = peer_document();
         document["capabilities"] = json!(["key_usage"]);
-        document["pool"] = json!({"disclosure":"none"});
-        document["usage"]["data"]["daily"] =
-            json!({"total":null,"used":"0","remaining":null,"resetsAt":null});
-        document["usage"]["data"]["weekly"]["total"] = json!(weekly_total);
-        document["usage"]["data"]["weekly"]["remaining"] = json!(weekly_total.map(|_| "45"));
+        document.as_object_mut().unwrap().remove("pool");
+        document["usage"]["data"]["windows"][0] =
+            json!({"key":"daily","total":null,"used":"0","remaining":null,"reset_at":null});
+        document["usage"]["data"]["windows"][1]["total"] = json!(weekly_total);
+        document["usage"]["data"]["windows"][1]["remaining"] = json!(weekly_total.map(|_| "45"));
         Mock::given(method("GET"))
             .and(path("/custom/v1/cpr/link"))
             .respond_with(ResponseTemplate::new(200).set_body_json(document))
@@ -399,6 +436,79 @@ async fn key_usage_retains_unlimited_windows_without_pool_disclosure() {
             .unwrap()
             .unwrap();
         assert_eq!(summary.windows, observed.windows);
+    }
+}
+
+#[tokio::test]
+async fn custom_budget_windows_preserve_their_period_without_inventing_other_windows() {
+    let server = MockServer::start().await;
+    let mut document = peer_document();
+    document["capabilities"] = json!(["key_usage"]);
+    document.as_object_mut().unwrap().remove("pool");
+    let reset = Utc::now() + chrono::Duration::days(20);
+    document["usage"]["data"] = json!({
+        "unit":"USD", "allowed":true, "windows":[{
+            "key":"monthly", "window_seconds":2592000,
+            "total":"100", "used":"20", "remaining":"80", "reset_at":reset.to_rfc3339()
+        }]
+    });
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(document))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (mut bundle, _, _, id, _) = fixture(&server).await;
+    cycle(&worker(&mut bundle)).await;
+    let observed = quota(&bundle, &id).await;
+    assert_eq!(observed.windows.len(), 1);
+    let window = &observed.windows[0];
+    assert_eq!(window.key, "peer:budget:monthly");
+    assert_eq!(window.label, "monthly");
+    assert_eq!(window.window_seconds, Some(2592000));
+    assert_eq!(window.reset_at, Some(reset));
+    assert_eq!(window.used_percent, Some(20.0));
+    assert!(!window.upstream.as_ref().unwrap().stale);
+}
+
+#[tokio::test]
+async fn model_only_snapshots_publish_signals_without_budget_or_account_disclosure() {
+    for (coverage, state, exhausted) in [
+        ("complete", "exhausted", Some(true)),
+        ("complete", "available", Some(false)),
+        ("partial", "exhausted", None),
+    ] {
+        let server = MockServer::start().await;
+        let now = Utc::now();
+        let document = json!({
+            "object":"cpr.peer", "schema_version":2,
+            "observed_at":now.to_rfc3339(), "expires_at":(now + chrono::Duration::minutes(5)).to_rfc3339(),
+            "capabilities":["model_availability"],
+            "models":[{"model":"gpt-5.4", "coverage":coverage, "state":state,
+                "observed_at":now.to_rfc3339()}]
+        });
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (mut bundle, accounts, _, id, _) = fixture(&server).await;
+        let reader = gateway_core::account::UpstreamInfoReader::default();
+        reader.bind(&bundle.peer.scheduling_source()).unwrap();
+        cycle(&worker(&mut bundle)).await;
+        let observed = quota(&bundle, &id).await;
+        assert!(observed.upstream.unwrap().discovered);
+        assert!(observed.windows.is_empty());
+        assert_eq!(
+            reader
+                .signal(
+                    &accounts.account(id.as_str()).unwrap(),
+                    "gpt-5.4",
+                    SystemTime::now()
+                )
+                .map(|signal| signal.exhausted),
+            exhausted,
+            "{coverage} {state}"
+        );
     }
 }
 
@@ -459,13 +569,18 @@ async fn native_windows_preserve_account_and_bucket_identity_without_pool_averag
             "window_seconds": 604800, "limit_reached": false
         })
     };
+    let mut minimal_window = window("Codex", 90.0);
+    minimal_window.as_object_mut().unwrap().remove("group");
+    minimal_window.as_object_mut().unwrap().remove("label");
+    document.as_object_mut().unwrap().remove("usage");
+    document.as_object_mut().unwrap().remove("pool");
     document["quota"] = serde_json::json!({
-        "disclosure": "accounts",
+
         "accounts": [
             { "id": "first", "models": ["gpt-5.4"], "observed_at": observed_at,
               "expires_at": expires_at, "windows": [window("Codex", 10.0), window("Other", 30.0)] },
             { "id": "second", "models": ["gpt-5.4"], "observed_at": observed_at,
-              "expires_at": expires_at, "windows": [window("Codex", 90.0)] }
+              "expires_at": expires_at, "windows": [minimal_window] }
         ]
     });
     Mock::given(method("GET"))
@@ -476,6 +591,8 @@ async fn native_windows_preserve_account_and_bucket_identity_without_pool_averag
     cycle(&worker(&mut bundle)).await;
     let observed = quota(&bundle, &id).await;
     assert_eq!(observed.windows.len(), 3);
+    assert_eq!(observed.windows[2].group, "general");
+    assert_eq!(observed.windows[2].label, "weekly");
     assert_eq!(
         observed
             .windows
@@ -659,11 +776,18 @@ async fn invalid_or_redirected_responses_never_replace_the_last_valid_snapshot()
     cycle(&worker).await;
     let observed_at = quota(&bundle, &id).await.observed_at;
     let mut wrong_schema = peer_document();
-    wrong_schema["schema_version"] = json!(2);
+    wrong_schema["schema_version"] = json!(99);
     let mut wrong_object = peer_document();
     wrong_object["object"] = json!("other.peer");
     let mut negative = peer_document();
-    negative["usage"]["data"]["daily"]["used"] = json!("-20");
+    negative["usage"]["data"]["windows"][0]["used"] = json!("-20");
+    let mut missing_unit = peer_document();
+    missing_unit["usage"]["data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("unit");
+    let mut duplicate_windows = peer_document();
+    duplicate_windows["usage"]["data"]["windows"][1]["key"] = json!("daily");
     let mut future = peer_document();
     future["observed_at"] = json!((Utc::now() + chrono::Duration::minutes(10)).to_rfc3339());
     let mut huge_pool = peer_document();
@@ -681,6 +805,8 @@ async fn invalid_or_redirected_responses_never_replace_the_last_valid_snapshot()
         ResponseTemplate::new(200).set_body_json(wrong_schema),
         ResponseTemplate::new(200).set_body_json(wrong_object),
         ResponseTemplate::new(200).set_body_json(negative),
+        ResponseTemplate::new(200).set_body_json(missing_unit),
+        ResponseTemplate::new(200).set_body_json(duplicate_windows),
         ResponseTemplate::new(200).set_body_json(future),
         ResponseTemplate::new(200).set_body_raw(
             "x".repeat(gateway_protocol::peer::MAX_RESPONSE_BYTES + 1),
@@ -717,11 +843,11 @@ async fn peer_sync_excludes_budget_exhausted_accounts_without_pool_disclosure() 
     let server = MockServer::start().await;
     let mut peer = peer_document();
     peer["capabilities"] = json!(["key_usage"]);
-    peer["pool"] = json!({"disclosure":"none"});
+    peer.as_object_mut().unwrap().remove("pool");
     peer["usage"]["data"]["allowed"] = json!(false);
-    peer["usage"]["data"]["daily"]["limit_reached"] = json!(true);
-    peer["usage"]["data"]["daily"]["used"] = json!("10.0000");
-    peer["usage"]["data"]["daily"]["remaining"] = json!("0.0000");
+    peer["usage"]["data"]["windows"][0]["limit_reached"] = json!(true);
+    peer["usage"]["data"]["windows"][0]["used"] = json!("10.0000");
+    peer["usage"]["data"]["windows"][0]["remaining"] = json!("0.0000");
     Mock::given(method("GET"))
         .and(path("/custom/v1/cpr/link"))
         .respond_with(ResponseTemplate::new(200).set_body_json(peer))
@@ -776,7 +902,7 @@ async fn lists_reuse_versioned_summaries_and_details_keep_node_windows() {
     let server = MockServer::start().await;
     let mut document = peer_document();
     document["capabilities"] = json!(["key_usage", "pool_summary", "quota_windows"]);
-    document["quota"] = json!({"disclosure":"accounts","accounts":[{
+    document["quota"] = json!({"accounts":[{
         "id":"node-one", "models":["gpt-5.4"],
         "observed_at":document["observed_at"], "expires_at":document["expires_at"],
         "windows":[{"key":"weekly","group":"general","label":"周额度","used_percent":40,"limit_reached":false}]
@@ -894,6 +1020,33 @@ async fn lists_reuse_versioned_summaries_and_details_keep_node_windows() {
 }
 
 #[tokio::test]
+async fn cached_observations_require_the_current_protocol_version() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(peer_document()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (mut bundle, accounts, store, id, config) = fixture(&server).await;
+    cycle(&worker(&mut bundle)).await;
+    let mut observation = store
+        .get_quotas(std::slice::from_ref(&id))
+        .await
+        .unwrap()
+        .remove(0);
+    let mut document = observation.quota.expose_to_provider().clone();
+    document.insert("schema_version".to_owned(), json!(99));
+    observation.quota = OpaqueProviderData::new(document);
+    observation.observed_at = SystemTime::now();
+    store.compare_and_swap_quota(observation).await.unwrap();
+
+    let restored = peer_fixture(config.config.clone(), accounts).await;
+    let observed = quota(&restored, &id).await;
+    assert!(!observed.upstream.unwrap().discovered);
+    assert!(observed.windows.is_empty());
+}
+
+#[tokio::test]
 async fn ordinary_api_upstreams_remain_undiscovered_and_keep_the_detection_backoff() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -943,7 +1096,7 @@ async fn cold_lists_bound_full_snapshot_batches_and_reuse_every_hydrated_summary
         let connection = UpstreamConnection::for_account(&account);
         let now = SystemTime::now();
         let mut document = peer_document();
-        document["usage"]["data"]["daily"]["used"] = json!(index.to_string());
+        document["usage"]["data"]["windows"][0]["used"] = json!(index.to_string());
         store
             .compare_and_swap_quota(QuotaObservation {
                 expected_connection: Some(connection),

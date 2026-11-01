@@ -1,12 +1,15 @@
 //! 互联响应的有界校验、能力授权与时间有效性解释
 
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::HashSet,
+    time::{Duration, SystemTime},
+};
 
 use chrono::{DateTime, Utc};
 use gateway_core::account::{OpaqueProviderData, UpstreamInfoFailure};
 use gateway_protocol::peer::{
-    MAX_ACCOUNTS, MAX_MODELS, MAX_QUOTA_WINDOWS, OBJECT, PeerLink, PeerPoolDisclosure,
-    SCHEMA_VERSION,
+    MAX_ACCOUNTS, MAX_MODELS, MAX_QUOTA_WINDOWS, OBJECT, PeerKeyUsage, PeerLink, PeerPool,
+    PeerQuota, SCHEMA_VERSION,
 };
 use serde::Deserialize as _;
 
@@ -51,14 +54,15 @@ pub(super) fn component_fresh(
 }
 
 pub(super) fn decode(data: &OpaqueProviderData) -> Option<PeerLink> {
-    PeerLink::deserialize(
+    let peer = PeerLink::deserialize(
         serde::de::value::MapDeserializer::<_, serde_json::Error>::new(
             data.expose_to_provider()
                 .iter()
                 .map(|(key, value)| (key.as_str(), value)),
         ),
     )
-    .ok()
+    .ok()?;
+    (peer.object == OBJECT && peer.schema_version == SCHEMA_VERSION).then_some(peer)
 }
 
 pub(super) fn parse(
@@ -67,11 +71,17 @@ pub(super) fn parse(
 ) -> Result<OpaqueProviderData, UpstreamInfoFailure> {
     let mut peer: PeerLink =
         serde_json::from_slice(bytes).map_err(|_| UpstreamInfoFailure::InvalidResponse)?;
-    let valid_text = |value: &str, max: usize| {
-        !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
-    };
     let observed = timestamp(&peer.observed_at).ok_or(UpstreamInfoFailure::InvalidResponse)?;
     let expires = timestamp(&peer.expires_at).ok_or(UpstreamInfoFailure::InvalidResponse)?;
+    let accounts = peer
+        .quota
+        .as_ref()
+        .map_or(&[][..], |quota| quota.accounts.as_slice());
+    let budget_windows = peer
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.data.as_ref())
+        .map_or(0, |usage| usage.windows.len());
     if peer.object != OBJECT
         || peer.schema_version != SCHEMA_VERSION
         || observed > now + Duration::from_secs(60)
@@ -79,83 +89,112 @@ pub(super) fn parse(
         || expires <= observed
         || expires > observed + MAX_AGE
         || peer.capabilities.len() > 32
-        || peer
-            .quota
-            .accounts
+        || accounts
             .iter()
             .map(|account| account.windows.len())
             .sum::<usize>()
             > MAX_QUOTA_WINDOWS
-        || peer.quota.accounts.len() > MAX_ACCOUNTS
+        || budget_windows > MAX_QUOTA_WINDOWS
+        || accounts.len() > MAX_ACCOUNTS
         || peer.models.len() > MAX_MODELS
     {
         return Err(UpstreamInfoFailure::InvalidResponse);
     }
     // 未授权能力不能借同名数据块越过逐层公开边界
-    if !peer.capabilities.iter().any(|value| value == "key_usage") {
-        peer.usage.data = None;
+    let disclosed = |capability| peer.capabilities.iter().any(|value| value == capability);
+    if !disclosed("key_usage") {
+        peer.usage = None;
     }
-    if !peer
-        .capabilities
-        .iter()
-        .any(|value| value == "pool_summary")
-    {
-        peer.pool = Default::default();
+    if !disclosed("pool_summary") {
+        peer.pool = None;
     }
-    if !peer
-        .capabilities
-        .iter()
-        .any(|value| value == "quota_windows")
-    {
-        peer.quota = Default::default();
+    if !disclosed("quota_windows") {
+        peer.quota = None;
     }
-    if !peer
-        .capabilities
-        .iter()
-        .any(|value| value == "model_availability")
-    {
+    if !disclosed("model_availability") {
         peer.models.clear();
     }
-    if peer.pool.disclosure == PeerPoolDisclosure::Summary {
-        let count = peer
-            .pool
-            .account_count
-            .ok_or(UpstreamInfoFailure::InvalidResponse)?;
-        let states = peer
-            .pool
-            .states
-            .as_ref()
-            .ok_or(UpstreamInfoFailure::InvalidResponse)?;
-        let state_total = [
-            states.ready,
-            states.cooldown,
-            states.exhausted,
-            states.disabled,
-            states.error,
-            states.unknown,
-        ]
-        .into_iter()
-        .map(u64::from)
-        .sum::<u64>();
-        if u64::from(count) > MAX_ACCOUNTS as u64 || state_total != u64::from(count) {
-            return Err(UpstreamInfoFailure::InvalidResponse);
-        }
-        if let Some(plans) = &peer.pool.plans
-            && (plans.len() > MAX_ACCOUNTS
-                || plans
-                    .iter()
-                    .any(|plan| !valid_text(&plan.name, 256) || plan.count > count)
-                || plans.iter().map(|plan| u64::from(plan.count)).sum::<u64>() > u64::from(count))
+    if let Some(pool) = &peer.pool {
+        validate_pool(pool)?;
+    }
+    if let Some(usage) = peer.usage.as_ref().and_then(|usage| usage.data.as_ref()) {
+        validate_usage(usage)?;
+    }
+    if let Some(quota) = &peer.quota {
+        validate_quota(quota)?;
+    }
+    for model in &peer.models {
+        if !valid_text(&model.model, 256)
+            || model
+                .observed_at
+                .as_deref()
+                .is_some_and(|value| timestamp(value).is_none())
+            || model
+                .expires_at
+                .as_deref()
+                .is_some_and(|value| timestamp(value).is_none())
         {
             return Err(UpstreamInfoFailure::InvalidResponse);
         }
     }
-    if let Some(usage) = &peer.usage.data {
-        if !valid_text(&usage.unit, 16) {
-            return Err(UpstreamInfoFailure::InvalidResponse);
-        }
-        for window in [&usage.daily, &usage.weekly] {
-            if [
+    match serde_json::to_value(peer) {
+        Ok(serde_json::Value::Object(object)) => Ok(OpaqueProviderData::new(object)),
+        _ => Err(UpstreamInfoFailure::InvalidResponse),
+    }
+}
+
+fn valid_text(value: &str, max: usize) -> bool {
+    !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+}
+
+fn validate_pool(pool: &PeerPool) -> Result<(), UpstreamInfoFailure> {
+    let count = pool.account_count;
+    let states = &pool.states;
+    let state_total = [
+        states.ready,
+        states.cooldown,
+        states.exhausted,
+        states.disabled,
+        states.error,
+        states.unknown,
+    ]
+    .into_iter()
+    .map(u64::from)
+    .sum::<u64>();
+    if u64::from(count) > MAX_ACCOUNTS as u64 || state_total != u64::from(count) {
+        return Err(UpstreamInfoFailure::InvalidResponse);
+    }
+    if let Some(plans) = &pool.plans
+        && (plans.len() > MAX_ACCOUNTS
+            || plans
+                .iter()
+                .any(|plan| !valid_text(&plan.name, 256) || plan.count > count)
+            || plans.iter().map(|plan| u64::from(plan.count)).sum::<u64>() > u64::from(count))
+    {
+        return Err(UpstreamInfoFailure::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_usage(usage: &PeerKeyUsage) -> Result<(), UpstreamInfoFailure> {
+    if usage
+        .unit
+        .as_deref()
+        .is_some_and(|unit| !valid_text(unit, 16))
+        || !usage.windows.is_empty() && usage.unit.is_none()
+    {
+        return Err(UpstreamInfoFailure::InvalidResponse);
+    }
+    let mut keys = HashSet::new();
+    for window in &usage.windows {
+        if !valid_text(&window.key, 256)
+            || !keys.insert(&window.key)
+            || window
+                .label
+                .as_deref()
+                .is_some_and(|label| !valid_text(label, 256))
+            || window.window_seconds == Some(0)
+            || [
                 Some(&window.used),
                 window.total.as_ref(),
                 window.remaining.as_ref(),
@@ -163,22 +202,31 @@ pub(super) fn parse(
             .into_iter()
             .flatten()
             .any(|value| decimal(value).is_none())
-                || window
-                    .resets_at
-                    .as_ref()
-                    .is_some_and(|value| timestamp(value).is_none())
-            {
-                return Err(UpstreamInfoFailure::InvalidResponse);
-            }
+            || window
+                .reset_at
+                .as_ref()
+                .is_some_and(|value| timestamp(value).is_none())
+        {
+            return Err(UpstreamInfoFailure::InvalidResponse);
         }
     }
-    for account in &peer.quota.accounts {
+    Ok(())
+}
+
+fn validate_quota(quota: &PeerQuota) -> Result<(), UpstreamInfoFailure> {
+    for account in &quota.accounts {
         if !valid_text(&account.id, 256)
             || account.models.len() > MAX_MODELS
             || account.windows.iter().any(|window| {
                 !valid_text(&window.key, 256)
-                    || !valid_text(&window.label, 256)
-                    || !valid_text(&window.group, 128)
+                    || window
+                        .label
+                        .as_deref()
+                        .is_some_and(|label| !valid_text(label, 256))
+                    || window
+                        .group
+                        .as_deref()
+                        .is_some_and(|group| !valid_text(group, 128))
                     || window
                         .limit_id
                         .as_deref()
@@ -199,24 +247,7 @@ pub(super) fn parse(
             return Err(UpstreamInfoFailure::InvalidResponse);
         }
     }
-    for model in &peer.models {
-        if !valid_text(&model.model, 256)
-            || model
-                .observed_at
-                .as_deref()
-                .is_some_and(|value| timestamp(value).is_none())
-            || model
-                .expires_at
-                .as_deref()
-                .is_some_and(|value| timestamp(value).is_none())
-        {
-            return Err(UpstreamInfoFailure::InvalidResponse);
-        }
-    }
-    match serde_json::to_value(peer) {
-        Ok(serde_json::Value::Object(object)) => Ok(OpaqueProviderData::new(object)),
-        _ => Err(UpstreamInfoFailure::InvalidResponse),
-    }
+    Ok(())
 }
 
 pub(super) fn decimal(value: &str) -> Option<f64> {

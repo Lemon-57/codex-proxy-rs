@@ -723,91 +723,156 @@ OpenAI 选号阶段确认本次可选账号全部额度耗尽时，HTTP 返回 `
 
 ### CPR 互联只读协议
 
-`GET {api_base}/cpr/link` 使用同一数据面入口认证；CPR 默认路径为 `/v1/cpr/link`，传入当前下游使用的推理 Key。
-只有该 Key 显式开启 `peerSharing.enabled` 且绑定非空分组时可查询。接口不接受 Cookie、管理 API Key 或查询参数，
-不执行推理、占用推理并发/RPM、更新最近使用时间或刷新上游；Key 预算耗尽后仍可查询
+`GET {api_base}/cpr/link` 使用推理 Key 查询当前授权范围内的只读快照，不接受查询参数。
+响应直接返回 JSON，所有状态均带 `Cache-Control: no-store`。第三方项目或插件可独立实现此 HTTP 协议，无需依赖 CPR 插件 SDK
 
-协议识别依赖 `object: "cpr.peer"`、`schema_version: 1` 和 `capabilities`，不发布独立节点身份。
-未知能力可以忽略，不支持的版本按不兼容处理。
-第三方项目或插件可实现同一协议，连接由本地账号及其凭据、出口版本识别。
-响应直接返回 JSON，所有状态均带 `Cache-Control: no-store`
+#### 版本与可选能力
 
-只公开预算的完整响应形态如下：
+| 顶层必填字段 | 合同 |
+| --- | --- |
+| `object` | 固定为 `"cpr.peer"` |
+| `schema_version` | 当前为 `2`，不支持的版本按不兼容处理 |
+| `capabilities` | 当前 Key 获准公开的能力名称列表，最多 32 项；未知能力可以忽略 |
+| `observed_at` | 本次快照组装时间，RFC3339 UTC 时间 |
+| `expires_at` | 快照到期时间，必须晚于 `observed_at`，且不超过其后 30 分钟 |
+
+`usage`、`pool`、`quota`、`models` 按能力独立提供，未提供的数据块直接省略。
+接入端只消费已声明能力的数据，缺失值保持未知，不解释为零余额、空池或额度恢复。
+未知字段可以忽略；没有独立节点 ID，连接由本地账号及其凭据、出口版本识别
+
+| 能力 | 对应数据 |
+| --- | --- |
+| `key_usage` | `usage`：当前认证 Key 的预算访问结论与可选金额窗口 |
+| `pool_summary` | `pool`：账号数量、互斥状态计数及可选套餐分布 |
+| `quota_windows` | `quota.accounts`：匿名账号及各自额度窗口 |
+| `model_availability` | `models`：按当前 Key 公开的模型额度汇总，可独立于账号明细提供 |
+
+只公开预算访问结论的完整响应：
 
 ```json
 {
   "object": "cpr.peer",
-  "schema_version": 1,
+  "schema_version": 2,
   "capabilities": ["key_usage"],
-  "observed_at": "2026-10-29T12:00:00Z",
-  "expires_at": "2026-10-29T12:05:00Z",
+  "observed_at": "2026-11-01T12:00:00Z",
+  "expires_at": "2026-11-01T12:05:00Z",
   "usage": {
     "status": "available",
-    "observed_at": "2026-10-29T12:00:00Z",
-    "data": {
-      "unit": "USD",
-      "allowed": true,
-      "daily": { "limit_reached": false, "total": "1", "used": "0.6", "remaining": "0.4", "resetsAt": "2026-10-29T16:00:00Z" },
-      "weekly": { "limit_reached": false, "total": null, "used": "2", "remaining": null, "resetsAt": null }
-    }
-  },
-  "pool": { "disclosure": "none" },
-  "quota": { "disclosure": "none" }
+    "observed_at": "2026-11-01T12:00:00Z",
+    "data": { "allowed": true }
+  }
 }
 ```
 
-`usage.data` 沿用 [API Key 额度查询](#api-key-额度查询) 的十进制金额、窗口及不限额语义。
-`usage.status` 可为 `available`、`unavailable` 或 `unknown`；没有可用数据时不把缺失值解释为零余额
+#### Key 预算
 
-`usage.data.allowed` 是上游根据本地预算账本给出的访问结论，日周窗口的 `limit_reached` 表示对应预算是否耗尽。
-接入端以明确的 `allowed` 为准；缺失时，仍有效的 `limit_reached: true` 只能证明耗尽，不能据此推断恢复。
-缺少这些状态字段时金额仅用于展示，接入端不从 `total`、`used` 或 `remaining` 计算账号资格
+`usage.status` 为 `available`、`unavailable` 或 `unknown`，未知状态按 `unknown` 处理。
+`available` 表示数据可用，不表示预算尚有余额；没有可用数据时可省略 `data`。
+`usage.observed_at` 是预算的原始观测时间，缺失或过期时不能据此改变账号资格
 
-| 能力 | 数据合同 | 公开条件 |
-| --- | --- | --- |
-| `key_usage` | `usage` 为当前认证 Key 的本地预算账本 | `enabled` |
-| `pool_summary` | `pool.disclosure: "summary"`，含 `observed_at`、`account_count` 与 `states`；状态计数为 `ready`、`cooldown`、`exhausted`、`disabled`、`error`、`unknown` | `sharePool` |
-| 套餐分布 | `pool.plans: [{ name, count }]`；未授权时省略，不返回账号与套餐的逐项对应关系 | `sharePlans`，且已公开账号池 |
-| `quota_windows` | `quota.disclosure: "accounts"`，`accounts` 保留匿名账号及各自窗口；未授权时只返回 `disclosure: "none"` | `shareQuota` |
-| `model_availability` | `models` 按当前 Key 与请求到该节点的公开模型汇总，见下 | `shareQuota` |
+`usage.data.allowed` 是上游预算账本给出的访问结论，`false` 表示预算耗尽，不代表认证失败或临时限流。
+接入端以明确的 `allowed` 为准；缺失时，有效窗口中的 `limit_reached: true` 只能证明耗尽，不能据此推断恢复。
+金额只供展示，不从 `total`、`used` 或 `remaining` 计算账号资格
 
-账号额度示例：
+需要公开金额时，在 `usage.data` 中提供 `unit` 和 `windows`：
+
+```json
+{
+  "unit": "USD",
+  "allowed": true,
+  "windows": [
+    {
+      "key": "monthly",
+      "label": "月额度",
+      "window_seconds": 2592000,
+      "limit_reached": false,
+      "total": "100",
+      "used": "20",
+      "remaining": "80",
+      "reset_at": "2026-11-30T12:00:00Z"
+    }
+  ]
+}
+```
+
+- `windows` 只包含实际提供的周期，可以省略或为空；不要求提供日、周窗口
+- 每个窗口的 `key` 必填且在该预算中唯一，使用稳定的机器标识；`label` 可选，省略时展示 `key`
+- 提供金额窗口时 `unit` 必填，表示统一计费单位，如 `USD`；仅提供 `allowed` 时可以省略
+- `used` 是必填的非负十进制字符串，`total` 与 `remaining` 使用相同格式；不限额时两者为 `null`
+- `window_seconds` 是可选的正整数，表示本次周期的秒数；`reset_at` 是可选 RFC3339 时间。仅当两者均有效时，接入端可按窗口边界关联本机用量
+- `limit_reached` 可省略，省略表示没有明确的窗口耗尽结论；重置时间已过意味着观测过期，不意味着预算已恢复
+
+#### 账号池、额度与模型
+
+`pool` 必须包含 `account_count` 与 `states`。`states` 包含 `ready`、`cooldown`、`exhausted`、`disabled`、`error`、`unknown` 六项非负整数，
+各项互斥且总和等于 `account_count`。可选 `observed_at` 表示池观测时间；可选 `plans: [{ name, count }]` 表示套餐分布，
+套餐总数不能超过账号数，不返回账号与套餐的逐项对应关系
+
+`quota.accounts` 保留匿名账号及各自窗口。账号示例：
 
 ```json
 {
   "id": "df306c3718c99d3615352e41d32751d3",
   "models": ["gpt-5.4"],
-  "observed_at": "2026-10-29T11:58:00Z",
-  "expires_at": "2026-10-29T12:28:00Z",
-  "windows": [{ "key": "weekly", "group": "shortTerm", "label": "周额度", "role": "secondary", "window_seconds": 604800, "used_percent": 47, "reset_at": "2026-10-31T16:00:00Z", "limit_reached": false }]
+  "observed_at": "2026-11-01T11:58:00Z",
+  "expires_at": "2026-11-01T12:28:00Z",
+  "windows": [{ "key": "weekly", "window_seconds": 604800, "used_percent": 47, "reset_at": "2026-11-07T16:00:00Z", "limit_reached": false }]
 }
 ```
 
-匿名 `id` 在同一 Key 下稳定，不能当作本地账号 ID。返回结果不含 Key、邮箱、账号名称、代理或凭据正文。
-窗口的 `key`、`group`、`label`、可选 `limit_id`／`limit_name` 与可选 `role`（`primary`、`secondary`、`monthly`）保留原生展示口径；
-`window_seconds`、`used_percent`、`reset_at` 均可缺失。不同账号或不同周期的百分比不能相加，
-不能从百分比推算 Token 总额，也不能用本地请求用量填充上游额度
+账号的 `id`、`models`、`windows` 必填，匿名 `id` 在同一 Key 下稳定，不能当作接入端的本地账号 ID。
+观测时间可省略，但缺失或过期时不能参与调度判断。返回结果不含 Key、邮箱、账号名称、代理或凭据正文
 
-模型汇总条目形如 `{ "model": "gpt-5.4", "coverage": "complete", "state": "available", "observed_at": "...", "expires_at": "..." }`。
+| 账号窗口字段 | 合同 |
+| --- | --- |
+| `key` | 必填，额度桶内稳定的窗口标识 |
+| `group` | 可选的分组标识，省略时为 `general` |
+| `limit_id` | 可选的额度桶标识；同账号的窗口按 `limit_id` 分桶，缺失时按 `group` 分桶 |
+| `label`、`limit_name` | 可选的窗口与额度桶展示名；窗口名省略时展示 `key` |
+| `role` | 可选展示角色：`primary`、`secondary`、`monthly`，未知值不指定角色 |
+| `window_seconds`、`used_percent`、`reset_at` | 可选的周期秒数、已用百分比（0～100）与 RFC3339 重置时间 |
+| `limit_reached` | 是否明确触顶，省略时不标记触顶 |
+
+不同账号或周期的百分比不能相加，不能推算 Token 总额，也不能用本地请求用量填充上游额度
+
+`models` 条目形如 `{ "model": "gpt-5.4", "coverage": "complete", "state": "available", "observed_at": "...", "expires_at": "..." }`。
 `coverage` 为 `complete` 或 `partial`，`state` 为 `available`、`exhausted` 或 `unknown`。
 只有该模型所有候选的资格与额度都明确、有效且全部耗尽，才能给出 `complete + exhausted`。
-它是通用模型额度参考，不承诺 Images、Live 等各操作的额外资格或即时容量；过期、缺失或部分覆盖保持中性，
+它是通用模型额度参考，不承诺 Images、Live 等操作的额外资格或即时容量；缺失、过期或部分覆盖保持中性，
 请求仍需执行当前节点的正常授权与调度
 
-顶层 `observed_at` 是此次本地快照组装时间，默认有效期 5 分钟；账号窗口与模型汇总保留各自的原始观测时间，
-不因查询或转发而更新。各组件有效期最多为原始观测后 30 分钟，并受重置边界约束；过去的重置时间意味着旧窗口过期，
-不意味着额度已经恢复。接入端应按各组件时间判断，不能用新的顶层时间延长旧观测
+#### 有效期与数量限制
+
+顶层快照默认有效期 5 分钟，CPR 接入端仅将最近 5 分钟组装且未到期的快照用于访问与调度判断。
+预算观测有效期为 5 分钟；账号与模型可提供各自的 `expires_at`，省略时按观测后 5 分钟处理，最长不得超过 30 分钟。
+各组件保留原始观测时间，并受重置边界约束，不因查询或转发而更新；新的顶层时间不能延长旧观测
+
+接口不分页，不截断账号集后声称完整。账号最多 3000 个，预算窗口和账号额度窗口分别最多 6000 个，
+模型最多 2000 个，响应最大 4 MiB。窗口标识、展示名和额度桶标识不得为空或包含控制字符，最多 256 字节；
+`group` 最多 128 字节，`unit` 最多 16 字节。可选字段没有有效值时省略
+
+#### CPR 内置共享规则
+
+CPR 默认路径为 `/v1/cpr/link`，使用同一数据面入口认证，不接受 Cookie 或管理 API Key。
+只有当前 Key 显式开启 `peerSharing.enabled` 且绑定非空分组时可查询。
+查询不执行推理、占用推理并发/RPM、更新最近使用时间或刷新上游；预算耗尽后仍可查询
+
+| 共享配置 | 导出内容 |
+| --- | --- |
+| `enabled` | `key_usage`，包含明确访问结论及本地日、周美元账本；金额与周期口径见 [API Key 额度查询](#api-key-额度查询) |
+| `sharePool` | `pool_summary` |
+| `sharePlans` | 已公开账号池中的 `pool.plans` |
+| `shareQuota` | `quota_windows` 与 `model_availability` |
 
 共享范围同时受当前 Key 的公开开关、分组及冻结权限限制，只包含 Provider 明确声明的直连 OAuth 账号。
-互联 Key 的实际推理也使用该直连范围，不把 API Key 转接账号再次作为共享池，协议不递归查询其他节点。
-接口不分页、不截断账号集后声称完整；共享范围最多 3000 个账号、额度窗口总计最多 6000 个、模型最多 2000 个。
-任一数量超限、响应超过 4 MiB 或本地读取失败返回 `503 peer_snapshot_unavailable`
+互联 Key 的推理也使用该直连范围，不把 API Key 转接账号再次作为共享池，不递归查询其他节点。
+这些开关和账号组织方式属于 CPR 内置实现；第三方通过自身授权规则生成协议数据
 
 缺失、非法、禁用或删除的 Key 返回 `401`；未开启共享或没有显式分组返回 `403 peer_sharing_disabled`；
-未知参数返回 `400 invalid_peer_query`。每个进程对每个认证 Key 独立限制为每分钟 30 次。
-涉及账号池、额度或模型聚合的查询每个进程最多同时执行 8 个，满额时立即返回
-`429 peer_query_rate_limited` 和 `Retry-After: 1`；仅查询 Key 预算不占用聚合槽位。
-每 Key 限流同样返回 `429 peer_query_rate_limited`，`Retry-After` 表示剩余等待秒数；两类限制均不消耗推理请求配额
+未知参数返回 `400 invalid_peer_query`；数量或响应大小超限、本地读取失败返回 `503 peer_snapshot_unavailable`。
+每个进程对每个认证 Key 独立限制为每分钟 30 次，涉及账号池、额度或模型聚合的查询最多同时执行 8 个。
+满额时返回 `429 peer_query_rate_limited` 和 `Retry-After`，聚合槽位满时等待秒数为 `1`；仅查询 Key 预算不占用聚合槽位。
+上述限制均不消耗推理请求配额
 
 ### Codex Live 语音通话
 
@@ -1067,7 +1132,7 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 | `lastError` | 当前实例最近同步失败分类：`unauthorized`、`unsupported`、`rate_limited`、`invalid_response`、`unavailable`，成功时为 `null` |
 | `pool` | 上游授权公开的账号数量、状态数量及套餐数量，未公开时为 `null` |
 
-互联额度复用 `quota.windows`。可用的上游 Key 账本始终保留日、周窗口，不限额也保留已用金额。
+互联额度复用 `quota.windows`。上游 Key 账本按实际提供的周期展示，不补造缺失窗口；不限额也保留已用金额。
 窗口返回 `amount: { usedDisplay, remainingDisplay, totalDisplay }`，字符串包含单位，美元使用 `$` 前缀；
 不限额的总额与剩余额显示为 `∞`，`usedPercent` 为 `null`，金额不换算成 Token。
 Key 消费窗口的 `localUsage` 按各自 `[resetAt - windowSeconds, resetAt)` 边界聚合本机请求，
@@ -1328,8 +1393,8 @@ API Key 账号与 OAuth 共用现有 Responses、Images 和 standalone Search �
 未识别为 CPR 互联的 API Key 账号，其列表和详情 `usage` 汇总账号创建后仍保留的本地请求记录，
 `usage.windowKind` 为 `general`，管理端显示累计用量。日志清理会影响累计范围，不代表上游余额
 
-互联账号按上游 Key 最长的消费窗口统计本机 Token、费用和模型用量，有周额度时使用周窗口，只有日额度时使用日窗口，
-`usage.windowKind` 分别为 `weekly` 或 `daily`。查询边界同账号额度窗口，为 `[resetAt - windowSeconds, resetAt)`；
+互联账号按上游 Key 已提供的最长消费窗口统计本机 Token、费用和模型用量。
+日、周周期的 `usage.windowKind` 分别为 `daily`、`weekly`，其他周期为 `quota`。查询边界同账号额度窗口，为 `[resetAt - windowSeconds, resetAt)`；
 未开启或缺少重置边界时显示无数据，不回退到历史累计，也不采用池内其他账号的周期。
 OAuth 账号仍按实际周/月额度窗口统计
 
