@@ -17,21 +17,16 @@ const transportOptions = [
 </script>
 
 <template>
-  <div class="grid gap-4">
-    <ZFormItem v-if="!editing" :label="t('accounts.credentials.accountName')" required>
-      <ZInput v-model="form.name" :placeholder="t('accounts.credentials.enterUpstreamName')" :disabled="disabled" />
-    </ZFormItem>
-    <ZFormItem :label="t('common.fields.baseUrl')" required>
-      <template #extra>
-        <span class="text-cp-xs text-cp-text-quaternary" :title="t('accounts.credentials.baseUrlHelp')">{{ t('accounts.credentials.apiPrefix') }}</span>
-      </template>
-      <ZInput v-model="form.base_url" type="url" placeholder="https://api.example.com/v1" :disabled="disabled" autocomplete="off" />
-    </ZFormItem>
-    <ZFormItem :label="t('common.fields.apiKey')" :required="!editing">
-      <ZInput v-model="form.apiKey" type="password" :placeholder="editing ? t('accounts.credentials.apiKeyPlaceholder') : t('accounts.credentials.enterUpstreamKey')" :disabled="disabled" autocomplete="new-password" />
-    </ZFormItem>
-    <ZFormItem :label="t('accounts.credentials.transportLabel')">
-      <ZSegmented v-model="form.transport" :aria-label="t('accounts.credentials.transportLabel')" :options="transportOptions" :disabled="disabled" :title="t('accounts.credentials.webSocketHelp')" />
-    </ZFormItem>
-  </div>
+  <ZFormItem prop="apiKey.base_url" :show-message="Boolean(form.base_url.trim())" :label="t('common.fields.baseUrl')" required>
+    <template #extra>
+      <span class="text-z-xs text-z-text-quaternary" :title="t('accounts.credentials.baseUrlHelp')">{{ t('accounts.credentials.apiPrefix') }}</span>
+    </template>
+    <ZInput v-model="form.base_url" type="url" placeholder="https://api.example.com/v1" :disabled="disabled" autocomplete="off" />
+  </ZFormItem>
+  <ZFormItem prop="apiKey.apiKey" :show-message="Boolean(form.apiKey)" :label="t('common.fields.apiKey')" :required="!editing">
+    <ZInput v-model="form.apiKey" type="password" :placeholder="editing ? t('accounts.credentials.apiKeyPlaceholder') : t('accounts.credentials.enterUpstreamKey')" :disabled="disabled" autocomplete="new-password" />
+  </ZFormItem>
+  <ZFormItem prop="apiKey.transport" :show-message="false" :label="t('accounts.credentials.transportLabel')">
+    <ZSegmented v-model="form.transport" :aria-label="t('accounts.credentials.transportLabel')" :options="transportOptions" :disabled="disabled" :title="t('accounts.credentials.webSocketHelp')" />
+  </ZFormItem>
 </template>

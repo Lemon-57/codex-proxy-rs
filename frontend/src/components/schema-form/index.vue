@@ -150,7 +150,7 @@ defineExpose({ focusField })
                 <Info class="size-3.5" />
               </ZIconButton>
             </template>
-            <p class="m-0 max-w-72 p-3 text-cp-xs leading-relaxed text-cp-text-secondary">
+            <p class="m-0 max-w-72 p-3 text-z-xs leading-relaxed text-z-text-secondary">
               {{ field.description }}
             </p>
           </ZPopover>

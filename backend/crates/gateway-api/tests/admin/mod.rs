@@ -1,6 +1,7 @@
 //! 管理控制面 HTTP 接口的测试入口
 
 mod plugins;
+mod upstream_info;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -97,6 +98,11 @@ mod settings;
 mod system;
 mod wire;
 
+pub(super) struct ProviderQuotaGate {
+    pub entered: tokio::sync::Semaphore,
+    pub release: tokio::sync::Semaphore,
+}
+
 pub(super) struct AdminTestFixture {
     pub services: AdminServices,
     plugin_ports: Arc<plugins::TestPluginPorts>,
@@ -113,6 +119,7 @@ pub(super) struct AdminTestFixture {
     pub dashboard_summary_range: Arc<Mutex<Option<TimeRange>>>,
     pub provider_error: Arc<Mutex<Option<ProviderAdminError>>>,
     pub provider_quota: Arc<Mutex<Option<ProviderQuota>>>,
+    pub provider_quota_gate: Arc<Mutex<Option<Arc<ProviderQuotaGate>>>>,
     pub provider_models: Arc<Mutex<Option<ProviderModels>>>,
     pub account: Arc<Mutex<Option<AccountPageItem>>>,
     pub account_usage: Arc<Mutex<Vec<AccountUsage>>>,
@@ -190,18 +197,21 @@ impl AdminTestFixture {
             plugin_ports.clone(),
         );
         let provider_quota = Arc::new(Mutex::new(None));
+        let provider_quota_gate = Arc::new(Mutex::new(None));
         let provider_models = Arc::new(Mutex::new(None));
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
             Arc::new(UnusedProvider::new(
                 "openai",
                 Arc::clone(&provider_error),
                 Arc::clone(&provider_quota),
+                Arc::clone(&provider_quota_gate),
                 Arc::clone(&provider_models),
             )),
             Arc::new(UnusedProvider::new(
                 "xai",
                 Arc::clone(&provider_error),
                 Arc::clone(&provider_quota),
+                Arc::clone(&provider_quota_gate),
                 Arc::clone(&provider_models),
             )),
         ];
@@ -215,6 +225,9 @@ impl AdminTestFixture {
             ClientConfig::default(),
             stores,
             gateway_admin::AdminRuntimePorts {
+                upstream_info: Some(Arc::new(upstream_info::TestPeerInfo(Arc::clone(
+                    &provider_quota,
+                )))),
                 timezone,
                 service_middleware: std::sync::Arc::new(|| None),
                 plugin_preparation: plugin_ports.clone(),
@@ -251,6 +264,7 @@ impl AdminTestFixture {
             dashboard_summary_range,
             provider_error,
             provider_quota,
+            provider_quota_gate,
             provider_models,
             account,
             account_usage,
@@ -1071,6 +1085,7 @@ impl ClientKeyStore for MemoryClientKeyStore {
         let now = Utc::now();
         Ok(Some(ClientKeySecret::new(
             ClientKeyRecord {
+                peer_sharing: Default::default(),
                 request_profile_overrides: Default::default(),
                 budget: Default::default(),
                 id: id.clone(),
@@ -1144,6 +1159,13 @@ impl ClientKeyVerifier for UnusedClientKeyVerifier {
 
 #[async_trait]
 impl AccountStore for UnusedStore {
+    async fn load_account_record(
+        &self,
+        _: &gateway_core::account::ProviderAccountId,
+    ) -> AdminStoreResult<Option<gateway_admin::model::accounts::AccountRecord>> {
+        Err(unavailable("account"))
+    }
+
     async fn account_exists(&self, id: &str) -> AdminStoreResult<bool> {
         Ok(self
             .account
@@ -1612,6 +1634,7 @@ struct UnusedProvider {
     kind: ProviderKind,
     error: Arc<Mutex<Option<ProviderAdminError>>>,
     quota: Arc<Mutex<Option<ProviderQuota>>>,
+    quota_gate: Arc<Mutex<Option<Arc<ProviderQuotaGate>>>>,
     models: Arc<Mutex<Option<ProviderModels>>>,
 }
 
@@ -1620,12 +1643,14 @@ impl UnusedProvider {
         kind: &str,
         error: Arc<Mutex<Option<ProviderAdminError>>>,
         quota: Arc<Mutex<Option<ProviderQuota>>>,
+        quota_gate: Arc<Mutex<Option<Arc<ProviderQuotaGate>>>>,
         models: Arc<Mutex<Option<ProviderModels>>>,
     ) -> Self {
         Self {
             kind: ProviderKind::new(kind).expect("provider kind"),
             error,
             quota,
+            quota_gate,
             models,
         }
     }
@@ -1633,6 +1658,22 @@ impl UnusedProvider {
 
 #[async_trait]
 impl ProviderAdmin for UnusedProvider {
+    fn is_direct_account(&self, authentication_kind: &str) -> bool {
+        authentication_kind == "oauth"
+    }
+
+    fn peer_model_eligible(
+        &self,
+        _: &gateway_admin::model::accounts::AccountRecord,
+        _: &str,
+    ) -> Option<bool> {
+        Some(true)
+    }
+
+    fn peer_authentication_kinds(&self) -> &[&str] {
+        &["api_key"]
+    }
+
     fn pricing_catalog(&self) -> gateway_admin::model::pricing::ProviderPricingCatalog {
         serde_json::from_value(serde_json::json!({
             "builtin-model": {
@@ -1721,6 +1762,11 @@ impl ProviderAdmin for UnusedProvider {
         &self,
         _: gateway_admin::model::provider_credentials::ProviderQuotaRequest,
     ) -> Result<ProviderQuota, ProviderAdminError> {
+        let gate = self.quota_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
         if let Some(quota) = self.quota.lock().expect("provider quota").clone() {
             return Ok(quota);
         }

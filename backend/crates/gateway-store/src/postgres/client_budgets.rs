@@ -235,10 +235,9 @@ impl PgClientBudgetStore {
                         .ok_or_else(unavailable)?;
                 }
             }
-            let daily_exceeded = limits.daily_usd != Decimal::ZERO && daily >= limits.daily_usd;
-            let weekly_exceeded = limits.weekly_usd != Decimal::ZERO && weekly >= limits.weekly_usd;
-            if daily_exceeded || weekly_exceeded {
-                let (reset, code, message) = if weekly_exceeded {
+            let access = limits.access(daily, weekly);
+            if !access.allowed() {
+                let (reset, code, message) = if access.weekly_limit_reached {
                     (
                         weekly_end,
                         "key_weekly_budget_exceeded",
@@ -251,9 +250,11 @@ impl PgClientBudgetStore {
                         "Daily spending limit reached.",
                     )
                 };
-                return Err(GatewayError::new(GatewayErrorKind::RateLimited, message)
-                    .with_client_code(code)
-                    .with_retry_after((reset - now).to_std().unwrap_or(Duration::from_secs(1))));
+                return Err(
+                    GatewayError::new(GatewayErrorKind::BudgetExhausted, message)
+                        .with_client_code(code)
+                        .with_retry_after((reset - now).to_std().unwrap_or(Duration::from_secs(1))),
+                );
             }
         }
         // 首次使用或窗口到期才写入；与重置、结算保持相同锁序

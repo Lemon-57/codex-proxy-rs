@@ -497,6 +497,44 @@ async fn usage_list_and_diagnostics_preserve_account_snapshots_by_id() {
         diagnostics.items[0].account_plan_type.as_deref(),
         Some("team")
     );
+    for (authentication_kind, plan_type) in [
+        (Some("api_key"), None),
+        (Some("oauth"), Some("team")),
+        (None, None),
+    ] {
+        sqlx::query(
+            "update model_requests set request_observation_json = jsonb_set(
+                request_observation_json, '{account}',
+                (request_observation_json->'account') || jsonb_build_object(
+                    'authenticationKind', $1::text, 'planTypeSnapshot', $2::text
+                )
+             ) where id = 'req_observe_uncommitted'",
+        )
+        .bind(authentication_kind)
+        .bind(plan_type)
+        .execute(&database.pool)
+        .await
+        .expect("update request authentication snapshot");
+        super::drain_analytics(&database.pool).await;
+        let diagnostics = store
+            .usage_diagnostics(
+                range,
+                admin_observability::UsageFilter {
+                    provider_account_ref: Some("acct_team".to_owned()),
+                    ..Default::default()
+                },
+                admin_observability::DiagnosticDimension::Account,
+                100,
+            )
+            .await
+            .expect("deleted account authentication snapshot");
+        assert_eq!(diagnostics.items.len(), 1);
+        assert_eq!(
+            diagnostics.items[0].account_authentication_kind.as_deref(),
+            authentication_kind
+        );
+        assert_eq!(diagnostics.items[0].account_plan_type.as_deref(), plan_type);
+    }
     database.close().await;
 }
 

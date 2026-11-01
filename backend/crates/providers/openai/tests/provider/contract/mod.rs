@@ -7196,6 +7196,7 @@ async fn affinity_quota_switch_should_clear_old_turn_state_without_a_provider_st
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            expected_connection: None,
             plan_type: None,
             account_id: first_account.id().clone(),
             expected_revision: first_account.revision(),
@@ -8184,6 +8185,7 @@ async fn official_usage_limit_failure_persists_fact_without_fabricating_usage() 
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            expected_connection: None,
             plan_type: None,
             account_id: account.id().clone(),
             expected_revision: account.revision(),
@@ -9773,6 +9775,7 @@ async fn quota_limited_account_diagnostic_uses_upstream() {
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            expected_connection: None,
             plan_type: None,
             account_id: account.id().clone(),
             expected_revision: account.revision(),

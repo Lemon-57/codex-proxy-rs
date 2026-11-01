@@ -103,7 +103,7 @@ watch(timeRange, () => {
       </template>
     </ZPageHeader>
 
-    <UsageSummaryCards :summary="summary.data" :loading="summary.loading" :error="summary.error" />
+    <UsageSummaryCards :summary="summary.data" :error="summary.error" />
     <UsageInsightsGrid
       v-model:diagnostic-dimension="diagnosticDimension"
       v-model:performance-metric="performanceMetric"
@@ -119,11 +119,11 @@ watch(timeRange, () => {
     >
       <template #header>
         <div>
-          <h2 class="m-0 text-xl leading-[1.15] font-heavy text-cp-text">
+          <h2 class="m-0 text-xl leading-[1.15] font-heavy text-z-text">
             {{ t('usage.page.requestDetails') }}
           </h2>
           <p
-            class="mt-1.75 mb-0 text-cp leading-[1.15] font-emphasis text-cp-text-secondary"
+            class="mt-1.75 mb-0 text-z leading-[1.15] font-emphasis text-z-text-secondary"
           >
             {{ t('usage.page.recordsDescription') }}
           </p>

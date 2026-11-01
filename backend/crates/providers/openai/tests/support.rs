@@ -54,6 +54,7 @@ pub(crate) struct MemoryAccountStore {
     accounts: Mutex<BTreeMap<ProviderAccountId, StoredAccount>>,
     account_reads: AtomicUsize,
     quota_reads: AtomicUsize,
+    largest_quota_read: AtomicUsize,
     fail_provider_listing: AtomicBool,
     pending_account_reads: bool,
     credential_load_hook: Mutex<Option<Arc<CredentialLoadHook>>>,
@@ -177,6 +178,10 @@ impl MemoryAccountStore {
             .clone()
             .with_outbound_proxy(proxy)
             .with_request_location(location);
+    }
+
+    pub(crate) fn largest_quota_read(&self) -> usize {
+        self.largest_quota_read.load(Ordering::SeqCst)
     }
 
     pub(crate) fn quota_reads(&self) -> usize {
@@ -427,10 +432,31 @@ impl ProviderAccountStore for MemoryAccountStore {
         accounts: &[ProviderAccountId],
     ) -> Result<Vec<QuotaObservation>, StoreError> {
         self.quota_reads.fetch_add(1, Ordering::SeqCst);
+        self.largest_quota_read
+            .fetch_max(accounts.len(), Ordering::SeqCst);
         let stored = self.accounts.lock().expect("account store lock");
         Ok(accounts
             .iter()
             .filter_map(|account| stored.get(account)?.quota.clone())
+            .collect())
+    }
+
+    async fn get_quota_versions(
+        &self,
+        ids: &[ProviderAccountId],
+    ) -> Result<Vec<gateway_core::account::QuotaObservationVersion>, StoreError> {
+        let accounts = self.accounts.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| {
+                let stored = accounts.get(id)?;
+                let quota = stored.quota.as_ref()?;
+                Some(gateway_core::account::QuotaObservationVersion {
+                    account_id: id.clone(),
+                    credential_revision: stored.account.revision(),
+                    observed_at: quota.observed_at,
+                })
+            })
             .collect())
     }
 
@@ -442,7 +468,16 @@ impl ProviderAccountStore for MemoryAccountStore {
         let stored = accounts
             .get_mut(&observation.account_id)
             .ok_or_else(|| store_error(StoreErrorKind::InvalidData))?;
-        if stored.account.revision() != observation.expected_revision {
+        if stored.account.revision() != observation.expected_revision
+            || observation
+                .expected_connection
+                .as_ref()
+                .is_some_and(|connection| {
+                    !stored.account.enabled()
+                        || gateway_core::account::UpstreamConnection::for_account(&stored.account)
+                            != *connection
+                })
+        {
             return Ok(QuotaWriteOutcome::Conflict);
         }
         if stored

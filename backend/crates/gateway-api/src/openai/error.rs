@@ -300,6 +300,11 @@ pub const fn gateway_error_contract(
             "rate_limit_error",
             "rate_limit_exceeded",
         ),
+        GatewayErrorKind::BudgetExhausted => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "usage_limit_reached",
+            "usage_limit_reached",
+        ),
         GatewayErrorKind::UpstreamUnavailable => (
             StatusCode::BAD_GATEWAY,
             "server_error",

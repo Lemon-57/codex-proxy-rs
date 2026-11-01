@@ -25,7 +25,6 @@
       "reset": "Reset:",
       "remainingQuota": "Remaining {label} quota",
       "accountLimit": "Account limit",
-      "quota": "{provider}",
       "lastRefreshed": "Last refreshed: {refreshedAtDisplay}",
       "viewPersonalInformation": "View personal information",
       "forecastWeeklyMonthlyQuota": "Forecast weekly/monthly quota",
@@ -38,7 +37,6 @@
       "windowConsumption": "Window consumption",
       "resetTime": "Reset time",
       "localTokens": "Locally accumulated tokens",
-      "unavailableHelp": "Upstream quota is unavailable, the green bar does not represent remaining quota",
       "totalTokensFor": "Total tokens for {windowLabelDisplay}",
       "usageRateHelp": "Current usage percentage for the most recently used quota",
       "usageRate": "Usage rate",
@@ -160,6 +158,8 @@
       "elapsed": "Elapsed"
     },
     "editor": {
+      "namePlaceholder": "Leave blank to use the account email",
+      "nameInvalid": "Use an account name within 512 bytes, without line breaks or control characters",
       "title": "Edit account",
       "transportLabel": "Upstream transport",
       "loadError": "Could not load upstream settings",
@@ -292,6 +292,7 @@
       "totalCharges": "Total cost",
       "noModelUsageYet": "No model usage yet",
       "windows": {
+        "daily": "Daily usage",
         "general": "Total usage",
         "weekly": "Weekly usage",
         "monthly": "Monthly usage",
@@ -313,6 +314,7 @@
       "selectAccountPlatform": "Select account platform",
       "accountPlatform": "Account platform",
       "maximumWordsOptional": "Maximum 500 words, optional",
+      "namePlaceholder": "Optional, applies only when importing one account",
       "copyAccount": "Copy account",
       "accountCopied": "Account copied",
       "howToAddAccount": "How to add an account",
@@ -353,7 +355,6 @@
       "importTasksCreated": "Import tasks created: {submitted}",
       "importTaskCreated": "Import task created",
       "partialSubmission": "Some import tasks were created, retry with the same input to submit the rest",
-      "accountName": "{provider} account",
       "failedToStartAuthorization": "Failed to start authorization"
     },
     "importTasks": {
@@ -611,6 +612,24 @@
       "pasteAtLeastOne": "Paste at least one {label}",
       "missingProvider": "The import file contains no {provider} accounts",
       "importFilesMustBeJsonObjects": "Import files must be JSON objects"
+    },
+    "upstream": {
+      "account": "Account {number}",
+      "poolChart": "Shared pool account quotas",
+      "poolKeyboard": "Arrow keys select an account, plus and minus zoom, Home shows the full pool",
+      "startsOnNextUse": "Starts on next use",
+      "link": "CPR Link",
+      "observedAt": "Updated {time}",
+      "stale": "Data expired",
+      "unauthorized": "Upstream access denied",
+      "unsupported": "Upstream does not support CPR Link",
+      "rateLimited": "Upstream query rate limited",
+      "invalidResponse": "Invalid upstream data",
+      "unavailable": "Upstream unavailable",
+      "pool": "Shared pool",
+      "ready": "available",
+      "nodeQuota": "Node quota",
+      "quota": "Upstream quota"
     }
   }
 }

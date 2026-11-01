@@ -307,4 +307,3 @@ fn unsigned_metadata(row: &sqlx::postgres::PgRow, column: &'static str) -> Admin
             )
         })
 }
-

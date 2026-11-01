@@ -14,6 +14,10 @@ export type AccountErrorReason
     | 'account_banned'
 
 export interface AccountQuotaWindow {
+  sourceAccountId?: string | null
+  amount?: { usedDisplay: string, remainingDisplay: string, totalDisplay: string } | null
+  observedAtDisplay?: string | null
+  stale?: boolean
   key: string
   group: string
   limitId: string | null
@@ -96,7 +100,7 @@ export interface AccountModelUsage {
 }
 
 export interface AccountUsage {
-  windowKind: 'general' | 'weekly' | 'monthly' | 'quota'
+  windowKind: 'general' | 'daily' | 'weekly' | 'monthly' | 'quota'
   requestCount: number | null
   requestCountDisplay: string
   inputTokens: number | null
@@ -136,6 +140,7 @@ export interface AccountModelAccess {
 }
 
 export interface Account {
+  upstream: AccountUpstream | null
   capabilities: AccountCapabilities
   outboundProxyId: string | null
   outboundProxyEndpoint: string | null
@@ -178,6 +183,21 @@ export interface Account {
   quota: AccountQuota
   usage: AccountUsage
   groups: AccountGroupRef[]
+}
+
+export interface AccountUpstream {
+  discovered: boolean
+  observedAt: string | null
+  observedAtDisplay: string
+  observedAtRelative: RelativeTimeView | null
+  stale: boolean
+  connectionRevision: string
+  lastError: 'unauthorized' | 'unsupported' | 'rate_limited' | 'invalid_response' | 'unavailable' | null
+  pool: {
+    accountCount: number
+    states: { ready: number, cooldown: number, exhausted: number, disabled: number, error: number, unknown: number }
+    plans: Array<{ name: string, count: number }>
+  } | null
 }
 
 export interface AccountCapabilities {
@@ -435,6 +455,7 @@ interface AccountUpdateParam {
   outboundProxyUrl?: string
   outboundProxyId?: string
   accountId: string
+  name?: string
   notes?: string
   enabled: boolean
   concurrencyLimit: number | null
@@ -460,6 +481,7 @@ interface AccountDeleteParams {
 }
 
 export interface AccountImportSettings {
+  name?: string
   notes?: string
   enabled: boolean
   concurrencyLimit: number | null

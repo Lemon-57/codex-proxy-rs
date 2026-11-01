@@ -187,22 +187,22 @@ function formatTooltip(params: unknown) {
   >
     <template #body>
       <div class="grid min-h-66" :class="hasData ? 'gap-3' : 'h-full'">
-        <div v-if="hasData && health" class="grid grid-cols-3 gap-2 rounded-xl bg-cp-fill-quaternary/45 p-2">
+        <div v-if="hasData && health" class="grid grid-cols-3 gap-2 rounded-xl bg-z-fill-quaternary/45 p-2">
           <div class="grid gap-1 px-2">
-            <span class="text-[10px] font-bold text-cp-text-quaternary">{{ t('usage.health.serviceSuccessRate') }}</span>
-            <strong class="font-mono text-cp-base font-heavy tabular-nums text-cp-green-text">
+            <span class="text-[10px] font-bold text-z-text-quaternary">{{ t('usage.health.serviceSuccessRate') }}</span>
+            <strong class="font-mono text-z-base font-heavy tabular-nums text-z-green-text">
               {{ formatPercent(health.successRate) }}
             </strong>
           </div>
           <div class="grid gap-1 px-2">
-            <span class="text-[10px] font-bold text-cp-text-quaternary">{{ t('usage.health.completionRate') }}</span>
-            <strong class="font-mono text-cp-base font-heavy tabular-nums text-cp-text">
+            <span class="text-[10px] font-bold text-z-text-quaternary">{{ t('usage.health.completionRate') }}</span>
+            <strong class="font-mono text-z-base font-heavy tabular-nums text-z-text">
               {{ formatPercent(health.completionRate) }}
             </strong>
           </div>
           <div class="grid gap-1 px-2">
-            <span class="text-[10px] font-bold text-cp-text-quaternary">{{ t('usage.health.abnormalEnd') }}</span>
-            <strong class="font-mono text-cp-base font-heavy tabular-nums text-cp-orange-text">
+            <span class="text-[10px] font-bold text-z-text-quaternary">{{ t('usage.health.abnormalEnd') }}</span>
+            <strong class="font-mono text-z-base font-heavy tabular-nums text-z-orange-text">
               {{ formatCompactNumber(health.cancelledRequests + health.incompleteRequests) }}
             </strong>
           </div>

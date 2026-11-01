@@ -131,7 +131,42 @@ pub trait AccountStore:
         runtime: AccountRuntimeSnapshot,
     ) -> AdminStoreResult<Option<AccountPageItem>>;
 
+    /// 批量读取指定账号与当前启用分组的交集，分组只用于授权筛选，不加载展示信息
+    /// 不加载凭据正文或触发 Provider 查询
+    async fn load_accounts_in_enabled_groups(
+        &self,
+        account_ids: &[gateway_core::account::ProviderAccountId],
+        group_ids: &[gateway_core::routing::AccountGroupId],
+    ) -> AdminStoreResult<Vec<crate::model::accounts::AccountRecord>> {
+        if group_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut accounts = Vec::with_capacity(account_ids.len());
+        for id in account_ids {
+            if let Some(item) = self
+                .load_account(id.as_str(), AccountRuntimeSnapshot::default())
+                .await?
+                && item
+                    .account
+                    .groups
+                    .iter()
+                    .any(|group| group.enabled && group_ids.contains(&group.id))
+            {
+                let mut account = item.account;
+                account.groups.clear();
+                accounts.push(account);
+            }
+        }
+        Ok(accounts)
+    }
+
     async fn account_exists(&self, account_id: &str) -> AdminStoreResult<bool>;
+
+    /// 只读取账号记录，不加载运行配置、分组或额度展示
+    async fn load_account_record(
+        &self,
+        account_id: &gateway_core::account::ProviderAccountId,
+    ) -> AdminStoreResult<Option<crate::model::accounts::AccountRecord>>;
 
     async fn load_account_usage(
         &self,
@@ -251,6 +286,14 @@ pub trait AccountRuntimeStore: Send + Sync {
         &self,
         account_ids: &[String],
     ) -> AdminStoreResult<AccountRuntimeSnapshot>;
+
+    /// 只需账号可用状态时不读取在途租约，避免池规模放大容量查询
+    async fn account_rate_limits(
+        &self,
+        account_ids: &[String],
+    ) -> AdminStoreResult<AccountRuntimeSnapshot> {
+        self.account_runtime(account_ids).await
+    }
 
     /// 账号错误保护中的账号与其冻结快照；临时限流不包含在内
     async fn active_freezes(

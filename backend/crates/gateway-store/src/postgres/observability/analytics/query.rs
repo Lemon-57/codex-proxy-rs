@@ -634,6 +634,7 @@ impl<'a> AnalyticsSnapshot<'a> {
                 key: key.clone(),
                 name: key,
                 account_provider_kind: None,
+                account_authentication_kind: None,
                 account_plan_type: None,
                 request_count: metrics.request_count,
                 success_count: metrics.success_count,
@@ -669,9 +670,9 @@ impl<'a> AnalyticsSnapshot<'a> {
                 .map(|item| item.key.clone())
                 .collect::<Vec<_>>();
             let statement = if dimension == DiagnosticDimension::Account {
-                "select requested.id, historical.provider_kind, historical.provider_account_plan_type_snapshot as plan_type, coalesce(historical.provider_account_email_snapshot,historical.provider_account_name_snapshot,requested.id) as name from unnest($1::text[]) requested(id) left join lateral (select provider_kind,provider_account_plan_type_snapshot,provider_account_email_snapshot,provider_account_name_snapshot from model_request_observations mr where mr.provider_account_ref=requested.id order by mr.started_at desc,mr.id desc limit 1) historical on true"
+                "select requested.id, historical.provider_kind, historical.provider_account_authentication_kind_snapshot as authentication_kind, historical.provider_account_plan_type_snapshot as plan_type, coalesce(historical.provider_account_email_snapshot,historical.provider_account_name_snapshot,requested.id) as name from unnest($1::text[]) requested(id) left join lateral (select provider_kind,provider_account_authentication_kind_snapshot,provider_account_plan_type_snapshot,provider_account_email_snapshot,provider_account_name_snapshot from model_request_observations mr where mr.provider_account_ref=requested.id order by mr.started_at desc,mr.id desc limit 1) historical on true"
             } else {
-                "select requested.id, null::text as provider_kind, null::text as plan_type,coalesce(historical.client_api_key_name_snapshot,requested.id) as name from unnest($1::text[]) requested(id) left join lateral (select client_api_key_name_snapshot from model_request_observations mr where mr.client_api_key_ref=requested.id order by mr.started_at desc,mr.id desc limit 1) historical on true"
+                "select requested.id, null::text as provider_kind, null::text as authentication_kind, null::text as plan_type,coalesce(historical.client_api_key_name_snapshot,requested.id) as name from unnest($1::text[]) requested(id) left join lateral (select client_api_key_name_snapshot from model_request_observations mr where mr.client_api_key_ref=requested.id order by mr.started_at desc,mr.id desc limit 1) historical on true"
             };
             let labels = sqlx::query(statement)
                 .bind(ids)
@@ -683,6 +684,7 @@ impl<'a> AnalyticsSnapshot<'a> {
                 if let Some(item) = observations.iter_mut().find(|item| item.key == id) {
                     item.name = get(&row, "name")?;
                     item.account_provider_kind = get(&row, "provider_kind")?;
+                    item.account_authentication_kind = get(&row, "authentication_kind")?;
                     item.account_plan_type = get(&row, "plan_type")?;
                 }
             }

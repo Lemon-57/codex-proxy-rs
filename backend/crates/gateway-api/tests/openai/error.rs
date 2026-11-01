@@ -165,9 +165,9 @@ async fn classified_capacity_error_without_special_code_returns_retryable_http_s
 }
 
 #[tokio::test]
-async fn key_budget_errors_preserve_limit_code_and_retry_after() {
+async fn key_budget_errors_use_the_official_quota_type_and_preserve_limit_details() {
     for code in ["key_daily_budget_exceeded", "key_weekly_budget_exceeded"] {
-        let error = GatewayError::new(GatewayErrorKind::RateLimited, "key budget exhausted")
+        let error = GatewayError::new(GatewayErrorKind::BudgetExhausted, "key budget exhausted")
             .with_client_code(code)
             .with_retry_after(std::time::Duration::from_millis(1501));
         let response = gateway_error_response(&error);
@@ -176,6 +176,7 @@ async fn key_budget_errors_preserve_limit_code_and_retry_after() {
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
         assert_eq!(body["error"]["code"], code);
+        assert_eq!(body["error"]["type"], "usage_limit_reached");
     }
 }
 

@@ -6,8 +6,7 @@ import { batchUpdateAccounts } from '@/api'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { t } from '@/i18n'
 import { notification as ZNotification } from '@/utils/notification'
-import { accountModelAccessError } from '../utils/modelAccess'
-import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
+import { accountSchedulingValues, concurrencyLimitInput } from '../utils/schedulingForm'
 
 export function useAccountBatchEditor(options: {
   accounts: Ref<Account[]>
@@ -67,26 +66,11 @@ export function useAccountBatchEditor(options: {
       showBatchEditModal.value = false
       return
     }
-    const modelError = accountModelAccessError(modelAccess.value)
-    if (modelError) {
-      ZNotification.warning({ message: modelError })
-      return
-    }
-    const scheduling = parseAccountSchedulingForm(editedFields.value.has('concurrencyLimit')
+    const scheduling = accountSchedulingValues(editedFields.value.has('concurrencyLimit')
       ? concurrencyLimit.value
       : '', editedFields.value.has('weight')
       ? weight.value
       : '1')
-    if (proxyMode.value === 'proxy' && !proxyId.value.trim()) {
-      ZNotification.warning({
-        message: t('accounts.batchEdit.proxyRequired'),
-      })
-      return
-    }
-    if (!scheduling.valid) {
-      ZNotification.warning({ message: scheduling.message })
-      return
-    }
 
     await saveAction.run(async () => {
       const accountIds = selectedAccounts().map(account => account.id)
@@ -100,10 +84,10 @@ export function useAccountBatchEditor(options: {
             : proxyId.value.trim(),
         enabled: schedulingEnabled.value,
         concurrencyLimit: editedFields.value.has('concurrencyLimit')
-          ? scheduling.values.concurrencyLimit
+          ? scheduling.concurrencyLimit
           : undefined,
         weight: editedFields.value.has('weight')
-          ? scheduling.values.weight
+          ? scheduling.weight
           : undefined,
         groupIds: editedFields.value.has('groupIds')
           ? [
@@ -156,6 +140,7 @@ export function useAccountBatchEditor(options: {
     concurrencyLimit,
     weight,
     modelAccess,
+    editedFields,
     catalogAccountId,
     proxyMode,
     proxyId,

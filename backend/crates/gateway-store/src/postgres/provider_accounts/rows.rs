@@ -5,7 +5,7 @@ use gateway_core::routing::AccountGroupId;
 
 pub(crate) const ENTITY: &str = "provider account";
 pub(crate) const CREDENTIALS_MAX_BYTES: usize = 256 * 1024;
-pub(crate) const QUOTA_MAX_BYTES: usize = 128 * 1024;
+pub(crate) const QUOTA_MAX_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_ADMIN_IMPORT_BATCH: usize = 200;
 pub(crate) const ADMIN_USAGE_CHUNK_SIZE: usize = 200;
 
@@ -87,7 +87,6 @@ pub struct ProviderAccountSummary {
 pub struct ProviderAccountRecord {
     pub summary: ProviderAccountSummary,
     pub provider_credentials_json: JsonObject,
-    pub provider_quota_json: Option<JsonObject>,
 }
 
 impl fmt::Debug for ProviderAccountRecord {
@@ -96,10 +95,6 @@ impl fmt::Debug for ProviderAccountRecord {
             .debug_struct("ProviderAccountRecord")
             .field("summary", &self.summary)
             .field("provider_credentials_json", &"[REDACTED]")
-            .field(
-                "provider_quota_json",
-                &self.provider_quota_json.as_ref().map(|_| "[PROVIDER JSON]"),
-            )
             .finish()
     }
 }
@@ -153,7 +148,6 @@ impl NewProviderAccount {
     pub fn validate(&self) -> StoreResult<()> {
         require_nonempty(ENTITY, "id", &self.id)?;
         require_nonempty(ENTITY, "provider_kind", &self.provider_kind)?;
-        require_nonempty(ENTITY, "name", &self.name)?;
         if let Some(upstream_user_id) = &self.upstream_user_id {
             require_nonempty(ENTITY, "upstream_user_id", upstream_user_id)?;
         }
@@ -261,6 +255,7 @@ pub struct BatchUpdateProviderAccountsAdmin {
     pub manual_expires_at: Option<Option<DateTime<Utc>>>,
     pub outbound_proxy: Option<gateway_admin::model::proxies::AccountProxySelection>,
     pub account_ids: Vec<String>,
+    pub name: Option<String>,
     pub notes: Option<String>,
     pub enabled: Option<bool>,
     pub concurrency_limit: Option<Option<AccountConcurrencyLimit>>,
@@ -332,7 +327,7 @@ impl ProviderAccountStateUpdate {
 pub(crate) const ACCOUNT_SELECT: &str = "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_expires_at, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
-            provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
+            quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
      from provider_accounts
@@ -343,7 +338,7 @@ pub(crate) const ACCOUNT_SELECT: &str = "select coalesce(proxy_enabled, true) as
 pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_expires_at, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
-            provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
+            quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
      from provider_accounts
@@ -355,7 +350,7 @@ pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select coalesce(proxy_enabled, t
 pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_expires_at, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
             has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
-            provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
+            quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
      from provider_accounts
@@ -385,15 +380,9 @@ pub(crate) fn account_record_from_row(
             .map_err(|source| invalid("invalid credentials JSON").with_source(source))?,
         CREDENTIALS_MAX_BYTES,
     )?;
-    let quota = row
-        .try_get::<Option<serde_json::Value>, _>("provider_quota_json")
-        .map_err(|source| invalid("invalid quota JSON").with_source(source))?
-        .map(|value| JsonObject::try_from_value("provider_quota_json", value, QUOTA_MAX_BYTES))
-        .transpose()?;
     Ok(ProviderAccountRecord {
         summary: account_summary_from_row(row)?,
         provider_credentials_json: credentials,
-        provider_quota_json: quota,
     })
 }
 

@@ -42,3 +42,7 @@ Thumbs.db
 /worktrees/
 /.cargo/
 *.tmp
+
+/frontend/node_modules-bad/
+
+/frontend/node_modules*/

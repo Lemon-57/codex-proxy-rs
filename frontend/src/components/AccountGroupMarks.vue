@@ -37,5 +37,5 @@ const fullNames = computed(() =>
       {{ group.enabled ? group.name : t('common.status.disabledName', { name: group.name }) }}
     </span>
   </div>
-  <span v-else class="text-xs text-cp-text-quaternary">—</span>
+  <span v-else class="text-xs text-z-text-quaternary">—</span>
 </template>

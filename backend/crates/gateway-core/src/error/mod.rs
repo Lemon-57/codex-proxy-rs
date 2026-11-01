@@ -1095,6 +1095,8 @@ pub enum GatewayErrorKind {
     ProviderInfrastructureUnavailable,
     /// 上游限流
     RateLimited,
+    /// 当前客户端 Key 的费用预算耗尽
+    BudgetExhausted,
     /// 上游暂不可用
     UpstreamUnavailable,
     /// 上游拒收当前请求：消息过大（如 WebSocket close 1009）
@@ -1125,6 +1127,7 @@ impl GatewayErrorKind {
             Self::ConcurrencyQueueTimeout => "concurrency_queue_timeout",
             Self::ProviderInfrastructureUnavailable => "provider_infrastructure_unavailable",
             Self::RateLimited => "rate_limited",
+            Self::BudgetExhausted => "budget_exhausted",
             Self::UpstreamUnavailable => "upstream_unavailable",
             Self::MessageTooBig => "message_too_big",
             Self::Timeout => "timeout",

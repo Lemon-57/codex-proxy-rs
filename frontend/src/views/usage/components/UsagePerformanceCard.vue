@@ -242,15 +242,15 @@ function formatThroughput(value: number | null) {
     </template>
 
     <template #body>
-      <div class="grid min-h-66 gap-3">
+      <div class="grid min-h-66" :class="hasData ? 'gap-3' : 'flex-1'">
         <div
           v-if="hasData"
-          class="grid gap-2 rounded-xl bg-cp-fill-quaternary/45 p-2"
+          class="grid gap-2 rounded-xl bg-z-fill-quaternary/45 p-2"
           :class="activeView === 'load' ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'"
         >
           <div v-for="metric in summaryMetrics" :key="metric.label" class="grid min-w-0 gap-1 px-2">
-            <span class="truncate text-[10px] font-bold text-cp-text-quaternary" :title="metric.label">{{ metric.label }}</span>
-            <strong class="truncate font-mono text-cp-base font-heavy tabular-nums text-cp-text" :title="metric.value">
+            <span class="truncate text-[10px] font-bold text-z-text-quaternary" :title="metric.label">{{ metric.label }}</span>
+            <strong class="truncate font-mono text-z-base font-heavy tabular-nums text-z-text" :title="metric.value">
               {{ metric.value }}
             </strong>
           </div>
@@ -271,7 +271,7 @@ function formatThroughput(value: number | null) {
                     ? t('usage.performance.noThroughput')
                     : t('usage.performance.noLatency'))
           "
-          class="h-52.5 place-content-center"
+          class="place-content-center"
         />
       </div>
     </template>

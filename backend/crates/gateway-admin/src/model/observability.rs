@@ -648,6 +648,7 @@ pub struct AccountRequestBucket {
 /// Dashboard 中一个账号的完整用量事实
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashboardAccountUsage {
+    pub upstream: Option<super::upstream_info::ProviderUpstreamInfo>,
     pub account_id: String,
     pub provider_kind: String,
     pub authentication_kind: String,
@@ -965,6 +966,7 @@ pub struct DiagnosticObservation {
     pub key: String,
     pub name: String,
     pub account_provider_kind: Option<String>,
+    pub account_authentication_kind: Option<String>,
     pub account_plan_type: Option<String>,
     pub request_count: u64,
     pub success_count: u64,
@@ -1435,6 +1437,7 @@ pub struct UsageInsight {
 pub struct DiagnosticsItem {
     pub key: String,
     pub name: String,
+    pub account_authentication_kind: Option<String>,
     pub account_plan_type: Option<String>,
     pub account_plan_type_display: Option<String>,
     pub request_count: u64,

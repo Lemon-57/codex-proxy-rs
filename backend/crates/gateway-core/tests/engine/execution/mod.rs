@@ -82,7 +82,7 @@ impl ClientBudgetPort for Budget {
             assert!(self.active.load(Ordering::SeqCst));
             if self.reject {
                 Err(
-                    GatewayError::new(GatewayErrorKind::RateLimited, "budget exhausted")
+                    GatewayError::new(GatewayErrorKind::BudgetExhausted, "budget exhausted")
                         .with_client_code("key_daily_budget_exceeded"),
                 )
             } else {
@@ -2639,7 +2639,7 @@ fn final_observation_is_emitted_once_for_success_rejection_and_detached_cancella
             observation_service(ObservationProviderBehavior::CompleteWithUsage, true);
         assert!(matches!(
             service.start(request(&service, ClientTransport::HttpJson)).await,
-            Err(error) if error.kind() == GatewayErrorKind::RateLimited
+            Err(error) if error.kind() == GatewayErrorKind::BudgetExhausted
         ));
         {
             let observations = observer.observations.lock().unwrap();

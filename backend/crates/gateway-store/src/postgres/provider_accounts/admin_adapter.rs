@@ -230,6 +230,35 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn load_account_record(
+        &self,
+        account_id: &CoreProviderAccountId,
+    ) -> AdminStoreResult<Option<AccountRecord>> {
+        self.accounts
+            .load_provider_account(account_id.as_str())
+            .await
+            .map_err(|error| admin_store_error(ENTITY, error))?
+            .map(|record| admin_account_record(record.summary))
+            .transpose()
+    }
+
+    async fn load_accounts_in_enabled_groups(
+        &self,
+        account_ids: &[CoreProviderAccountId],
+        group_ids: &[AccountGroupId],
+    ) -> AdminStoreResult<Vec<gateway_admin::model::accounts::AccountRecord>> {
+        let ids = account_ids
+            .iter()
+            .map(|id| id.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let records = self
+            .accounts
+            .load_account_summaries_in_enabled_groups(&ids, group_ids)
+            .await
+            .map_err(|error| admin_store_error(ENTITY, error))?;
+        records.into_iter().map(admin_account_record).collect()
+    }
+
     async fn account_exists(&self, account_id: &str) -> AdminStoreResult<bool> {
         sqlx::query_scalar("select exists(select 1 from provider_accounts where id = $1)")
             .bind(account_id)
@@ -634,10 +663,14 @@ impl AccountStore for PgAdminAccountStore {
         if command.notes.is_some() {
             changed_fields.push("notes".to_owned());
         }
+        if command.name.is_some() {
+            changed_fields.push("name".to_owned());
+        }
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 account_ids: vec![command.account_id.clone()],
+                name: command.name,
                 notes: command.notes,
                 supplier: command.supplier,
                 manual_expires_at: command.manual_expires_at,
@@ -743,6 +776,7 @@ impl AccountStore for PgAdminAccountStore {
                 supplier: None,
                 manual_expires_at: None,
                 account_ids: command.account_ids,
+                name: None,
                 notes: None,
                 enabled: command.enabled,
                 concurrency_limit: command.concurrency_limit,
@@ -890,6 +924,14 @@ pub(super) fn prepare_import(
         if settings.notes.is_some() {
             changed_fields.push("notes".to_owned());
         }
+        if accounts.len() == 1
+            && settings
+                .name
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty())
+        {
+            changed_fields.push("name".to_owned());
+        }
     }
     Ok(ImportProviderAccounts {
         settings,
@@ -975,6 +1017,9 @@ pub(super) fn prepare_rotation(
         }
         if settings.notes.is_some() {
             changed_fields.push("notes".to_owned());
+        }
+        if settings.name.is_some() {
+            changed_fields.push("name".to_owned());
         }
     }
     Ok(RotateProviderAccount {
