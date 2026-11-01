@@ -1187,13 +1187,14 @@ pub(crate) fn account_policy() -> gateway_core::account::AccountSelectionPolicy 
 type CooldownReadHook =
     dyn Fn(ProviderAccountId) -> BoxFuture<'static, Result<(), ProviderStoreError>> + Send + Sync;
 
-/// 内存 `ProviderCooldownPort`：实现 `read`/`put_if_later` 与容量失败计数
-/// 证据（openai selector 429 冷却与容量熔断路径用），scope 变体测试不涉及，
-/// 返回占位
+/// 内存账号与模型冷却端口，保留版本和到期时间供选号行为测试
 #[derive(Clone, Default)]
 pub(crate) struct MemoryCooldownPort {
     pub(crate) cooldowns: Arc<Mutex<BTreeMap<ProviderAccountId, ProviderCooldown>>>,
+    pub(crate) scoped:
+        Arc<Mutex<BTreeMap<(ProviderAccountId, ProviderCooldownScope), ProviderScopedCooldown>>>,
     before_read: Option<Arc<CooldownReadHook>>,
+    before_scoped_read: Option<Arc<CooldownReadHook>>,
 }
 
 impl MemoryCooldownPort {
@@ -1204,6 +1205,11 @@ impl MemoryCooldownPort {
 
     pub(crate) fn with_read_hook(mut self, hook: Arc<CooldownReadHook>) -> Self {
         self.before_read = Some(hook);
+        self
+    }
+
+    pub(crate) fn with_scoped_read_hook(mut self, hook: Arc<CooldownReadHook>) -> Self {
+        self.before_scoped_read = Some(hook);
         self
     }
 }
@@ -1254,17 +1260,39 @@ impl ProviderCooldownPort for MemoryCooldownPort {
 
     fn put_scoped_if_later(
         &self,
-        _cooldown: ProviderScopedCooldown,
+        cooldown: ProviderScopedCooldown,
     ) -> BoxFuture<'_, Result<bool, ProviderStoreError>> {
-        Box::pin(async { Ok(false) })
+        Box::pin(async move {
+            let mut scoped = self.scoped.lock().unwrap();
+            let key = (cooldown.account_id().clone(), cooldown.scope().clone());
+            let should_write = scoped.get(&key).is_none_or(|current| {
+                current.credential_revision() < cooldown.credential_revision()
+                    || (current.credential_revision() == cooldown.credential_revision()
+                        && current.until() < cooldown.until())
+            });
+            if should_write {
+                scoped.insert(key, cooldown);
+            }
+            Ok(should_write)
+        })
     }
 
     fn read_scoped<'a>(
         &'a self,
-        _account_id: &'a ProviderAccountId,
-        _scope: &'a ProviderCooldownScope,
+        account_id: &'a ProviderAccountId,
+        scope: &'a ProviderCooldownScope,
     ) -> BoxFuture<'a, Result<Option<ProviderScopedCooldown>, ProviderStoreError>> {
-        Box::pin(async { Ok(None) })
+        Box::pin(async move {
+            if let Some(hook) = &self.before_scoped_read {
+                hook(account_id.clone()).await?;
+            }
+            Ok(self
+                .scoped
+                .lock()
+                .unwrap()
+                .get(&(account_id.clone(), scope.clone()))
+                .cloned())
+        })
     }
 
     fn clear_scoped<'a>(

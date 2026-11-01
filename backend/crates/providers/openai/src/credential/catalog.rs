@@ -29,6 +29,8 @@ use crate::transport::{CodexBackendClient, CodexCatalogModel, CodexRequestContex
 
 const MAX_RESPONSE_ETAG_BYTES: usize = 256;
 const PLAN_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+// 调度证据覆盖默认 15 分钟刷新周期及抖动，长期未刷新时恢复上游验证
+const SCHEDULING_CATALOG_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 const MAX_CATALOG_FETCH_ATTEMPTS: usize = 3;
 const MAX_PLAN_CATALOG_MODELS: usize = 2_048;
 const MAX_CLIENT_CATALOGS: usize = 32;
@@ -535,6 +537,47 @@ impl CodexCredentialCatalogService {
         snapshot
             .account_models(account)
             .map(|models| models.map(<[String]>::to_vec))
+    }
+
+    /// 新鲜 OAuth 套餐目录只约束已发现的模型，未知目录与模型继续交由上游判断
+    pub(crate) fn scheduling_exclusions(
+        &self,
+        accounts: &[ProviderAccount],
+        model: &str,
+        now: SystemTime,
+    ) -> BTreeSet<ProviderAccountId> {
+        let Ok(cache) = self.cache.read() else {
+            return BTreeSet::new();
+        };
+        let Some(snapshot) = cache.snapshot.as_ref().filter(|snapshot| {
+            now.duration_since(snapshot.observed_at)
+                .is_ok_and(|age| age < SCHEDULING_CATALOG_MAX_AGE)
+        }) else {
+            return BTreeSet::new();
+        };
+        // API Key 的自定义目录不能为 OAuth 套餐生成排除证据
+        let plans = snapshot.scope_catalogs.iter().filter(|(scope, _)| {
+            scope.as_str().starts_with("plan:") && scope.as_str() != "plan:unknown"
+        });
+        if !plans
+            .clone()
+            .any(|(_, catalog)| catalog.models.iter().any(|id| id == model))
+        {
+            return BTreeSet::new();
+        }
+        let excluded_scopes = plans
+            .filter(|(_, catalog)| !catalog.models.iter().any(|id| id == model))
+            .map(|(scope, _)| scope)
+            .collect::<BTreeSet<_>>();
+        accounts
+            .iter()
+            .filter(|account| {
+                account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_OAUTH
+                    && CodexCatalogScope::for_account(account)
+                        .is_ok_and(|scope| excluded_scopes.contains(&scope))
+            })
+            .map(|account| account.id().clone())
+            .collect()
     }
 
     /// 优先读取套餐目录 cache；缺失时才用当前账号所属套餐的有限候选集实时填充

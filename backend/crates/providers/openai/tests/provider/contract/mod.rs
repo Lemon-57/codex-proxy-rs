@@ -1245,7 +1245,7 @@ fn provider_and_quota_with_runtime_ports(
         profile.clone(),
         http.clone(),
         base_url.clone(),
-        cooldowns,
+        cooldowns.clone(),
         policy,
     ));
     let account_feedback = Arc::new(AccountFeedbackStats::default());
@@ -1256,6 +1256,8 @@ fn provider_and_quota_with_runtime_ports(
         session_affinity,
         Arc::new(MemorySessionExclusions::default()),
         Arc::clone(&quota),
+        Arc::clone(&catalog),
+        cooldowns,
         Arc::clone(&account_feedback),
         CodexCookiePolicy::official().expect("cookie policy"),
     ));

@@ -6,6 +6,7 @@ fn cookie_provider(store: &Arc<MemoryAccountStore>, base_url: String) -> Arc<Cod
     let profile = wire_profile();
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
     let leases = Arc::new(TestLeaseCoordinator::default());
+    let cooldowns = Arc::new(MemoryCooldownPort::new());
     let catalog = Arc::new(CodexCredentialCatalogService::new(
         store.repository(),
         profile.clone(),
@@ -18,7 +19,7 @@ fn cookie_provider(store: &Arc<MemoryAccountStore>, base_url: String) -> Arc<Cod
         profile.clone(),
         http.clone(),
         base_url.clone(),
-        Arc::new(MemoryCooldownPort::new()),
+        cooldowns.clone(),
         crate::support::runtime_policy(),
     ));
     let feedback = Arc::new(AccountFeedbackStats::default());
@@ -29,6 +30,8 @@ fn cookie_provider(store: &Arc<MemoryAccountStore>, base_url: String) -> Arc<Cod
         Arc::new(MemorySessionAffinity::default()),
         Arc::new(MemorySessionExclusions::default()),
         Arc::clone(&quota),
+        Arc::clone(&catalog),
+        cooldowns,
         Arc::clone(&feedback),
         // 测试仅允许本机模拟上游，生产 Cookie 白名单不放宽
         CodexCookiePolicy::new(["cf_clearance"], ["127.0.0.1"]).unwrap(),

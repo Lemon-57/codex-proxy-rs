@@ -230,12 +230,21 @@ fn selector_with_runtime(
         verified_at: chrono::Utc::now(),
     });
     let http = reqwest::Client::builder().build().expect("HTTP client");
+    let catalog = Arc::new(
+        provider_openai::credential::CodexCredentialCatalogService::new(
+            store.repository(),
+            profile.clone(),
+            http.clone(),
+            OFFICIAL_CODEX_BASE_URL.to_owned(),
+            crate::support::catalog_cache(),
+        ),
+    );
     let quota = Arc::new(CodexCredentialQuotaService::new(
         store.repository(),
         profile,
         http,
         OFFICIAL_CODEX_BASE_URL.to_owned(),
-        cooldowns,
+        cooldowns.clone(),
         crate::support::runtime_policy(),
     ));
     CodexCredentialSelector::new(
@@ -245,6 +254,8 @@ fn selector_with_runtime(
         session_affinity,
         Arc::new(MemorySessionExclusions::default()),
         quota,
+        catalog,
+        cooldowns,
         account_feedback,
         CodexCookiePolicy::official().expect("official cookie policy"),
     )
