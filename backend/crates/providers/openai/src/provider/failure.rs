@@ -352,12 +352,24 @@ pub(super) async fn apply_failure(
             )
             .await
     {
-        tracing::warn!(
-            account_id = %account.id(),
-            credential_revision = account.revision().get(),
-            error = %error,
-            "Failed to persist OpenAI response cookies"
-        );
+        match error {
+            // 失败响应同样受版本保护，不能重放旧 Cookie 覆盖较新的凭据
+            CredentialSelectionError::RevisionConflict(_) => {
+                tracing::debug!(
+                    account_id = %account.id(),
+                    credential_revision = account.revision().get(),
+                    "Skipped OpenAI response cookies after credential revision changed"
+                );
+            }
+            error => {
+                tracing::warn!(
+                    account_id = %account.id(),
+                    credential_revision = account.revision().get(),
+                    error = %error,
+                    "Failed to persist OpenAI response cookies"
+                );
+            }
+        }
     }
     // 探测只验证恢复，不能把探测自身的单请求并发当作业务负载证据
 }

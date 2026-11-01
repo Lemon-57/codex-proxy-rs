@@ -1,5 +1,7 @@
 //! 公共互联按 Provider 声明发现连接，不将认证种类或调度观测绑在 OpenAI 上
 
+mod refresh;
+
 use super::super::UnavailableProvider;
 use async_trait::async_trait;
 use chrono::Utc;

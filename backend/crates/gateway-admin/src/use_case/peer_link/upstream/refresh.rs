@@ -43,6 +43,9 @@ impl PeerInfoService {
     }
 
     pub(super) fn refresh_due(&self, connection: &UpstreamConnection) -> bool {
+        if self.unsupported(connection) {
+            return false;
+        }
         let state = self.refresh_state(connection);
         state.try_lock().is_ok_and(|state| {
             state.connection != *connection || Instant::now() >= state.next_attempt
@@ -91,17 +94,18 @@ impl PeerInfoService {
             .ok_or_else(|| ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))?;
         let slot = self.refresh_state(&connection);
         let mut state = slot.lock().await;
-        if state.connection == connection
-            && Instant::now()
-                < if manual {
-                    state.manual_after
-                } else {
-                    state.next_attempt
-                }
+        if !manual && self.unsupported(&connection)
+            || state.connection == connection
+                && Instant::now()
+                    < if manual {
+                        state.manual_after
+                    } else {
+                        state.next_attempt
+                    }
         {
             let error = state.last_error;
             drop(state);
-            if let Some(error) = error {
+            if let Some(error) = error.filter(|error| *error != UpstreamInfoFailure::Unsupported) {
                 return Err(refresh_error(error));
             }
             return self
@@ -126,19 +130,18 @@ impl PeerInfoService {
         let failure = result.as_ref().err().copied();
         let delay = match failure {
             None => Duration::from_secs(240 + stable_jitter(id.as_str())),
-            Some(UpstreamInfoFailure::Unauthorized | UpstreamInfoFailure::Unsupported) => {
-                Duration::from_secs(1800)
-            }
+            Some(UpstreamInfoFailure::Unauthorized) => Duration::from_secs(1800),
             Some(_) => Duration::from_secs(30),
         }
         .max(retry_after.unwrap_or_default());
         state.next_attempt = Instant::now() + delay;
         state.manual_after = Instant::now()
-            + if failure.is_some() {
+            + (if failure.is_some_and(|error| error != UpstreamInfoFailure::Unsupported) {
                 delay
             } else {
                 Duration::from_secs(15)
-            };
+            })
+            .max(retry_after.unwrap_or_default());
         state.last_error = failure;
         let document = match result {
             Ok(document) => Some(document),
@@ -146,6 +149,7 @@ impl PeerInfoService {
             Err(UpstreamInfoFailure::Unauthorized) => {
                 Some(OpaqueProviderData::new(Default::default()))
             }
+            Err(UpstreamInfoFailure::Unsupported) => Some(snapshot::unsupported(&connection)),
             Err(_) => None,
         };
         if let Some(document) = document {
@@ -185,7 +189,8 @@ impl PeerInfoService {
             );
         }
         drop(state);
-        if let Some(error) = failure {
+        // 不支持协议是正常发现结果，管理端保留分类，后台不重复报警
+        if let Some(error) = failure.filter(|error| *error != UpstreamInfoFailure::Unsupported) {
             return Err(refresh_error(error));
         }
         self.read_quota(id)

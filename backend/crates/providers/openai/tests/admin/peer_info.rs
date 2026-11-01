@@ -681,35 +681,37 @@ async fn wait_for_request(server: &MockServer) {
 
 #[tokio::test]
 async fn disabling_during_an_in_flight_request_fences_the_late_observation() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_millis(200))
-                .set_body_json(peer_document()),
-        )
-        .mount(&server)
-        .await;
-    let (mut bundle, accounts, store, id, _config) = fixture(&server).await;
-    let worker = Arc::new(worker(&mut bundle));
-    let running = tokio::spawn({
-        let worker = worker.clone();
-        async move {
-            cycle(&worker).await;
-        }
-    });
-    wait_for_request(&server).await;
-    accounts.set_enabled(&id, false).await.unwrap();
-    bundle.admin_provider().account_changed(&id).await.unwrap();
-    running.await.unwrap();
-    assert!(
-        store
-            .get_quotas(std::slice::from_ref(&id))
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(quota(&bundle, &id).await.upstream.is_none());
+    for status in [200, 404] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_delay(Duration::from_millis(200))
+                    .set_body_json(peer_document()),
+            )
+            .mount(&server)
+            .await;
+        let (mut bundle, accounts, store, id, _config) = fixture(&server).await;
+        let worker = Arc::new(worker(&mut bundle));
+        let running = tokio::spawn({
+            let worker = worker.clone();
+            async move {
+                cycle(&worker).await;
+            }
+        });
+        wait_for_request(&server).await;
+        accounts.set_enabled(&id, false).await.unwrap();
+        bundle.admin_provider().account_changed(&id).await.unwrap();
+        running.await.unwrap();
+        assert!(
+            store
+                .get_quotas(std::slice::from_ref(&id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(quota(&bundle, &id).await.upstream.is_none());
+    }
 }
 
 #[tokio::test]
@@ -1047,7 +1049,7 @@ async fn cached_observations_require_the_current_protocol_version() {
 }
 
 #[tokio::test]
-async fn ordinary_api_upstreams_remain_undiscovered_and_keep_the_detection_backoff() {
+async fn ordinary_api_upstreams_persist_detection_without_changing_quota_access() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/custom/v1/cpr/link"))
@@ -1055,7 +1057,8 @@ async fn ordinary_api_upstreams_remain_undiscovered_and_keep_the_detection_backo
         .expect(1)
         .mount(&server)
         .await;
-    let (mut bundle, _, store, id, _config) = fixture(&server).await;
+    let (mut bundle, accounts, store, id, config) = fixture(&server).await;
+    exhaust_account(&accounts, &id, SystemTime::now()).await;
     let worker = worker(&mut bundle);
     cycle(&worker).await;
     cycle(&worker).await;
@@ -1063,14 +1066,22 @@ async fn ordinary_api_upstreams_remain_undiscovered_and_keep_the_detection_backo
     assert!(!info.discovered);
     assert!(info.observed_at.is_none());
     assert_eq!(info.last_error.as_deref(), Some("unsupported"));
-    assert!(bundle.admin_provider().refresh_quota(&id).await.is_err());
-    assert!(
+    assert!(bundle.admin_provider().refresh_quota(&id).await.is_ok());
+    assert_eq!(
         store
-            .get_quotas(std::slice::from_ref(&id))
+            .get_account(&id)
             .await
             .unwrap()
-            .is_empty()
+            .unwrap()
+            .quota()
+            .access(),
+        gateway_core::account::QuotaAccessState::Exhausted
     );
+    let mut restored = peer_fixture(config.config.clone(), accounts).await;
+    let info = quota(&restored, &id).await.upstream.unwrap();
+    assert!(!info.discovered);
+    assert_eq!(info.last_error.as_deref(), Some("unsupported"));
+    cycle(&self::worker(&mut restored)).await;
 }
 
 #[tokio::test]

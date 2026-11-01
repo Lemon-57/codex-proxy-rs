@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use gateway_core::account::{OpaqueProviderData, UpstreamInfoFailure};
+use gateway_core::account::{OpaqueProviderData, UpstreamConnection, UpstreamInfoFailure};
 use gateway_protocol::peer::{
     MAX_ACCOUNTS, MAX_MODELS, MAX_QUOTA_WINDOWS, OBJECT, PeerKeyUsage, PeerLink, PeerPool,
     PeerQuota, SCHEMA_VERSION,
@@ -15,6 +15,31 @@ use serde::Deserialize as _;
 
 pub(super) const MAX_AGE: Duration = Duration::from_secs(30 * 60);
 pub(super) const FRESH_FOR: Duration = Duration::from_secs(5 * 60);
+
+// 不支持协议是连接的识别结果，复用观测存储与版本保护，不伪造上游额度快照
+pub(super) fn unsupported(connection: &UpstreamConnection) -> OpaqueProviderData {
+    OpaqueProviderData::new(serde_json::Map::from_iter([
+        ("object".into(), "cpr.peer.unsupported".into()),
+        ("schema_version".into(), 1.into()),
+        (
+            "connection_revision".into(),
+            connection.revision.clone().into(),
+        ),
+    ]))
+}
+
+pub(super) fn is_unsupported(data: &OpaqueProviderData, connection: &UpstreamConnection) -> bool {
+    let fields = data.expose_to_provider();
+    fields.get("object").and_then(serde_json::Value::as_str) == Some("cpr.peer.unsupported")
+        && fields
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+        && fields
+            .get("connection_revision")
+            .and_then(serde_json::Value::as_str)
+            == Some(connection.revision.as_str())
+}
 
 pub(super) fn timestamp(value: &str) -> Option<SystemTime> {
     DateTime::parse_from_rfc3339(value)
