@@ -321,7 +321,7 @@ impl DefaultAccountsService {
             .await
             .map_err(|error| map_store_error(error, "reset-credit quota refresh"))?
             .unwrap_or_else(|| new_automation(account_id, Utc::now()));
-        record.state.quota_refresh = Some(baseline);
+        record.state.quota_refresh = Some(confirmed_quota_baseline(baseline, code));
         record.state.last_result = Some(code.to_owned());
         reschedule(
             &mut record,
@@ -352,6 +352,7 @@ impl DefaultAccountsService {
                         .filter(|n| n.is_finite())
                         .map(|n| (n.clamp(0.0, 100.0) * 100.0).round() as u32);
                     match (refresh.previous_weekly_used, used) {
+                        (Some(0), Some(0)) => true,
                         (Some(before), Some(after)) if after < before => true,
                         (_, Some(after))
                             if after < 10_000 && refresh.previous_weekly_used.is_none() =>
@@ -618,6 +619,7 @@ impl DefaultAccountsService {
         match self.consume_reset_credit_upstream(&context, command).await {
             Ok(result) => {
                 let confirmed = matches!(result.code.as_str(), "reset" | "already_redeemed");
+                let refresh_baseline = confirmed_quota_baseline(refresh_baseline, &result.code);
                 record.state.pending = None;
                 if result.code == "nothing_to_reset" {
                     return self
@@ -654,6 +656,17 @@ impl DefaultAccountsService {
         }
         Ok(())
     }
+}
+
+/// 幂等重放可能已读到恢复后的用量，核验当前可用性而不要求再次下降
+fn confirmed_quota_baseline(
+    mut baseline: ResetCreditQuotaRefresh,
+    code: &str,
+) -> ResetCreditQuotaRefresh {
+    if code == "already_redeemed" {
+        baseline.previous_weekly_used = None;
+    }
+    baseline
 }
 
 fn new_automation(account_id: &ProviderAccountId, now: DateTime<Utc>) -> ResetCreditAutomation {

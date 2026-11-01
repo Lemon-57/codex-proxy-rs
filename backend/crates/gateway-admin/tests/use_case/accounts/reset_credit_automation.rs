@@ -1258,3 +1258,63 @@ async fn reset_refresh_does_not_finish_until_exhaustion_projection_has_recovered
     );
     assert_eq!(provider.reset_credit_commands().len(), 1);
 }
+
+#[tokio::test]
+async fn replayed_manual_redemption_verifies_already_recovered_quota_without_a_new_card() {
+    for used in [0.0, 5.0, 100.0] {
+        let provider = FakeProviderAdmin::new("openai", events());
+        enable_capability(&provider);
+        provider.set_quota(weekly_quota(used));
+        *provider.reset_credit_result.lock().unwrap() = "already_redeemed".into();
+        let store = FakeAccountStore::new("openai", events());
+        let services = accounts_service(provider.clone(), store.clone()).await;
+        let id = ProviderAccountId::new("acct_test").unwrap();
+        let command = ConsumeProviderResetCredit {
+            account_id: id.clone(),
+            credit_id: Some("card_1".into()),
+            redeem_request_id: uuid::Uuid::new_v4(),
+        };
+        let result = services
+            .accounts()
+            .consume_reset_credit(&context("replayed-reset"), command.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.code, "already_redeemed");
+        assert_eq!(provider.reset_credit_commands(), [command]);
+        assert_eq!(
+            store.automations.lock().unwrap()["acct_test"]
+                .state
+                .quota_refresh
+                .is_none(),
+            used < 100.0
+        );
+    }
+}
+
+#[tokio::test]
+async fn confirmed_reset_with_weekly_quota_already_zero_finishes_verification() {
+    let provider = FakeProviderAdmin::new("openai", events());
+    enable_capability(&provider);
+    provider.set_quota(weekly_quota(0.0));
+    let store = FakeAccountStore::new("openai", events());
+    let services = accounts_service(provider.clone(), store.clone()).await;
+    services
+        .accounts()
+        .consume_reset_credit(
+            &context("reset-short-window"),
+            ConsumeProviderResetCredit {
+                account_id: ProviderAccountId::new("acct_test").unwrap(),
+                credit_id: Some("card_1".into()),
+                redeem_request_id: uuid::Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        store.automations.lock().unwrap()["acct_test"]
+            .state
+            .quota_refresh
+            .is_none()
+    );
+    assert_eq!(provider.reset_credit_commands().len(), 1);
+}
