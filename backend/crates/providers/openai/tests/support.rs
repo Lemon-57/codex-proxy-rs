@@ -164,6 +164,17 @@ impl MemoryAccountStore {
             .with_scheduling(concurrency_limit, weight);
     }
 
+    pub(crate) fn set_model_access(
+        &self,
+        id: &str,
+        access: gateway_core::account::AccountModelAccess,
+    ) {
+        let id = ProviderAccountId::new(id).expect("valid account ID");
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let stored = accounts.get_mut(&id).expect("seeded account");
+        stored.account = stored.account.clone().with_model_access(access);
+    }
+
     pub(crate) fn set_egress(
         &self,
         id: &str,
