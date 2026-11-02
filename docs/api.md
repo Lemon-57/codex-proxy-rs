@@ -481,6 +481,11 @@ Responses WebSocket 接受文本消息，`response.create` 在同一连接串行
 活跃客户端 WS 的绑定不受普通空闲回收期限约束；上游关闭、总寿命到期或连接被回收仍可能使连接内续接失效，
 客户端按既有 `previous_response_not_found` 合同完整重放。具体心跳和回收参数见[部署与运维](../deploy/README.md#公网访问)
 
+Codex OAuth 上游 WS 首包未声明搜索时，后续新增 `web_search` 声明需要新连接，非生成预热也属于首包。
+HTTP/SSE 与 WS 入站共用此判断；新链在发送前重新建连，依赖原连接的增量请求返回
+`400 previous_response_not_found`，由客户端携带完整历史重试。网关保留请求中的搜索配置；
+已初始化搜索的连接可以继续复用，临时移除搜索或从文本搜索增加图片搜索不触发此回收。
+
 其余文本消息发送到当前执行绑定的上游 WebSocket，未知类型、模式和扩展字段由上游校验。
 `response.interrupt` 的 `discard_partial_items` 模式若指向当前逻辑请求已交付的响应 ID，
 网关会保留中断意图；重试交付新的 `response.created` 后，以新 ID 转发中断，避免换号空档丢失控制消息。
@@ -663,8 +668,14 @@ OpenAI 仅在允许安全重放且尚未交付不可重放输出时执行下表�
 | 普通 `503` 且 `error.code=server_error` | 5 次 | 500ms 起步的指数退避，基准最多 2 秒，每次追加 `[50ms, 250ms)` 等待 | 返回最后一次上游错误，不因此换号 |
 
 有效 `Retry-After` 优先，接受秒数、HTTP 日期和零延迟，不受本地退避上限截断，也不追加随机等待。
-流内失败事件使用相同解析规则，WS 转 HTTP 回退也遵守服务器建议；等待受请求截止时间和取消约束，
+流内失败事件使用相同解析规则，WS 同账号传输重试与转 HTTP 回退也遵守服务器建议；等待受请求截止时间和取消约束，
 重试受[请求总尝试次数](#账号亲和与换号)约束。
+
+`maxRetryAfterSeconds` 限制网关接受的单次服务器建议等待，默认 240 秒，取值 0～4,294,967,295。
+建议时间超过上限时跳过同账号等待，按原有耗尽动作安全换号或返回错误；无可用账号时返回最后一次上游错误，
+保留原始 `Retry-After`。等于上限仍可等待，0 表示不接受正数等待；未提供有效建议时继续使用本地退避。
+该设置不限制请求总时长，不改变已交付不可重放输出、续接绑定和换号次数等限制；保存后对新请求生效。
+
 已发送的容量失败计入[智能调度健康分](architecture.md#智能调度)，可用账号的会话亲和优先。
 容量不足不触发 Provider 全局熔断，也不作为账号额度耗尽；账号冷却由独立的[错误保护规则](#账号错误保护)决定。
 客户端错误兼容由 API 编码出口统一处理：最终交付的 `server_is_overloaded`、`slow_down` 错误码
@@ -863,6 +874,9 @@ CPR 默认路径为 `/v1/cpr/link`，使用同一数据面入口认证，不接�
 | `sharePool` | `pool_summary` |
 | `sharePlans` | 已公开账号池中的 `pool.plans` |
 | `shareQuota` | `quota_windows` 与 `model_availability` |
+
+套餐分布沿用账号页口径：优先使用账号已有的明确套餐，缺失时从已保存的额度快照补全，无需开启 `shareQuota`。
+仍未知的账号只计入账号总数，不推断为 Free
 
 共享范围同时受当前 Key 的公开开关、分组及冻结权限限制，只包含 Provider 明确声明的直连 OAuth 账号。
 互联 Key 的推理也使用该直连范围，不把 API Key 转接账号再次作为共享池，不递归查询其他节点。
@@ -1186,7 +1200,9 @@ Pro 使用 `all` 时也能参与 luna 调度。套餐名称不自动生成或修
 OAuth 和 xAI 按已知套餐匹配目录，API Key 按账号与凭据版本隔离目录，不借用其他账号的模型集合。
 OpenAI 使用最近 30 分钟内同步的目录，xAI 使用未过期的套餐目录缓存；未知套餐或无有效目录时交由上游验证，仍执行 `modelAccess`
 
-原生 OpenAI Responses 上游明确拒绝某个账号使用该模型后，该账号与模型组合冷却 30 分钟；其他模型仍可使用该账号。
+原生 OpenAI Responses 上游返回 `error.code=model_not_found`，且状态为 400／403／404 或流内错误未提供状态时，
+该账号与模型组合冷却 30 分钟；其他模型仍可使用该账号。仅消息提及模型不支持不触发冷却；
+`unsupported_value` 属于请求参数错误，原样交回客户端，不触发换号或模型冷却。
 冷却按凭据版本隔离，不修改 `modelAccess`，也不解除原生续写的固定账号约束。OpenAI 的受管上游适配器不应用原生目录限制和模型拒绝冷却
 
 单账号更新或批量更新省略 `modelAccess` 时保留原值，显式提交 `{ "mode": "all", "models": [] }` 清除限制。
@@ -1914,6 +1930,7 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 | 模型映射 | `modelMappings` |
 | 凭据刷新 | `refreshMarginSeconds`、`refreshConcurrency` |
 | [并发与排队](#并发与排队) | `maxConcurrentPerAccount`、`maxWaitingPerKey`、`maxWaitingPerAccount`、`openaiGuardianReservedConcurrency`、`concurrencyWaitTimeoutSeconds` |
+| [上游重试等待](#容量拒绝与重试) | `maxRetryAfterSeconds` |
 | [亲和与换号](#账号亲和与换号) | `openaiAccountAffinity`、`openaiSessionAffinityTtlHours`、`maxAccountRotations` |
 | [调度策略](#智能调度) | `rotationStrategy`、`smartScheduling` |
 | [请求解压](#请求解压上限) | `responsesMaxDecompressedBodyBytes` |
