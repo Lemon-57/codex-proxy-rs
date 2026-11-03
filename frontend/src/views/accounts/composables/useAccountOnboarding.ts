@@ -87,7 +87,7 @@ export function useAccountOnboarding(options: {
       }
       const documents = form.source?.kind === 'bundle'
         ? mixedImportDocuments(form.importTexts.json)
-        : accountImportDocuments(requireImportProvider(provider), mode, form.importTexts[mode])
+        : accountImportDocuments(requireImportProvider(provider), mode, form.importTexts[mode], form.refreshTokenEmail)
       for (const document of documents)
         requireImportProvider(document.provider)
       const batches = accountImportBatches(documents.map(entry => ({
@@ -193,6 +193,7 @@ export function useAccountOnboarding(options: {
           : accountImportModes(accountCreateProvider(createForm.value))[0]?.value ?? 'json',
       apiKey: emptyApiKeyAccountForm(),
       importTexts: { access_token: '', refresh_token: '', json: '' },
+      refreshTokenEmail: '',
     }
   }, { flush: 'sync' })
 

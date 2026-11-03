@@ -21,6 +21,7 @@ export interface AccountCreateForm {
   step: 'settings' | 'import'
   mode: AccountImportMode
   importTexts: Record<AccountImportInputMode, string>
+  refreshTokenEmail: string
   proxyMode: string
   proxyId: string
 }
@@ -38,6 +39,7 @@ export function emptyAccountCreateForm(): AccountCreateForm {
     step: 'settings',
     mode: 'oauth',
     importTexts: { access_token: '', refresh_token: '', json: '' },
+    refreshTokenEmail: '',
     proxyMode: 'direct',
     proxyId: '',
   }

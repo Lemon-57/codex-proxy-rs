@@ -88,7 +88,7 @@ export function mixedImportDocuments(text: string): AccountImportDocument[] {
   return documents
 }
 
-export function accountImportDocuments(provider: string, mode: string, text: string): AccountImportDocument[] {
+export function accountImportDocuments(provider: string, mode: string, text: string, expectedEmail = ''): AccountImportDocument[] {
   if (provider === 'openai' && (mode === 'access_token' || mode === 'refresh_token')) {
     const tokens = text.split(/\r?\n/).map(token => token.trim()).filter(Boolean)
     const label = mode === 'access_token'
@@ -99,14 +99,47 @@ export function accountImportDocuments(provider: string, mode: string, text: str
     const key = mode === 'access_token'
       ? 'accessToken'
       : 'refreshToken'
-    return tokens.map(token => ({
-      provider,
-      document: {
-        accounts: [
-          { [key]: token },
-        ],
-      },
-    }))
+    const seenEmails = new Set<string>()
+    const seenTokens = new Set<string>()
+    return tokens.map((line, index) => {
+      if (mode === 'access_token') {
+        return {
+          provider,
+          document: {
+            accounts: [
+              { [key]: line },
+            ],
+          },
+        }
+      }
+      // RT 不携带可读身份，先提交预期邮箱供保护层去重并选择固定代理
+      const delimiter = line.indexOf('----')
+      const separator = delimiter >= 0 && line.slice(0, delimiter).includes('@')
+        ? delimiter
+        : -1
+      const email = (separator >= 0
+        ? line.slice(0, separator)
+        : tokens.length === 1
+          ? expectedEmail
+          : '').trim().toLowerCase()
+      const token = separator >= 0
+        ? line.slice(separator + 4).trim()
+        : line
+      if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+$/.test(email) || !token || /\s/.test(token))
+        throw new Error(t('accounts.import.refreshTokenIdentityRequired', { line: index + 1 }))
+      if (seenEmails.has(email) || seenTokens.has(token))
+        throw new Error(t('accounts.import.duplicateRefreshTokenAccount', { line: index + 1 }))
+      seenEmails.add(email)
+      seenTokens.add(token)
+      return {
+        provider,
+        document: {
+          accounts: [
+            { email, [key]: token },
+          ],
+        },
+      }
+    })
   }
   const value = parseJson(text)
   // 原生快捷入口保留 CPR 文件展开，插件文档的字段含义由插件自己解释。

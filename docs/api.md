@@ -1455,7 +1455,10 @@ OAuth 账号仍按实际周/月额度窗口统计
 }
 ```
 
-RT-only 使用同一形状，只提交 `refreshToken`。不得把真实 token 写入日志、issue、fixture 或文档
+RT-only 使用同一形状，提交 `refreshToken`，受保护的固定代理管理入口还要求每个条目包含预期 `email`，用于交换前去重及选择代理，交换后的身份必须与该邮箱一致
+
+管理端 RT 快捷入口支持填写账号邮箱并粘贴单个 RT，批量输入使用每行 `邮箱----RT`，邮箱随对应账号条目提交，缺失身份、格式错误及批次内重复在提交前拒绝
+不得把真实 token 写入日志、issue、fixture 或文档
 
 账号导入与首次 OAuth complete 可附带 `settings: { enabled, concurrencyLimit, weight, groupIds, name?, notes?, modelAccess? }`。
 提供 `settings` 时前四项均必填，`concurrencyLimit: null` 继承运行参数，否则为 1–4294967295 的整数；
