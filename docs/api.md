@@ -395,10 +395,11 @@ API Key 与 OAuth 共用模拟客户端画像（`User-Agent`、`originator`、`v
 包括会话、线程、Lite 和其他业务扩展头。
 上游认证只来自选中的账号；API Key 不携带 OAuth Cookie、ChatGPT 账号身份或下游的
 `X-OpenAI-Actor-Authorization` 托管认证声明。
-下游的 `x-openai-internal-codex-residency`、`x-openai-account-routing-override`、`x-openai-fedramp`
-也不透传，地域、工作区路由与合规属性不能从原账号继承。
-前两项仅按部署配置 `openai.residency`、`openai.account_routing_override` 的字符串值生成，
-省略或 `null` 时不发送，配置说明见 [部署与运维](../deploy/README.md#启动后的运行设置)
+`x-codex-installation-id` 使用选中账号已生成并持久化的安装 ID，与正文 `client_metadata` 中的安装身份一致。
+`x-openai-internal-codex-residency` 和 `x-openai-account-routing-override` 分别由部署配置
+`openai.residency`、`openai.account_routing_override` 控制，配置值原样发送并覆盖客户端同名头，
+省略或 `null` 时删除对应请求头。配置说明见 [部署与运维](../deploy/README.md#启动后的运行设置)
+`x-openai-fedramp` 按业务头透传，保留原始多值。
 上述过滤描述原生转发；已信任插件的显式 header 改写可以覆盖账号与画像生成的默认头，
 不按认证或会话字段名称拦截，边界见 [SDK 请求中间件](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#模型请求与-attempt)
 
@@ -409,8 +410,8 @@ Responses 也不透传 `x-stainless-*`、`Origin`、`Referer`、`sec-ch-ua*` 和
 两者同时存在时仍优先使用 `session-id`。正文中的 `client_metadata.session_id`、
 `prompt_cache_key` 不受这条请求头规则影响。
 `thread-id`、turn metadata 等 Codex 协议字段及未知业务扩展不受下游环境头过滤规则影响；
-出站移除下游的 `traceparent`、`tracestate`、`sentry-trace`、`baggage`，
-以及 WS metadata 中对应的 `ws_request_header_*` 副本
+`traceparent`、`tracestate`、`sentry-trace`、`baggage` 及 WS metadata 中对应的
+`ws_request_header_*` 副本保持原值
 
 会话、线程、窗口及父子线程引用在出站时按本次安装身份稳定映射为 UUID；
 默认使用账号安装身份，同账号保留引用关系，换账号使用不同标识。HTTP 请求头、正文 metadata、WS 副本及
@@ -424,6 +425,11 @@ Images 的 `x-codex-image-turn-id` 和 Desktop 自动 Git 上下文的 `clientUs
 实际选号与计费归属保持不变，详见 [SDK 出站请求准备](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#上游出站准备)。
 续接 response ID、历史 item/call ID、业务正文和未知扩展不参与映射，
 该处理减少显式追踪标识的跨账号复用，不保证会话内容或业务 metadata 无法关联
+
+`x-codex-turn-state` 是上游返回的轮次路由 token，同一轮内应原样回传，开始新轮次时清除。
+全量请求没有 `previous_response_id` 时，代理也会保留已确认属于当前 Client Key、账号、会话、线程和轮次的回传值；
+未知归属、跨账号或跨轮次的值仍会清除。该证明只用于 turn state，不使其他账号状态字段成为可信续接上下文。
+归属证明为进程内有界缓存，实例切换、重启、过期或淘汰后，缺少其他可信会话状态的请求按未知归属处理
 
 #### 正文兼容
 
@@ -911,7 +917,7 @@ CPR 默认路径为 `/v1/cpr/link`，使用同一数据面入口认证，不接�
 引导、sideband 与 hangup 的业务扩展头默认透传；认证、账号身份、下游环境与传输头遵守
 [请求头与身份](#请求头与身份)边界。`X-Session-Id`、`Voice-Session-Id` 是 Live 业务会话标识，原样透传。
 `Session-Id`、`Thread-Id` 等已识别追踪标识按选中账号的安装身份稳定映射，同账号各阶段保持一致，
-换账号使用不同标识；客户端 trace 被剥离。创建请求可由 attempt 插件改写本次构造身份，后续 sideband / hangup 仍使用钉住账号的身份。
+换账号使用不同标识，客户端 trace 原样透传。创建请求可由 attempt 插件改写本次构造身份，后续 sideband / hangup 仍使用钉住账号的身份。
 Live 不继承 Responses 的路由提示与续接状态；turn metadata 中的原账号绑定信息清理后保留其他字段。
 真实 call ID 保留用于钉住账号访问通话。HTTP 业务头保留原始多值字节，sideband 握手沿用 WebSocket 可编码的头值
 
