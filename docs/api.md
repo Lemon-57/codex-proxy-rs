@@ -2525,10 +2525,14 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 
 管理端请求列表及 Dashboard 最近请求中的 `accountNotes` 来自请求保存的账号备注快照，未保存时为 `null`
 
+请求列表、Dashboard 最近请求及账号维度诊断的 `accountUpstreamPeer` 来自账号当前的互联摘要，
+已发现且有观测时间时为 `true`，尚未识别成功时为 `false`；摘要缺失、账号已删除或读取失败时为 `null`。
+该字段仅供 CPR 标识展示，不写入历史快照，非账号维度诊断为 `null`
+
 `/api/admin/usage/records` 与 `/api/admin/operations/errors` 的 `clientApiKeyName` 来自请求保存的 Key 名称快照，
 未保存时为 `null`，不影响记录返回，不包含密钥原文
 
-查询不关联当前配置，改名、修改订阅或删除配置不改变已有快照。补写的历史 Key 名称与订阅取自补写时仍存在的配置，
+上述快照字段不关联当前配置，改名、修改订阅或删除配置不改变已有快照。补写的历史 Key 名称与订阅取自补写时仍存在的配置，
 不保证等于请求发生时的值；无法补齐的字段保持未知
 
 运维错误记录的 `errorDetails` 为受控诊断文本，无详情时为 `null`。
@@ -2541,8 +2545,9 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 
 管理端请求列表与详情保留 `requestedModel`（客户端请求）与 `upstreamModel`（网关发送）
 
-请求明细的 `clientApiKeyName`、`accountName` 按字面量包含匹配请求保存的历史名称快照，区分大小写，
-不解析为 ID，也不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
+请求明细的 `clientApiKeyName` 按字面量包含匹配请求保存的历史 Key 名称快照，区分大小写。
+`accountName` 按字面量包含匹配历史账号名称、邮箱快照或账号 ID，不区分大小写，名称为空时仍可按邮箱或 ID 查询。
+筛选不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
 
 运维错误列表的 `search` 使用字面量包含匹配，`%`、`_` 和 `\` 按普通字符处理，不支持密钥值或可见前缀搜索。
 请求详情通过 `/api/admin/usage/records/detail?id=...` 查询
@@ -2939,7 +2944,8 @@ GitHub 的 `location` 使用 `kind: "github"`、`repository: "owner/repo"`、`ta
 创建与更新的配置字段为 `name`、`artifactSha256`、`enabled`、`configuration` 和必填的 `bindings`，
 `secrets` 可选。输入严格拒绝未知字段。`artifactSha256` 必须指向
 已接受的制品。`configuration` 是匹配插件 schema 的 JSON 对象；敏感字段必须
-放入 `secrets`，空对象清除全部值。省略时同版本编辑保留当前值；跨版本编辑优先保留目标版本快照的密钥，没有快照则保留当前值
+放入 `secrets`，按字段更新：字符串设置对应值，`null` 清除对应字段，未出现的字段保留。省略 `secrets` 或传空对象均不修改密钥
+同版本编辑以当前值为基础；跨版本编辑优先以目标版本快照的密钥为基础，没有快照则使用当前值。创建以空集合为基础，密钥值不会返回给管理端
 
 创建可传 `creationId`（标准小写 UUID），同一草稿重试复用该 ID，已保存且内容不同则返回 409，不创建副本或覆盖旧配置。
 相同内容的重试仍会重新准备并发布，不保证配置 revision 不变。更新可传 `expectedRevision`，与实例列表的 `revision`

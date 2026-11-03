@@ -9,6 +9,103 @@ use gateway_store::postgres::{
 use super::{TestDatabase, analytics::seed, observability_repository};
 
 #[tokio::test]
+async fn account_filter_matches_historical_email_name_and_id_across_status_pages() {
+    use gateway_admin::model::observability::UsageRecordStatus;
+
+    let Some(database) = TestDatabase::create("usage_account_identity_pages").await else {
+        return;
+    };
+    let start = Utc::now() - TimeDelta::hours(1);
+    // 不创建当前账号，历史快照必须能独立检索，名称为空或缺失时也不遗漏邮箱
+    for (id, account, name, email, outcome) in [
+        (
+            "identity_a",
+            "acct_history",
+            Some(""),
+            "Owner_Name%tag@example.invalid",
+            "succeeded",
+        ),
+        (
+            "identity_b",
+            "acct_history",
+            None,
+            "owner_name%tag@example.invalid",
+            "failed",
+        ),
+        (
+            "identity_c",
+            "acct_history",
+            Some(r"Historical\Ops_100%"),
+            "other@example.invalid",
+            "incomplete",
+        ),
+        (
+            "identity_d",
+            "acct_other",
+            Some("Unrelated"),
+            "ownerXnameXtag@example.invalid",
+            "succeeded",
+        ),
+    ] {
+        seed(&database.pool, id, start, &[]).await;
+        sqlx::query("update model_requests set provider_account_ref=$2,outcome=$3,request_observation_json=jsonb_set(request_observation_json,'{account}',jsonb_strip_nulls(jsonb_build_object('name',$4::text,'email',$5::text))) where id=$1")
+            .bind(id).bind(account).bind(outcome).bind(name).bind(email)
+            .execute(&database.pool).await.unwrap();
+    }
+    super::drain_analytics(&database.pool).await;
+    let range =
+        ObservabilityRange::new(start - TimeDelta::minutes(1), start + TimeDelta::minutes(5))
+            .unwrap();
+    let repository = observability_repository(&database.pool);
+    for (search, status, expected) in [
+        (
+            "OWNER_NAME%TAG@EXAMPLE.INVALID",
+            UsageRecordStatus::All,
+            vec!["identity_b", "identity_a"],
+        ),
+        (
+            "owner_name%",
+            UsageRecordStatus::Success,
+            vec!["identity_a"],
+        ),
+        ("owner_name%", UsageRecordStatus::Error, vec!["identity_b"]),
+        (
+            "ACCT_HISTORY",
+            UsageRecordStatus::All,
+            vec!["identity_c", "identity_b", "identity_a"],
+        ),
+        (
+            r"historical\ops_100%",
+            UsageRecordStatus::All,
+            vec!["identity_c"],
+        ),
+        ("owner_name_", UsageRecordStatus::All, vec![]),
+        ("absent@example.invalid", UsageRecordStatus::All, vec![]),
+    ] {
+        let mut actual = Vec::new();
+        for current_page in 1..=expected.len() as u32 + 1 {
+            let page = repository
+                .list_usage_records(UsageRecordQuery {
+                    status,
+                    range,
+                    filter: UsageRecordFilter {
+                        provider_account_name: Some(search.into()),
+                        ..Default::default()
+                    },
+                    current_page,
+                    page_size: ObservabilityPageSize::new(1).unwrap(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(page.total, expected.len() as u64, "{search}, {status:?}");
+            actual.extend(page.items.into_iter().map(|row| row.id));
+        }
+        assert_eq!(actual, expected, "{search}, {status:?}");
+    }
+    database.close().await;
+}
+
+#[tokio::test]
 async fn projected_page_counts_correct_pending_moves_deletions_and_model_or() {
     use gateway_admin::model::observability::UsageRecordStatus;
 

@@ -11,18 +11,22 @@ pub(crate) fn push_usage_filter(
     filter: &UsageRecordFilter,
     alias: &str,
 ) {
-    for (column, value) in [
-        ("client_api_key_name_snapshot", &filter.client_api_key_name),
-        (
-            "provider_account_name_snapshot",
-            &filter.provider_account_name,
-        ),
-    ] {
-        if let Some(value) = value {
-            query.push(format!(" and {alias}.{column} like "));
-            query.push_bind(literal_contains_pattern(value));
-            query.push(" escape '\\'");
+    if let Some(value) = &filter.client_api_key_name {
+        query.push(format!(" and {alias}.client_api_key_name_snapshot like "));
+        query.push_bind(literal_contains_pattern(value));
+        query.push(" escape '\\'");
+    }
+    if let Some(value) = &filter.provider_account_name {
+        let pattern = literal_contains_pattern(value);
+        query.push(format!(
+            " and ({alias}.provider_account_name_snapshot ilike "
+        ));
+        query.push_bind(pattern.clone());
+        for column in ["provider_account_email_snapshot", "provider_account_ref"] {
+            query.push(format!(" escape '\\' or {alias}.{column} ilike "));
+            query.push_bind(pattern.clone());
         }
+        query.push(" escape '\\')");
     }
     if let Some(value) = &filter.client_api_key_ref {
         query.push(format!(" and {alias}.client_api_key_ref = "));
