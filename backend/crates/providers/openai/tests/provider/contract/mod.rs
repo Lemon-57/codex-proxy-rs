@@ -46,6 +46,7 @@ use gateway_core::engine::middleware::{
     FrozenMiddlewarePlan, MiddlewareContext, MiddlewareError, MiddlewareHeader, MiddlewareMount,
     MiddlewareNext, MiddlewarePlan, MiddlewareRequest, MiddlewareResponse,
 };
+use gateway_core::engine::probe::AccountProbeTarget;
 use gateway_core::engine::provider::{Provider as _, ProviderRequest};
 use gateway_core::engine::{
     AccountAttemptContext, AttemptContext, AttemptTransport, ContinuationAttempt, ModelRequestId,
@@ -1112,6 +1113,7 @@ fn wire_profile() -> CodexWireProfileState {
         arch: "x86_64".to_owned(),
         terminal: "provider-contract".to_owned(),
         exact_user_agent: None,
+        installation_id: None,
         residency: None,
         account_routing_override: None,
         verified_at: Utc::now(),
@@ -1689,6 +1691,13 @@ fn fallback_transport_context(request_id: &str) -> AttemptContext {
 }
 
 fn diagnostic_context(request_id: &str, account_id: &str) -> AttemptContext {
+    probe_context(
+        request_id,
+        AccountProbeTarget::ConnectionTest(ProviderAccountId::new(account_id).unwrap()),
+    )
+}
+
+fn probe_context(request_id: &str, target: AccountProbeTarget) -> AttemptContext {
     AttemptContext::new(
         RequestAttemptContext::new(
             ModelRequestId::new(request_id).expect("request id"),
@@ -1698,11 +1707,7 @@ fn diagnostic_context(request_id: &str, account_id: &str) -> AttemptContext {
         NonZeroU32::new(1).expect("attempt"),
         SystemTime::now() + Duration::from_secs(30),
         account_policy(),
-        AccountAttemptContext::diagnostic(
-            BTreeSet::new(),
-            ProviderAccountId::new(account_id).expect("account id"),
-            None,
-        ),
+        AccountAttemptContext::diagnostic(BTreeSet::new(), target, None),
         None,
         CancellationToken::new(),
     )
@@ -1721,6 +1726,15 @@ fn context_with_state_owner_and_location(
     owner_account_id: &str,
     location: Option<gateway_core::account::RequestLocation>,
 ) -> AttemptContext {
+    context_with_state_owner_and_profile(request_id, owner_account_id, location, None)
+}
+
+fn context_with_state_owner_and_profile(
+    request_id: &str,
+    owner_account_id: &str,
+    location: Option<gateway_core::account::RequestLocation>,
+    profile: Option<OpaqueProviderData>,
+) -> AttemptContext {
     let owner = ProviderAccountStateOwner::new(
         ProviderKind::new("openai").expect("provider"),
         ProviderAccountId::new(owner_account_id).expect("owner account id"),
@@ -1730,7 +1744,8 @@ fn context_with_state_owner_and_location(
             ModelRequestId::new(request_id).expect("request id"),
             ClientApiKeyId::new("key_openai_contract").expect("client key id"),
         )
-        .with_request_location(location),
+        .with_request_location(location)
+        .with_request_profile(profile),
         NonZeroU32::new(1).expect("attempt"),
         SystemTime::now() + Duration::from_secs(30),
         account_policy(),
@@ -5108,7 +5123,8 @@ async fn oversized_http_new_chain_uses_http_without_disabling_session_websocket(
 
 #[tokio::test]
 async fn oversized_http_threshold_counts_utf8_and_json_escaping() {
-    const THRESHOLD: usize = 15 * 1024 * 1024;
+    const THRESHOLD: usize = 15 * 1024 * 1024 + 512 * 1024;
+    const RESUME: usize = THRESHOLD - 2 * 1024 * 1024;
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
     let server = MockServer::start().await;
@@ -5159,7 +5175,14 @@ async fn oversized_http_threshold_counts_utf8_and_json_escaping() {
     frame["session_id"] = body["session_id"].clone();
     let baseline_len = serde_json::to_vec(&frame).unwrap().len();
 
-    for (payload_len, expected) in [(THRESHOLD - 1, "websocket"), (THRESHOLD, "http_sse")] {
+    for (payload_len, expected) in [
+        (THRESHOLD - 1, "websocket"),
+        (THRESHOLD, "http_sse"),
+        (THRESHOLD - 1, "http_sse"),
+        (RESUME, "http_sse"),
+        (RESUME - 1, "websocket"),
+        (THRESHOLD - 1, "websocket"),
+    ] {
         let text = format!("{seed_text}{}", "x".repeat(payload_len - baseline_len));
         body.get_mut("input").unwrap()[0]["content"][0]["text"] = json!(text);
         let stream = Arc::clone(&provider)
@@ -5507,6 +5530,7 @@ async fn oversized_websocket_http_response_continues_with_client_tool_history_re
     }
     drop(first);
     let state = state.expect("HTTP response publishes replay requirement");
+    assert!(state.prefers_websocket_reconnect());
     assert_eq!(state.payload()["continuation_scope"], "replay_required");
     let tool_output =
         json!({"type": "function_call_output", "call_id": "call_large", "output": "done"});
@@ -6009,6 +6033,82 @@ async fn opaque_provider_options_do_not_change_openai_account_selection() {
     assert_eq!(error.send_state(), UpstreamSendState::NotSent);
 }
 
+const KEY_INSTALLATION_ID: &str = "3b11bc82-c666-417d-b9ff-2a34fd040385";
+
+#[tokio::test]
+async fn key_installation_override_scopes_http_headers_metadata_and_cache_without_changing_account()
+{
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_scope_same").await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = provider_with_base_url(&store, server.uri());
+    for installation_id in [None, Some(KEY_INSTALLATION_ID), None] {
+        let configuration = OpaqueProviderData::new(json!({
+            "client": "cli", "platform": "linux", "versionMode": "fixed", "codexVersion":"1.0.0",
+            "installationId": installation_id
+        }).as_object().unwrap().clone());
+        let profile = provider.resolve_request_profile(&configuration).unwrap();
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            json!({
+                "model":"gpt-5.4","input":"hello","prompt_cache_key":"same-cache-key"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .unwrap()
+        .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))]));
+        let mut stream = Arc::clone(&provider)
+            .execute(
+                planned_request(
+                    "openai",
+                    Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+                ),
+                context_with_state_owner_and_profile(
+                    "req_device",
+                    "acct_scope_same",
+                    Some(global_request_location()),
+                    Some(profile),
+                ),
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    let bodies = requests
+        .iter()
+        .map(captured_request_body)
+        .collect::<Vec<_>>();
+    for (request, body) in requests.iter().zip(&bodies) {
+        assert_eq!(
+            request.headers["x-codex-installation-id"].to_str().unwrap(),
+            body["client_metadata"]["x-codex-installation-id"]
+                .as_str()
+                .unwrap()
+        );
+    }
+    let id = |i: usize| &bodies[i]["client_metadata"]["x-codex-installation-id"];
+    assert_ne!(id(0), KEY_INSTALLATION_ID);
+    assert_eq!(id(1), KEY_INSTALLATION_ID);
+    assert_eq!(id(0), id(2));
+    assert_ne!(bodies[0]["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
+    assert_eq!(bodies[0]["prompt_cache_key"], bodies[2]["prompt_cache_key"]);
+}
+
 #[tokio::test]
 async fn http_account_scoping_replaces_downstream_installation_header() {
     for owner in ["acct_scope_same", "acct_scope_old"] {
@@ -6131,13 +6231,23 @@ async fn websocket_account_scoping_replaces_downstream_installation_header() {
                 ]),
             ),
         ]));
-        let mut stream = provider_with_base_url(&store, base_url)
+        let provider = provider_with_base_url(&store, base_url);
+        let configuration = OpaqueProviderData::new(json!({
+            "mode": "custom", "userAgent": "codex-tui/1.0.0", "installationId": KEY_INSTALLATION_ID
+        }).as_object().unwrap().clone());
+        let profile = provider.resolve_request_profile(&configuration).unwrap();
+        let mut stream = provider
             .execute(
                 planned_request(
                     "openai",
                     Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
                 ),
-                context_with_state_owner("req_installation_ws", owner),
+                context_with_state_owner_and_profile(
+                    "req_installation_ws",
+                    owner,
+                    Some(global_request_location()),
+                    Some(profile),
+                ),
             )
             .await
             .expect("provider stream");
@@ -6148,8 +6258,7 @@ async fn websocket_account_scoping_replaces_downstream_installation_header() {
         let installation_id = body["client_metadata"]["x-codex-installation-id"]
             .as_str()
             .expect("account installation ID");
-        assert_ne!(installation_id, "client-installation");
-        assert!(uuid::Uuid::parse_str(installation_id).is_ok());
+        assert_eq!(installation_id, KEY_INSTALLATION_ID);
         assert_eq!(body["installation_id"], installation_id);
         assert_eq!(header["x-codex-installation-id"], installation_id);
         for encoded in [
@@ -6619,7 +6728,7 @@ async fn missing_affinity_continuation_should_require_client_replay_without_an_u
 }
 
 #[tokio::test]
-async fn missing_affinity_full_request_should_clear_unowned_turn_state() {
+async fn missing_affinity_full_request_should_preserve_client_turn_state() {
     let trace = gateway_core::diagnostics::TraceContext::new("req_unknown_turn_state");
     let input = json!((0..520).map(|index| json!({"role":"user", "content":format!("{index}:{}", "private-transcript".repeat(60))})).collect::<Vec<_>>());
     let store = Arc::new(MemoryAccountStore::default());
@@ -6682,7 +6791,10 @@ async fn missing_affinity_full_request_should_clear_unowned_turn_state() {
         .await
         .expect("captured full replay request");
 
-    assert!(captured_header_values(&requests[0], "x-codex-turn-state").is_empty());
+    assert_eq!(
+        captured_header_values(&requests[0], "x-codex-turn-state"),
+        vec![b"unowned-turn-state".to_vec()]
+    );
     assert_eq!(captured_request_body(&requests[0])["input"], input);
     let snapshot = trace.snapshot().unwrap();
     let events = snapshot["events"].as_array().unwrap();
@@ -6698,7 +6810,7 @@ async fn missing_affinity_full_request_should_clear_unowned_turn_state() {
     let scope = evidence("provider.request.account_scope");
     assert_eq!(scope["scope"], "unknown");
     assert!(scope["before"]["turnState"].is_object());
-    assert!(scope["after"]["turnState"].is_null());
+    assert_eq!(scope["before"]["turnState"], scope["after"]["turnState"]);
     for private in [
         "private-transcript",
         "private-instructions",
@@ -7385,7 +7497,7 @@ async fn queued_children_follow_root_migration_without_interrupting_the_running_
                     ),
                     ("session_id".to_owned(), json!("parent-session")),
                     ("thread_id".to_owned(), json!(thread_id)),
-                    ("turnState".to_owned(), json!("old-account-turn-state")),
+                    ("turnState".to_owned(), json!("client-turn-state")),
                 ]),
             )
             .expect("payload")
@@ -7489,10 +7601,16 @@ async fn queued_children_follow_root_migration_without_interrupting_the_running_
     );
     drop(resumed_child);
     for thread in ["child-one", "cold-child"] {
+        // 已知原账号的子请求清理旧 token；冷启动子请求不能仅凭根绑定历史推断归属
+        let request_context = if thread == "child-one" {
+            context_with_state_owner("req_child_busy", "acct_subagent_a")
+        } else {
+            context("req_child_busy", CancellationToken::new())
+        };
         let mut child = Arc::clone(&provider)
             .execute(
                 planned_request("openai", operation(thread)),
-                context("req_child_busy", CancellationToken::new()),
+                request_context,
             )
             .await
             .expect("child busy fallback");
@@ -7547,10 +7665,16 @@ async fn queued_children_follow_root_migration_without_interrupting_the_running_
     assert_eq!(affinity.binding_count(), 1);
     let requests = server.received_requests().await.expect("child requests");
     assert_eq!(requests.len(), 2);
-    for request in requests {
-        assert!(captured_header_values(&request, "x-codex-turn-state").is_empty());
+    for (request, expected_turn_state) in requests
+        .iter()
+        .zip([Vec::<Vec<u8>>::new(), vec![b"client-turn-state".to_vec()]])
+    {
         assert_eq!(
-            captured_request_body(&request).get("input"),
+            captured_header_values(request, "x-codex-turn-state"),
+            expected_turn_state
+        );
+        assert_eq!(
+            captured_request_body(request).get("input"),
             Some(&json!([{"role":"user", "content":"keep the complete transcript"}]))
         );
         assert_eq!(

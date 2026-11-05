@@ -88,7 +88,7 @@ async function requestSave() {
     :show-close="!saving" :close-on-click-modal="!saving" :close-on-press-escape="!saving"
     @closed="emit('afterLeave')"
   >
-    <ZForm v-if="account" ref="formElement" :model="form" :rules="rules" scroll-to-error focus-on-error novalidate @submit="requestSave">
+    <ZForm v-if="account" ref="formElement" :model="form" :rules="rules" :validate-on-rule-change="false" scroll-to-error focus-on-error novalidate @submit="requestSave">
       <div
         class="flex flex-wrap items-center justify-between gap-4 rounded-z bg-z-fill-quaternary px-4 py-3.5"
       >
@@ -106,16 +106,7 @@ async function requestSave() {
         </div>
       </div>
 
-      <ZFormItem v-if="isOpenAiOAuthAccount(account)" :label="t('accounts.editor.transportLabel')">
-        <ZSegmented v-model="oauthTransport" :aria-label="t('accounts.editor.transportLabel')" :options="transportOptions" :disabled="saving || !configurationReady" />
-      </ZFormItem>
-
-      <section v-if="isOpenAiApiKeyAccount(account)" class="grid gap-4">
-        <h3 class="m-0 text-cp font-heavy text-cp-text">
-          {{ t('accounts.editor.upstreamConnection') }}
-        </h3>
-        <AccountApiKeyFields v-model="apiKey" editing :disabled="saving || !configurationReady" />
-      </section>
+      <AccountApiKeyFields v-if="isOpenAiApiKeyAccount(account)" v-model="apiKey" editing :disabled="saving || !configurationReady" />
 
       <AccountSettingsFields
         v-model:name="name"
@@ -134,7 +125,13 @@ async function requestSave() {
         :current-proxy-id="account.outboundProxyId"
         :endpoint="account.outboundProxyEndpoint"
         :account-id="account.id"
-      />
+      >
+        <template v-if="isOpenAiOAuthAccount(account)" #name-extra>
+          <ZFormItem :label="t('accounts.editor.transportLabel')">
+            <ZSegmented v-model="oauthTransport" class="w-full" :aria-label="t('accounts.editor.transportLabel')" :options="transportOptions" :disabled="saving || !configurationReady" />
+          </ZFormItem>
+        </template>
+      </AccountSettingsFields>
 
       <ZFormItem label="供应商">
         <ZInput v-model="supplier" :maxlength="100" placeholder="手动填写供应商，留空可清除" :disabled="saving" />

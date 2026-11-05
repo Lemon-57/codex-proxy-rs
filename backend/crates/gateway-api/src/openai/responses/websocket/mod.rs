@@ -179,6 +179,10 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
         crate::middleware::websocket::CancelOnDrop(Some(cancellation.clone()));
     let request_headers =
         request_headers.with_downstream_websocket_connection_id(connection_id.clone());
+    // 帧中间件可能改写终态，此时不能据原始响应关闭下游连接
+    let reconnect_for_replay = !middleware
+        .as_ref()
+        .is_some_and(FrozenMiddlewarePlan::has_websocket);
     let mut connection = ResponsesWebSocketConnection::new(
         socket,
         connection_id,
@@ -401,7 +405,7 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
                 continue;
             }
         };
-        if forward_response(
+        let outcome = forward_response(
             &mut connection,
             response,
             request_id,
@@ -410,8 +414,12 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
             validation,
             &response_control,
         )
-        .await
-            == ForwardOutcome::Disconnect
+        .await;
+        if outcome == ForwardOutcome::Disconnect
+            || (outcome == ForwardOutcome::ReconnectIfIdle
+                && reconnect_for_replay
+                && !connection.is_expired()
+                && connection.close_for_replay_if_idle().await)
         {
             break;
         }

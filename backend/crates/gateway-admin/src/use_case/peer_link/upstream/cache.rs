@@ -56,7 +56,7 @@ impl PeerInfoService {
                             checked_at: now,
                             scheduling: None,
                             summary: None,
-                            unsupported: false,
+                            stored_failure: None,
                         },
                     ));
                 }
@@ -92,19 +92,19 @@ impl PeerInfoService {
                     (
                         connection.clone(),
                         cached.and_then(|cached| cached.summary.clone()),
-                        cached.is_some_and(|cached| cached.unsupported),
+                        cached.and_then(|cached| cached.stored_failure),
                     )
                 })
                 .collect::<Vec<_>>()
         };
         Ok(summaries
             .into_iter()
-            .map(|(connection, peer, unsupported)| {
+            .map(|(connection, peer, stored_failure)| {
                 let quota = Self::project_peer(
                     &connection,
                     peer.as_deref(),
-                    self.last_error(&connection)
-                        .or(unsupported.then_some(UpstreamInfoFailure::Unsupported)),
+                    stored_failure,
+                    self.last_error(&connection),
                     now,
                 );
                 (connection, quota)
@@ -135,8 +135,8 @@ impl PeerInfoService {
             checked_at: now,
             scheduling,
             summary,
-            unsupported: observation
-                .is_some_and(|value| snapshot::is_unsupported(&value.quota, connection)),
+            stored_failure: observation
+                .and_then(|value| snapshot::stored_failure(&value.quota, connection)),
         };
         let previous = self
             .observations
@@ -151,6 +151,9 @@ impl PeerInfoService {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&connection.account_id)
-            .is_some_and(|cached| cached.connection == *connection && cached.unsupported)
+            .is_some_and(|cached| {
+                cached.connection == *connection
+                    && cached.stored_failure == Some(UpstreamInfoFailure::Unsupported)
+            })
     }
 }

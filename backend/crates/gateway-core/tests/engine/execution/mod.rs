@@ -2,7 +2,11 @@
 
 mod identity;
 mod outbound;
-use gateway_core::routing::extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference};
+use gateway_core::engine::probe::AccountProbeTarget;
+use gateway_core::routing::{
+    ContributedModel, ContributedModelAlias,
+    extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference},
+};
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -2111,6 +2115,7 @@ impl Provider for PolicySelectingProvider {
         )
         .with_scheduling(None, AccountWeight::new(100).unwrap());
         let candidates = [AccountCandidate {
+            inherited_concurrency: None,
             account,
             signals: AccountRuntimeSignals {
                 in_flight: 0,
@@ -3131,7 +3136,9 @@ fn account_probe_should_not_write_to_the_persistent_execution_store() {
 
     let error = block_on(service.probe(
         AccountProbeRequest {
-            account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
+            target: AccountProbeTarget::ConnectionTest(
+                ProviderAccountId::new("acct_probe").expect("account ID"),
+            ),
             provider_kind: ProviderKind::new("openai").expect("provider kind"),
             upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
             operation: probe_operation(),
@@ -3163,7 +3170,9 @@ fn probe_failures_should_be_observable_without_a_model_request_row() {
 
     let error = block_on(service.probe(
         AccountProbeRequest {
-            account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
+            target: AccountProbeTarget::ConnectionTest(
+                ProviderAccountId::new("acct_probe").expect("account ID"),
+            ),
             provider_kind: ProviderKind::new("openai").expect("provider kind"),
             upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
             operation: probe_operation(),
@@ -3209,7 +3218,9 @@ fn provider_local_probe_failure_should_remain_distinct_from_upstream() {
 
     let error = block_on(service.probe(
         AccountProbeRequest {
-            account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
+            target: AccountProbeTarget::ConnectionTest(
+                ProviderAccountId::new("acct_probe").expect("account ID"),
+            ),
             provider_kind: ProviderKind::new("openai").expect("provider kind"),
             upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
             operation: probe_operation(),
@@ -3252,7 +3263,7 @@ fn diagnostic_probe_does_not_apply_data_plane_account_model_policy() {
 
     let error = block_on(service.probe(
         AccountProbeRequest {
-            account_id,
+            target: AccountProbeTarget::ConnectionTest(account_id),
             provider_kind: provider,
             upstream_model: UpstreamModelId::new("gpt-probe").expect("model"),
             operation: probe_operation(),
@@ -3284,7 +3295,9 @@ fn probe_observation_store_failure_preserves_the_provider_error() {
 
     let error = block_on(service.probe(
         AccountProbeRequest {
-            account_id: ProviderAccountId::new("acct_probe").expect("account ID"),
+            target: AccountProbeTarget::ConnectionTest(
+                ProviderAccountId::new("acct_probe").expect("account ID"),
+            ),
             provider_kind: ProviderKind::new("openai").expect("provider kind"),
             upstream_model: UpstreamModelId::new("gpt-probe").expect("model ID"),
             operation: probe_operation(),
@@ -3300,15 +3313,22 @@ fn probe_observation_store_failure_preserves_the_provider_error() {
 
 struct FailingProvider;
 
-struct NativeCatalogProvider {
-    fail: bool,
-    empty: bool,
+#[derive(Clone, Copy)]
+enum CatalogProvider {
+    Native,
+    Empty,
+    Unavailable,
+    Generic,
+    Xai,
 }
 
 #[async_trait]
-impl Provider for NativeCatalogProvider {
+impl Provider for CatalogProvider {
     fn name(&self) -> &'static str {
-        "openai"
+        match self {
+            Self::Xai => "xai",
+            _ => "openai",
+        }
     }
     fn catalog_generation(&self) -> ProviderCatalogGeneration {
         ProviderCatalogGeneration::default()
@@ -3330,29 +3350,41 @@ impl Provider for NativeCatalogProvider {
         assert!(scope.allows(&ProviderAccountId::new("acct_start").expect("account")));
         assert!(!scope.allows(&ProviderAccountId::new("acct_other").expect("account")));
         assert_eq!((protocol, version), ("codex", "0.154.0"));
-        if self.fail {
-            return Err(gateway_core::routing::ProviderCatalogUnavailable);
+        match self {
+            Self::Unavailable => return Err(gateway_core::routing::ProviderCatalogUnavailable),
+            Self::Empty => return Ok(Some(Vec::new())),
+            Self::Xai => return Ok(None),
+            Self::Native | Self::Generic => {}
         }
-        if self.empty {
-            return Ok(Some(Vec::new()));
-        }
-        Ok(Some(
-            ["gpt-new", "gpt-start"]
-                .into_iter()
-                .map(|id| gateway_core::routing::ProviderModelDescriptor {
-                    model: UpstreamModelId::new(id).expect("id"),
-                    content: gateway_core::routing::ProviderModelContent::Native(
-                        RawJsonPayload::new(
-                            "codex",
-                            serde_json::to_vec(&json!({"slug":id,"future":null}))
-                                .expect("JSON")
-                                .into(),
-                        )
-                        .expect("payload"),
+        let mut models = ["gpt-new", "gpt-start"]
+            .into_iter()
+            .map(|id| gateway_core::routing::ProviderModelDescriptor {
+                model: UpstreamModelId::new(id).expect("id"),
+                content: gateway_core::routing::ProviderModelContent::Native(
+                    RawJsonPayload::new(
+                        "codex",
+                        serde_json::to_vec(&json!({"slug":id,"future":null}))
+                            .expect("JSON")
+                            .into(),
+                    )
+                    .expect("payload"),
+                ),
+            })
+            .collect::<Vec<_>>();
+        if matches!(self, Self::Generic) {
+            models.extend(["shared-model", "z-last"].map(|id| {
+                gateway_core::routing::ProviderModelDescriptor {
+                    model: UpstreamModelId::new(id).unwrap(),
+                    content: gateway_core::routing::ProviderModelContent::Adapted(
+                        gateway_core::routing::ModelPresentation::new(
+                            Some(format!("Provider {id}")),
+                            None,
+                        ),
                     ),
-                })
-                .collect(),
-        ))
+                }
+            }));
+        }
+        Ok(Some(models))
     }
     async fn execute(
         self: Arc<Self>,
@@ -3363,32 +3395,37 @@ impl Provider for NativeCatalogProvider {
     }
 }
 
+struct CatalogContributions {
+    aliases: Vec<ContributedModelAlias>,
+    models: Vec<ContributedModel>,
+}
+
+impl ExtensionSetLease for CatalogContributions {
+    fn is_ready(&self) -> bool {
+        true
+    }
+    fn model_aliases(&self) -> &[ContributedModelAlias] {
+        &self.aliases
+    }
+    fn models(&self) -> &[ContributedModel] {
+        &self.models
+    }
+}
+
 #[test]
 fn client_catalog_forwards_scope_maps_whole_objects_and_omits_unroutable_models() {
-    #[derive(Debug)]
-    struct Aliases(
-        Vec<gateway_core::routing::ContributedModelAlias>,
-        Vec<gateway_core::routing::ContributedModel>,
-    );
-    impl gateway_core::routing::extensions::ExtensionSetLease for Aliases {
-        fn is_ready(&self) -> bool {
-            true
-        }
-        fn model_aliases(&self) -> &[gateway_core::routing::ContributedModelAlias] {
-            &self.0
-        }
-        fn models(&self) -> &[gateway_core::routing::ContributedModel] {
-            &self.1
-        }
-    }
-    for (fail, empty) in [(false, false), (false, true), (true, false)] {
+    for provider in [
+        CatalogProvider::Native,
+        CatalogProvider::Empty,
+        CatalogProvider::Unavailable,
+    ] {
         let contributed = [
             ("gpt-start", "acct_start"),
             ("adapted", "acct_start"),
             ("private-model", "acct_other"),
         ]
         .into_iter()
-        .map(|(id, account)| gateway_core::routing::ContributedModel {
+        .map(|(id, account)| ContributedModel {
             owner: "catalog-plugin".into(),
             id: PublicModelId::new(id).unwrap(),
             provider: ProviderKind::new("openai").unwrap(),
@@ -3412,25 +3449,21 @@ fn client_catalog_forwards_scope_maps_whole_objects_and_omits_unroutable_models(
             .with_settings(&settings)
             .unwrap()
             .with_extensions(Some(ExtensionSetReference::new(
-                gateway_core::routing::extensions::ExtensionSetId::new("catalog-aliases".into())
-                    .unwrap(),
-                Arc::new(Aliases(
-                    vec![gateway_core::routing::ContributedModelAlias {
+                ExtensionSetId::new("catalog-aliases".into()).unwrap(),
+                Arc::new(CatalogContributions {
+                    aliases: vec![ContributedModelAlias {
                         owner: "catalog-plugin".into(),
                         id: PublicModelId::new("plugin-alias").unwrap(),
                         provider: ProviderKind::new("openai").unwrap(),
                         target: UpstreamModelId::new("gpt-start").unwrap(),
                     }],
-                    contributed,
-                )),
+                    models: contributed,
+                }),
             )));
         let service = DefaultExecutionService::new(
             RuntimeSnapshotHandle::new(snapshot),
             Arc::new(TrackingExecutionStore::default()),
-            ProviderRegistry::new([
-                Arc::new(NativeCatalogProvider { fail, empty }) as Arc<dyn Provider>
-            ])
-            .expect("registry"),
+            ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]).expect("registry"),
             Arc::new(UnusedAdmissions),
             Arc::new(UnusedContinuation),
             Arc::new(RecordingClientApiKeyUsage::default()),
@@ -3438,7 +3471,7 @@ fn client_catalog_forwards_scope_maps_whole_objects_and_omits_unroutable_models(
         );
         let client = service.authenticate("sk_start_test").expect("authenticate");
         let result = block_on(service.client_model_catalog(&client, "codex", "0.154.0"));
-        if fail {
+        if matches!(provider, CatalogProvider::Unavailable) {
             assert!(
                 result.is_err(),
                 "native failure cannot use the global synthesized catalog"
@@ -3457,13 +3490,13 @@ fn client_catalog_forwards_scope_maps_whole_objects_and_omits_unroutable_models(
             .collect::<Vec<_>>();
         assert_eq!(
             adapted,
-            if empty {
+            if matches!(provider, CatalogProvider::Empty) {
                 vec!["gpt-start", "adapted"]
             } else {
                 vec!["adapted"]
             }
         );
-        if empty {
+        if matches!(provider, CatalogProvider::Empty) {
             assert_eq!(models.len(), 2);
             continue;
         }
@@ -3491,6 +3524,95 @@ fn client_catalog_forwards_scope_maps_whole_objects_and_omits_unroutable_models(
         assert_eq!(
             pairs[0].1, pairs[2].1,
             "插件别名使用相同原生对象，不伪造字段"
+        );
+    }
+}
+
+#[test]
+fn client_catalog_prefers_scoped_profiles_in_provider_order() {
+    use gateway_core::routing::{ModelPresentation, PublicModelDescriptor};
+
+    for provider in [CatalogProvider::Generic, CatalogProvider::Xai] {
+        let kind = ProviderKind::new(provider.name()).unwrap();
+        let capabilities = ModelCapabilities::new([OperationKind::Generate].into(), None);
+        let presentation =
+            |source: &str, id: &str| ModelPresentation::new(Some(format!("{source} {id}")), None);
+        let provider_models = ["shared-model", "z-last"].map(|id| {
+            ProviderModel::new(
+                kind.clone(),
+                UpstreamModelId::new(id).unwrap(),
+                capabilities.clone(),
+            )
+            .with_presentation(presentation("Provider", id))
+        });
+        let contributions = [
+            ("extra", "acct_start"),
+            ("z-last", "acct_other"),
+            ("shared-model", "acct_start"),
+        ]
+        .map(|(id, account)| ContributedModel {
+            owner: "catalog-plugin".into(),
+            id: PublicModelId::new(id).unwrap(),
+            provider: kind.clone(),
+            accounts: [ProviderAccountId::new(account).unwrap()].into(),
+            capabilities: capabilities.clone(),
+            presentation: presentation("Plugin", id).with_agent_tools(true, true),
+        });
+        let policy = ClientPolicy::new(
+            ClientApiKeyId::new("key_start_test").unwrap(),
+            PlaintextClientApiKey::new("sk_start_test").unwrap(),
+            account_scope(&kind, "acct_start"),
+            true,
+            RateLimits::unlimited(),
+        );
+        let snapshot = RuntimeSnapshot::new(
+            ConfigRevision::new(1).unwrap(),
+            gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+            vec![kind],
+            provider_models.into(),
+            vec![policy],
+        )
+        .unwrap()
+        .with_extensions(Some(ExtensionSetReference::new(
+            ExtensionSetId::new("catalog-precedence".into()).unwrap(),
+            Arc::new(CatalogContributions {
+                aliases: vec![],
+                models: contributions.into(),
+            }),
+        )));
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(snapshot),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::new([Arc::new(provider) as Arc<dyn Provider>]).unwrap(),
+            Arc::new(UnusedAdmissions),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+            Arc::new(crate::RecordingDiagnostics::default()),
+        );
+        let client = service.authenticate("sk_start_test").unwrap();
+        let models = block_on(service.client_model_catalog(&client, "codex", "0.154.0")).unwrap();
+        let profiles = models
+            .iter()
+            .map(|entry| {
+                let PublicModelDescriptor::Adapted(profile) = entry else {
+                    panic!("expected adapted catalog")
+                };
+                (
+                    profile.model().as_str(),
+                    profile.presentation().display_name().unwrap(),
+                    profile.presentation().parallel_tool_calls(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            profiles,
+            [
+                ("shared-model", "Plugin shared-model", true),
+                ("z-last", "Provider z-last", false),
+                ("extra", "Plugin extra", true),
+            ],
+            "{}",
+            provider.name()
         );
     }
 }
@@ -5192,5 +5314,41 @@ fn image_policy_stays_frozen_for_prepared_requests_and_refreshes_for_the_next_tu
             .await;
         assert!(matches!(result, Err(error) if error.kind() == GatewayErrorKind::PolicyDenied));
         assert_eq!(admissions.limits.lock().unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn cancelled_prepared_execution_records_rejection_without_admission_or_model_request() {
+    block_on(async {
+        let store = Arc::new(TrackingExecutionStore::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(start_snapshot()),
+            store.clone(),
+            ProviderRegistry::default(),
+            Arc::new(UnusedAdmissions),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+            Arc::new(crate::RecordingDiagnostics::default()),
+        );
+        let request = request(&service, ClientTransport::HttpJson);
+        let prepared = service.prepare_execution(request.client).await.unwrap();
+        let id = prepared.request_id().clone();
+        prepared.cancellation().cancel();
+        let result = service
+            .start_prepared(
+                prepared,
+                gateway_core::engine::execution::PreparedExecutionRequest {
+                    public_model: request.public_model,
+                    operation: request.operation,
+                    metadata: request.metadata,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(error) if error.kind() == GatewayErrorKind::Cancelled));
+        let rejected = store.entry_rejections.lock().unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].request_id, id);
+        assert_eq!(rejected[0].error.kind(), GatewayErrorKind::Cancelled);
+        assert!(store.requests.lock().unwrap().is_empty());
     });
 }

@@ -74,6 +74,11 @@ Provider 固定为宿主内置的 OpenAI 与 xAI。宿主开放以下 11 类扩�
 
 所有回调都通过当前 `TypedCall.host` 发起，关联父调用及其取消信号。普通调用使用父调用剩余期限；已经建立的资源流按[会话生命周期](../README.md#帧与会话)回收，网络操作单独计时
 
+用量扫描和完整分组统计使用 `HostClient::scan_usage_records`、`query_usage_statistics`，
+对应 `host.usage.records.scan`、`host.usage.statistics.query`。返回的读取资源通过
+`host.usage.read.next` 和 `host.usage.read.close` 拉取与关闭，SDK 提供 `UsageReader` 封装。
+这些回调使用空控制参数和二进制 JSON 载荷，查询语义、快照与预算见[用量查询](usage-data.md#完整扫描与分组统计)
+
 ### 基础事实
 
 基础事实接口提供账号分页、Key 分组绑定及额度观测。查询不进入模型执行链，也不触发计费；账号凭据使用[账号接口](#账号与凭据)读取
@@ -522,7 +527,7 @@ restore_and_validate_response(response).await
 仅实现中间件时也可使用轻量的 `MiddlewarePlugin`；需要与管理或其他方法组合时使用
 `PluginBuilder`，两者复用相同的类型化调用与结果合同
 
-用量明细、聚合维护与费用试算使用 `call::services::usage`，输入输出和批量语义见 [用量维护与计价](usage-data.md)
+用量查询、明细与聚合维护、费用试算使用 `call::services::usage`，输入输出和批量语义见 [用量查询、维护与计价](usage-data.md)
 
 ### 扩展的组合边界
 
@@ -579,7 +584,8 @@ let plugin = PluginBuilder::from_json(include_bytes!("../plugin.json"))?
 清单须显式声明 `model_catalog.version = 2`，可使用上述 `.model_catalog(...)` 固定目录，
 或通过 `PluginBuilder::on(methods::MODEL_CATALOG_REGISTER_V2, handler)` 返回 `TypedReply<ModelCatalogRegistrationV2>`。
 
-原生 Codex 目录成功返回后，宿主保留其中的完整对象，只追加可见且尚未出现的适配模型画像；原生读取错误仍向调用方返回错误。
+Codex 客户端目录保留 Provider 的完整原生对象。对于通用画像，当前账号范围内的同名适配模型使用插件声明的 `presentation`，
+包括 xAI 这类由宿主转换的目录。仅由插件提供的可见模型按声明顺序追加到所属 Provider 的条目之后。原生目录读取失败时返回错误。
 适配模型的 wire 模型名、协议编解码及摘要由插件负责，宿主只使用公开 ID、能力和账号范围参与现有选号，不生成请求正文或转换历史
 
 ### 重试决策

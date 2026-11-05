@@ -66,7 +66,7 @@ use crate::credential::{
     derive_previous_response_id_hash, derive_turn_alias,
 };
 use crate::request_identity::{account_session_with_headers, turn_id_with_headers};
-use crate::session_transport::CodexSessionTransportRecovery;
+use crate::session_transport::{CodexSessionTransportRecovery, WS_PAYLOAD_LIMIT};
 use crate::transport::canonical::{
     CodexCanonicalDecoder, CodexCanonicalError, CodexCanonicalOutcome,
 };
@@ -107,7 +107,6 @@ mod failure;
 mod guardian;
 mod live;
 mod observation;
-mod turn_state;
 mod upstream_adapter;
 mod workers;
 pub(crate) use live::{CodexLiveGateway, CodexLiveRegistry};
@@ -124,8 +123,6 @@ const PROVIDER_NAME: &str = "openai";
 const HTTP_SSE_TRANSPORT: &str = "http_sse";
 const HTTP_JSON_TRANSPORT: &str = "http_json";
 const WEBSOCKET_TRANSPORT: &str = "websocket";
-// 在已观测到的 Codex OAuth 上游 16 MiB 附近消息边界前留出传输 metadata 余量
-const WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES: usize = 15 * 1024 * 1024;
 const MAX_COOKIE_HEADER_BYTES: usize = 16 * 1024;
 // 额度拒绝后的 usage 补查自身执行时长上限；结算等待的随机延迟见 jitter 模块
 const QUOTA_FAILURE_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -157,7 +154,6 @@ pub struct CodexProvider {
     session_identity: Option<CodexSessionIdentity>,
     session_transport_recovery: CodexSessionTransportRecovery,
     guardian_routing: guardian::GuardianRouting,
-    turn_state_ownership: turn_state::TurnStateOwnership,
     stream_max_retries: u32,
     live_registry: Arc<CodexLiveRegistry>,
     live_gateway: Option<Arc<CodexLiveGateway>>,
@@ -363,7 +359,6 @@ impl CodexProvider {
             session_identity: None,
             session_transport_recovery: CodexSessionTransportRecovery::default(),
             guardian_routing: guardian::GuardianRouting::default(),
-            turn_state_ownership: turn_state::TurnStateOwnership::default(),
             stream_max_retries,
             live_registry: Arc::new(CodexLiveRegistry::default()),
             live_gateway: None,
@@ -966,26 +961,11 @@ impl CodexProvider {
                 )
                 .map(|affinity| (response_id.to_owned(), affinity))
         });
-        let turn_state_scope = self
-            .turn_state_ownership
-            .scope(&context, &lease, &upstream_request);
-        // 全量请求的 token 证明不能用于放行 response ID 或其他账号状态
-        let verified_turn_state = upstream_request
-            .turn_state
-            .as_ref()
-            .filter(|token| {
-                matches!(account_scope, RequestAccountScope::Unknown)
-                    && turn_state_scope
-                        .as_ref()
-                        .is_some_and(|scope| scope.owns(token))
-            })
-            .cloned();
-        scope_request_to_account(
-            &mut upstream_request,
-            lease.installation_id(),
-            account_scope,
-            verified_turn_state.as_deref(),
-        );
+        let client = self.client_for_request(&context)?;
+        let installation_id = client
+            .profile_state()
+            .effective_installation_id(lease.installation_id());
+        scope_request_to_account(&mut upstream_request, &installation_id, account_scope);
         // 父响应的可信关联只恢复此字段，不把首次 Guardian 请求的其他账号状态视为可信
         if let Some((response_id, _)) = &guardian_parent
             && let Some(Value::Object(metadata)) =
@@ -1007,7 +987,6 @@ impl CodexProvider {
                 "ownerCrossAccount": state_owner_cross_account,
                 "accountSwitch": lease.account_switch(),
                 "accountStateReusable": account_scope.can_reuse_account_state(),
-                "verifiedTurnStateEcho": verified_turn_state.is_some(),
                 "before": before,
                 "after": crate::transport::diagnostics::evidence::request_state(&upstream_request),
             }));
@@ -1056,6 +1035,7 @@ impl CodexProvider {
         } else {
             requested_transport
         };
+        let mut oversized_http = false;
         if codex_oauth
             && transport == CodexProviderTransport::PreferWebSocket
             && (matches!(
@@ -1070,12 +1050,12 @@ impl CodexProvider {
                 websocket_response_create_payload_len(&upstream_request).map_err(|_| {
                     provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent)
                 })?;
-            if payload_bytes >= WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES {
-                if requirement == TransportRequirement::ExactWebSocketContinuation {
+            if requirement == TransportRequirement::ExactWebSocketContinuation {
+                if payload_bytes >= WS_PAYLOAD_LIMIT {
                     tracing::info!(
                         request_id = context.request_id().as_str(),
                         payload_bytes,
-                        threshold_bytes = WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES,
+                        threshold_bytes = WS_PAYLOAD_LIMIT,
                         continuation_recovery_action = "client_replay_required",
                         "OpenAI oversized WebSocket continuation requires full client input before send"
                     );
@@ -1083,12 +1063,16 @@ impl CodexProvider {
                         "transport_payload_too_large",
                     ));
                 }
+            } else if self
+                .session_transport_recovery
+                .http_for_full_payload(session_transport_key.as_ref(), payload_bytes)
+            {
                 transport = CodexProviderTransport::HttpOnly;
+                oversized_http = true;
                 tracing::info!(
                     request_id = context.request_id().as_str(),
                     payload_bytes,
-                    threshold_bytes = WEBSOCKET_HTTP_FALLBACK_THRESHOLD_BYTES,
-                    "OpenAI oversized new-chain request selected HTTP before WebSocket send"
+                    "OpenAI full request selected HTTP by WebSocket payload size"
                 );
             }
         }
@@ -1147,6 +1131,7 @@ impl CodexProvider {
                     )
                     .reasoning_effort_override,
                 response_store,
+                oversized_http,
                 continuation_scope: None,
             });
         let allows_account_state_mutation = lease.allows_account_state_mutation();
@@ -1158,8 +1143,8 @@ impl CodexProvider {
             AttemptTransport::Default | AttemptTransport::Fallback => 0,
         };
         let events = cold_response_stream(ColdResponse {
-            client: self
-                .client_for_request(&context)?
+            installation_id,
+            client: client
                 .for_account(lease.account())
                 .map_err(|error| map_client_error(error, UpstreamSendState::NotSent, false).error)?
                 .with_responses_api_base_url(lease.authentication().responses_api_base_url())
@@ -1181,7 +1166,6 @@ impl CodexProvider {
             session_transport_key_hash,
             session_transport_recovery: self.session_transport_recovery.clone(),
             guardian_routing: self.guardian_routing.clone(),
-            turn_state_scope,
             websocket_retry_count,
             stream_max_retries: self.stream_max_retries,
             session_capture,

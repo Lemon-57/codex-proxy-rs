@@ -196,14 +196,19 @@
       "searchOrEnterIdAndPressEnter": "搜索或输入 ID，回车添加",
       "selectModel": "选择模型",
       "notInCurrentModelCatalog": "{id}（当前目录未返回）",
-      "modelCatalogMissingHint": "当前上游目录未返回此模型，已保留你的选择",
+      "modelCatalogMissingHint": "当前上游目录未返回此模型",
       "loadingModel": "加载模型中",
       "noMatchingModels": "无匹配模型",
       "noModels": "暂无模型",
       "selectOrAddAtLeastOneModel": "请至少选择或添加一个模型",
       "configureUpToModels": "最多配置 256 个模型",
       "invalidModelId": "请使用有效的精确模型 ID，不支持通配符",
-      "enterValidExactModelIdUpTo": "请输入有效的精确模型 ID，最多 256 字节，不支持通配符"
+      "enterValidExactModelIdUpTo": "请输入有效的精确模型 ID，最多 256 字节，不支持通配符",
+      "cleanupModels": "清理未列出模型",
+      "cleanupSelection": "选择要从白名单移除的模型",
+      "cleanupKeepOne": "请至少保留一个白名单模型",
+      "cleanupRemove": "移除",
+      "cleanupSelected": "移除 {count} 项"
     },
     "notes": {
       "viewAccountNotes": "查看账号备注",
@@ -227,7 +232,12 @@
       "disabledSuffix": "（已禁用）",
       "testFailed": "（测试失败）",
       "notTested": "（未测试）",
-      "outboundTunnel": "出站隧道"
+      "outboundTunnel": "出站隧道",
+      "testExit": "测试出口",
+      "selectToTest": "选择直连或受管理的代理后可测试出口",
+      "disabledUsesDirect": "代理已禁用，将测试服务器直连出口",
+      "connected": "出口连通 · {latencyMs} ms",
+      "testIncomplete": "未取得测试结果，请重新测试"
     },
     "scheduling": {
       "scheduling": "调度",
@@ -304,7 +314,6 @@
       "fileReadingFailedTryAgain": "文件读取失败，请重新选择",
       "uploadFiles": "上传文件",
       "authorizationExpired": "授权已过期，可重新开始或检查已完成的授权结果",
-      "pollingPaused": "查询已暂停，可检查授权结果后继续",
       "regenerateAuthorizationLink": "重新生成授权链接",
       "generateAuthorizationLink": "生成授权链接",
       "authorizationLink": "授权链接",
@@ -627,12 +636,17 @@
       "observedAt": "{time}更新",
       "stale": "数据已过期",
       "unauthorized": "上游未授权",
+      "sharingDisabled": "上游已关闭互联共享",
       "unsupported": "上游暂不支持互联",
       "rateLimited": "上游查询受限",
       "invalidResponse": "上游数据异常",
       "unavailable": "上游暂不可用",
       "pool": "共享池",
-      "ready": "可用",
+      "readyAccounts": "可用账号 / 总账号",
+      "keyConcurrency": "上游密钥并发上限",
+      "keyRpm": "上游密钥每分钟请求数",
+      "otherPlans": "其他套餐",
+      "morePlans": "查看其余 {count} 种套餐",
       "nodeQuota": "节点额度",
       "quota": "上游额度"
     }

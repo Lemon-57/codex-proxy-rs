@@ -196,14 +196,19 @@
       "searchOrEnterIdAndPressEnter": "Search or enter ID and press Enter to add",
       "selectModel": "Select model",
       "notInCurrentModelCatalog": "{id} (not in the current model catalog)",
-      "modelCatalogMissingHint": "The current upstream catalog does not list this model, your selection has been kept",
+      "modelCatalogMissingHint": "The current upstream catalog does not list this model",
       "loadingModel": "Loading model",
       "noMatchingModels": "No matching models",
       "noModels": "No models",
       "selectOrAddAtLeastOneModel": "Please select or add at least one model",
       "configureUpToModels": "Configure up to 256 models",
       "invalidModelId": "Enter an exact model ID, wildcards are not supported",
-      "enterValidExactModelIdUpTo": "Please enter a valid exact model ID, up to 256 bytes, no wildcards are supported"
+      "enterValidExactModelIdUpTo": "Please enter a valid exact model ID, up to 256 bytes, no wildcards are supported",
+      "cleanupModels": "Clean up unlisted models",
+      "cleanupSelection": "Select models to remove from the allowlist",
+      "cleanupKeepOne": "Keep at least one model in the allowlist",
+      "cleanupRemove": "Remove",
+      "cleanupSelected": "Remove ({count})"
     },
     "notes": {
       "viewAccountNotes": "View account notes",
@@ -227,7 +232,12 @@
       "disabledSuffix": "(disabled)",
       "testFailed": "(test failed)",
       "notTested": "(not tested)",
-      "outboundTunnel": "Outbound tunnel"
+      "outboundTunnel": "Outbound tunnel",
+      "testExit": "Test egress",
+      "selectToTest": "Select a direct connection or managed proxy to test egress",
+      "disabledUsesDirect": "The proxy is disabled, so the test uses the server’s direct connection",
+      "connected": "Egress connected · {latencyMs} ms",
+      "testIncomplete": "No test result received, run the test again"
     },
     "scheduling": {
       "preserve": "Keep unchanged",
@@ -304,7 +314,6 @@
       "fileReadingFailedTryAgain": "File reading failed, please try again",
       "uploadFiles": "Upload files",
       "authorizationExpired": "Authorization expired, start again or check whether authorization completed",
-      "pollingPaused": "Polling paused, check the authorization result to continue",
       "regenerateAuthorizationLink": "Regenerate authorization link",
       "generateAuthorizationLink": "Generate authorization link",
       "authorizationLink": "Authorization link",
@@ -627,12 +636,17 @@
       "observedAt": "Updated {time}",
       "stale": "Data expired",
       "unauthorized": "Upstream access denied",
+      "sharingDisabled": "Upstream sharing is disabled",
       "unsupported": "Upstream does not support CPR Link",
       "rateLimited": "Upstream query rate limited",
       "invalidResponse": "Invalid upstream data",
       "unavailable": "Upstream unavailable",
       "pool": "Shared pool",
-      "ready": "available",
+      "readyAccounts": "Ready / total accounts",
+      "keyConcurrency": "Upstream key concurrency limit",
+      "keyRpm": "Upstream key requests per minute",
+      "otherPlans": "Other plans",
+      "morePlans": "View {count} more plans",
       "nodeQuota": "Node quota",
       "quota": "Upstream quota"
     }

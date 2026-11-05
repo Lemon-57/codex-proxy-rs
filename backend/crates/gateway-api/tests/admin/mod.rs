@@ -885,6 +885,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         }
         Ok(vec![
             AccountGroupMemberFact {
+                inherited_version: None,
                 group_id: group_id(PRIMARY_GROUP_ID),
                 account_id: "acct_group_ready".to_owned(),
                 status: AccountStatusFacts {
@@ -899,6 +900,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
                 total_slots: Some(1),
             },
             AccountGroupMemberFact {
+                inherited_version: None,
                 group_id: group_id(PRIMARY_GROUP_ID),
                 account_id: "acct_group_disabled".to_owned(),
                 status: AccountStatusFacts {

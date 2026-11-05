@@ -12,7 +12,7 @@ use chrono::{Duration, Utc};
 use futures::StreamExt as _;
 use gateway_core::{
     account::ProviderAccountId,
-    engine::probe::{AccountProbe, AccountProbeRequest},
+    engine::probe::{AccountProbe, AccountProbeRequest, AccountProbeTarget},
     routing::{ProviderKind, UpstreamModelId},
     runtime::SnapshotControl,
 };
@@ -188,7 +188,7 @@ pub trait AccountsService: Send + Sync {
 
     async fn test_connection(
         &self,
-        account_id: ProviderAccountId,
+        target: AccountProbeTarget,
         upstream_model: UpstreamModelId,
     ) -> Result<AccountConnectionTestEventStream, AdminError>;
 }
@@ -514,7 +514,11 @@ impl DefaultAccountsService {
             });
         Ok(AccountDirectoryItem {
             protection_rules: stored.protection_rules,
-            capacity: stored.capacity,
+            capacity: super::peer_link::upstream::account_capacity(
+                &stored.account,
+                stored.capacity,
+                &quota,
+            ),
             capabilities: provider
                 .account_capabilities(account_id, &stored.account.authentication_kind),
             plan_type_display: self.providers.resolve_account_plan(
@@ -628,7 +632,11 @@ impl AccountsService for DefaultAccountsService {
                         used_slots: in_flight
                             .as_ref()
                             .map(|counts| counts.get(&item.account.id).copied().unwrap_or(0)),
-                        ..item.capacity
+                        ..super::peer_link::upstream::account_capacity(
+                            &item.account,
+                            item.capacity,
+                            &quota,
+                        )
                     },
                     capabilities,
                     plan_type_display: providers.resolve_account_plan(
@@ -1184,10 +1192,10 @@ impl AccountsService for DefaultAccountsService {
 
     async fn test_connection(
         &self,
-        account_id: ProviderAccountId,
+        target: AccountProbeTarget,
         upstream_model: UpstreamModelId,
     ) -> Result<AccountConnectionTestEventStream, AdminError> {
-        let (stored, provider) = self.provider_for_account(&account_id).await?;
+        let (stored, provider) = self.provider_for_account(target.account_id()).await?;
         let account = stored.account;
         let model = upstream_model.as_str().to_owned();
         let operation = provider
@@ -1210,7 +1218,7 @@ impl AccountsService for DefaultAccountsService {
             let result = probe
                 .probe(
                     AccountProbeRequest {
-                        account_id,
+                        target,
                         provider_kind: account.provider_kind,
                         upstream_model,
                         operation,
