@@ -1179,7 +1179,7 @@ impl AccountsService for DefaultAccountsService {
         self.probe
             .probe(
                 AccountProbeRequest {
-                    account_id,
+                    target: AccountProbeTarget::ConnectionTest(account_id),
                     provider_kind: stored.account.provider_kind,
                     upstream_model,
                     operation,
