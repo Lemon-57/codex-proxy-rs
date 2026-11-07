@@ -1186,6 +1186,10 @@ impl AccountStore for UnusedStore {
         Err(unavailable("plugin account list"))
     }
 
+    async fn list_account_suppliers(&self) -> AdminStoreResult<Vec<String>> {
+        Ok(vec!["North".to_owned(), "南方供应商".to_owned()])
+    }
+
     async fn list_accounts(
         &self,
         _: AccountListQuery,

@@ -515,6 +515,10 @@ impl AccountStore for UnavailableStore {
         Err(unavailable("plugin accounts"))
     }
 
+    async fn list_account_suppliers(&self) -> AdminStoreResult<Vec<String>> {
+        Err(unavailable("account suppliers"))
+    }
+
     async fn list_accounts(
         &self,
         _: AccountListQuery,

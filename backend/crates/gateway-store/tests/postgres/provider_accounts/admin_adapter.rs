@@ -916,6 +916,7 @@ async fn supplier_filter_applies_before_pagination_and_treats_wildcards_literall
         .await
         .unwrap();
     assert_eq!(absent_plan.total, 0);
+
     database.close().await;
 }
 
@@ -989,5 +990,49 @@ async fn paused_invalid_accounts_are_errors_in_detail_filters_pagination_and_glo
         .unwrap();
     assert_eq!(disabled.total, 2);
     assert_eq!(disabled.summary, errors.summary);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn supplier_options_deduplicate_without_usage_reads() {
+    let Some(database) = TestDatabase::create("supplier_options").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let store = admin_account_store(&database.pool);
+    for (id, supplier) in [
+        ("acct_s1", Some("North 100%_A")),
+        ("acct_s2", Some("North partner")),
+        ("acct_s3", Some("Other")),
+        ("acct_s4", Some(" North partner ")),
+        ("acct_s5", Some("   ")),
+        ("acct_s6", None),
+    ] {
+        repository
+            .insert_provider_account(account(id, id))
+            .await
+            .unwrap();
+        sqlx::query("update provider_accounts set supplier=$2 where id=$1")
+            .bind(id)
+            .bind(supplier)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+    }
+    // 筛选目录独立于用量表，即使统计正在维护仍可读取完整的供应商选项
+    let mut maintenance = database.pool.begin().await.unwrap();
+    sqlx::query("lock table model_requests, request_analytics_facts, request_analytics_1h, request_analytics_15m in access exclusive mode")
+        .execute(&mut *maintenance).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.list_account_suppliers()
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        ["North 100%_A", "North partner", "Other"]
+    );
+    maintenance.rollback().await.unwrap();
     database.close().await;
 }

@@ -773,6 +773,11 @@ impl AccountStore for FakeAccountStore {
         ))
     }
 
+    async fn list_account_suppliers(&self) -> AdminStoreResult<Vec<String>> {
+        self.record("store.list_account_suppliers");
+        Ok(vec!["North".to_owned(), "南方供应商".to_owned()])
+    }
+
     async fn list_accounts(
         &self,
         _: AccountListQuery,
@@ -4075,4 +4080,17 @@ async fn protected_diagnostic_preserves_disabled_account_and_rejects_tools() {
             .is_err()
     );
     assert!(!store.accounts.lock().unwrap()[0].enabled);
+}
+
+#[tokio::test]
+async fn supplier_options_read_only_the_supplier_directory() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = accounts_service(provider, store).await;
+    assert_eq!(
+        services.accounts().suppliers().await.unwrap(),
+        ["North", "南方供应商"]
+    );
+    assert_eq!(recorded(&events), ["store.list_account_suppliers"]);
 }

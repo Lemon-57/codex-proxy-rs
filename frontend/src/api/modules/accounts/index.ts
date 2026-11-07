@@ -28,6 +28,7 @@ export {
   getAccountConcurrency,
   getAccountDetail,
   getAccounts,
+  getAccountSuppliers,
   recoverAccount,
   updateAccount,
 } from './management'
@@ -40,6 +41,7 @@ export type {
   AccountListResponse,
   AccountPageMeta,
   AccountSummary,
+  AccountSupplierOptionsResponse,
   AccountUpdateResponse,
   ApiKeyConfiguration,
 } from './management'

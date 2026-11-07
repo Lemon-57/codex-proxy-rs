@@ -2,7 +2,7 @@ import type { TableSort } from '@codex-proxy/ui'
 import type { Account } from '@/api'
 
 import { computed, onMounted, shallowRef, watch } from 'vue'
-import { getAccounts } from '@/api'
+import { getAccounts, getAccountSuppliers } from '@/api'
 import { usePagedQuery } from '@/composables/usePagedQuery'
 import { useTableSort } from '@/composables/useTableSort'
 import { accountColumns } from '../constants'
@@ -68,19 +68,12 @@ export function useAccountsQuery() {
 
   async function loadSupplierOptions() {
     try {
-      const firstPage = await getAccounts({ page: 1, pageSize: 200 })
-      const pages = await Promise.all(
-        Array.from({ length: Math.max(0, firstPage.page.totalPages - 1) }, (_, index) => getAccounts({ page: index + 2, pageSize: 200 })),
-      )
-      const values = new Set(
-        [firstPage, ...pages]
-          .flatMap(result => result.items)
-          .map(account => account.supplier?.trim())
-          .filter((supplier): supplier is string => Boolean(supplier)),
-      )
+      const result = await getAccountSuppliers()
       supplierOptions.value = [
         { label: '全部供应商', value: '' },
-        ...Array.from(values).sort((left, right) => left.localeCompare(right, 'zh-CN')).map(value => ({ label: value, value })),
+        ...Array.from(new Set(result.items.map(value => value.trim()).filter(Boolean)))
+          .sort((left, right) => left.localeCompare(right, 'zh-CN'))
+          .map(value => ({ label: value, value })),
       ]
     }
     catch {
@@ -108,7 +101,12 @@ export function useAccountsQuery() {
     onCleanup(() => clearTimeout(timer))
   })
 
-  watch([providerQuery, statusQuery, groupQuery, planTypeQuery], () => {
+  watch([
+    providerQuery,
+    statusQuery,
+    groupQuery,
+    planTypeQuery,
+  ], () => {
     void query.reloadFromStart()
   })
 

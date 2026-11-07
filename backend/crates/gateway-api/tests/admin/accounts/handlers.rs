@@ -10,6 +10,41 @@ use tower::ServiceExt as _;
 use super::super::{AdminTestFixture, AdminTestState};
 
 #[tokio::test]
+async fn supplier_options_require_admin_and_work_without_account_projections() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    for authenticated in [false, true] {
+        let mut request = Request::builder()
+            .uri("/api/admin/accounts/suppliers")
+            .header("x-request-id", "req_supplier_options");
+        if authenticated {
+            request = request.header(header::COOKIE, "cpr_session=valid-session");
+        }
+        let response = admin::router::<AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if authenticated {
+                StatusCode::OK
+            } else {
+                StatusCode::UNAUTHORIZED
+            }
+        );
+        if authenticated {
+            let body = to_bytes(response.into_body(), 8192).await.unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                value["data"],
+                serde_json::json!({"items": ["North", "南方供应商"]})
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn peer_refresh_uses_the_account_quota_endpoint_and_requires_admin() {
     use gateway_core::account::{AccountStatusFacts, CredentialState, QuotaState};
     let fixture = AdminTestFixture::new().await;

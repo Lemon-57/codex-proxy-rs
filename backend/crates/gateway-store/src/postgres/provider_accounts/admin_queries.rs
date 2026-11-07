@@ -30,7 +30,7 @@ pub(crate) async fn load_admin_account_page(
     let supplier_pattern = query
         .supplier
         .as_deref()
-        .map(|value| crate::postgres::literal_contains_pattern(value));
+        .map(crate::postgres::literal_contains_pattern);
     let plan_type = query.plan_type.clone();
     let status = query.status.map(|status| status.as_str().to_owned());
     let (group_mode, group_id) = match query.group_filter.as_ref() {
@@ -41,16 +41,29 @@ pub(crate) async fn load_admin_account_page(
     let page_size = i64::from(query.page_size.get());
     let offset = i64::from(query.page - 1).saturating_mul(page_size);
     let order_by = admin_account_order(query.sort);
-    let needs_usage = query.sort.is_some_and(|sort| {
-        matches!(
-            sort.field,
-            AdminAccountSortField::Usage | AdminAccountSortField::LastUsedAt
-        )
-    });
-    let usage_join = if needs_usage {
-        "left join usage_values usage on usage.provider_account_ref = a.id"
-    } else {
-        ""
+    let needs_usage = query
+        .sort
+        .is_some_and(|sort| sort.field == AdminAccountSortField::Usage);
+    let usage_join = match query.sort.map(|sort| sort.field) {
+        Some(AdminAccountSortField::Usage) => {
+            "left join usage_values usage on usage.provider_account_ref = a.id".to_owned()
+        }
+        Some(AdminAccountSortField::LastUsedAt) => {
+            // 最近使用只需每个候选账号的一条有效请求，沿用交付事实与保留期
+            // 源表和目录共享快照，未投影的修改、删除立即生效，无需汇总 Token 或费用
+            let completed = crate::postgres::completed_usage_fact_predicate("mr");
+            format!(
+                "left join lateral (
+                    select mr.started_at as last_used_at from model_requests mr
+                    where mr.provider_account_ref = a.id
+                      and mr.started_at >= $2::timestamptz - make_interval(days => (select usage_retention_days from settings)::integer)
+                      and mr.started_at < $2::timestamptz
+                      and mr.recovered_at is null and {completed}
+                    order by mr.started_at desc, mr.id desc limit 1
+                ) usage on true"
+            )
+        }
+        _ => String::new(),
     };
 
     let statement = format!(

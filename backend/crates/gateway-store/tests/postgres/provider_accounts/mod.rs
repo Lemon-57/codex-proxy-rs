@@ -846,6 +846,10 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
         ["acct_charlie", "acct_beta"]
     );
 
+    // 最近使用排序独立于统计汇总，即使分析表被维护锁住也能读取源事实
+    let mut maintenance = database.pool.begin().await.unwrap();
+    sqlx::query("lock table request_analytics_facts, request_analytics_15m, request_analytics_1h in access exclusive mode")
+        .execute(&mut *maintenance).await.unwrap();
     let last_used_page = store
         .list_accounts(
             AccountListQuery {
@@ -866,6 +870,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
         )
         .await
         .expect("sort accounts by retained last use");
+    maintenance.rollback().await.unwrap();
     assert_eq!(
         last_used_page
             .items

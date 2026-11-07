@@ -64,6 +64,8 @@ pub trait AccountsService: Send + Sync {
 
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError>;
 
+    async fn suppliers(&self) -> Result<Vec<String>, AdminError>;
+
     async fn export(
         &self,
         context: &MutationContext,
@@ -657,6 +659,13 @@ impl AccountsService for DefaultAccountsService {
             total: page.total,
             summary: page.summary,
         })
+    }
+
+    async fn suppliers(&self) -> Result<Vec<String>, AdminError> {
+        self.accounts
+            .list_account_suppliers()
+            .await
+            .map_err(|error| map_store_error(error, "account suppliers"))
     }
 
     async fn export(

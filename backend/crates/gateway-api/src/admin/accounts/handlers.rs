@@ -15,6 +15,10 @@ where
         .merge(super::import_tasks::router::<S>())
         .route("/api/admin/accounts", get(list_accounts::<S>))
         .route(
+            "/api/admin/accounts/suppliers",
+            get(list_account_suppliers::<S>),
+        )
+        .route(
             "/api/admin/accounts/diagnostic",
             post(diagnose_account::<S>),
         )
@@ -123,6 +127,25 @@ where
         .map_err(map_service_error)?;
     let data = account_page_data(result, page, page_size, Utc::now(), time);
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn list_account_suppliers<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let items = state
+        .admin_services()
+        .accounts()
+        .suppliers()
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountSupplierOptionsData { items }),
+    ))
 }
 
 async fn account_detail<S>(

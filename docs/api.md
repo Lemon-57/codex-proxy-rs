@@ -1062,6 +1062,7 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | 方法 | 路由 | 主要 query/body | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/api/admin/accounts` | `page`、`pageSize`、`provider`、`groupId`、`search`、`status`、排序字段 | 分页查询账号与汇总 |
+| `GET` | `/api/admin/accounts/suppliers` | 无 | 只读取去重后的供应商筛选项，不加载账号额度或用量 |
 | `GET` | `/api/admin/accounts/concurrency` | `accountId`、`page=1`、`pageSize=20` | 查询账号当前并发占用；每页最多 100 条 |
 | `GET` | `/api/admin/accounts/detail` | `accountId` | 查询账号详情、额度和本地用量 |
 | `GET` | `/api/admin/accounts/export` | `accountIds`、`confirm=export_sensitive_accounts` | 显式导出最多 200 个账号的敏感 Provider 文档 |
@@ -1153,6 +1154,8 @@ OpenAI 点数随现有额度刷新和正常请求的额度信息同步，不与�
 不接受控制字符，保存时去除首尾空白；`manualExpiresAt` 接受带时区的 RFC 3339 时间。导入、重新授权和批量调度更新保留人工信息
 
 列表查询支持 `planType` 按订阅原始类型精确匹配，忽略大小写；`api` 对应 API Key 账号，`unknown` 对应未提供套餐的账号，空值表示不过滤，筛选在分页前执行，可与其他条件组合
+
+`GET /api/admin/accounts/suppliers` 返回 `{ items: string[] }`，需要管理员鉴权，包含所有账号的去重非空供应商名称
 
 列表查询支持 `supplier`，在分页前按供应商名称进行忽略大小写的包含匹配，与状态、分组及账号搜索共同生效，空值表示不过滤
 

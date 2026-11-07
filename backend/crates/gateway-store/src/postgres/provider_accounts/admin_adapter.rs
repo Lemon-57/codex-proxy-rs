@@ -381,6 +381,17 @@ impl AccountStore for PgAdminAccountStore {
         })
     }
 
+    async fn list_account_suppliers(&self) -> AdminStoreResult<Vec<String>> {
+        sqlx::query_scalar(
+            "select distinct btrim(supplier) as supplier from provider_accounts where nullif(btrim(supplier), '') is not null order by supplier",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|source| {
+            admin_store_error(ENTITY, postgres_unavailable("list account suppliers", source))
+        })
+    }
+
     async fn load_account(
         &self,
         account_id: &str,

@@ -2,6 +2,12 @@
 
 use super::*;
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AccountSupplierOptionsData {
+    pub(super) items: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AccountProxyUpdate(pub Option<gateway_core::account::OutboundProxy>);
 

@@ -125,6 +125,9 @@ pub trait AccountStore:
         runtime: AccountRuntimeSnapshot,
     ) -> AdminStoreResult<AccountPage>;
 
+    /// 只读取供应商筛选项，不加载账号额度、用量或运行态
+    async fn list_account_suppliers(&self) -> AdminStoreResult<Vec<String>>;
+
     async fn load_account(
         &self,
         account_id: &str,

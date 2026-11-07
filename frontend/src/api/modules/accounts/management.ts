@@ -24,6 +24,10 @@ export interface AccountListResponse {
   summary: AccountSummary
 }
 
+export interface AccountSupplierOptionsResponse {
+  items: string[]
+}
+
 export interface AccountUpdateResponse {
   accountId: string
   configRevision: number
@@ -126,6 +130,14 @@ export function getAccounts(data: AccountListParams, options: RequestOptions = {
     url: '/api/admin/accounts',
     method: 'GET',
     params: data,
+    ...options,
+  })
+}
+
+export function getAccountSuppliers(options: RequestOptions = {}) {
+  return request<AccountSupplierOptionsResponse>({
+    url: '/api/admin/accounts/suppliers',
+    method: 'GET',
     ...options,
   })
 }
