@@ -1,0 +1,998 @@
+//! 验证账号冷却缓存的版本隔离、期限延长与到期清理
+
+use std::time::SystemTime;
+
+use chrono::{DateTime, Duration, Utc};
+use gateway_core::{
+    account::{CredentialRevision, ProviderAccountId},
+    provider_ports::{
+        ProviderCooldownKind, ProviderCooldownPort, ProviderCooldownScope, ProviderScopedCooldown,
+    },
+};
+use gateway_store::{
+    Revision,
+    redis::{CredentialCooldown, CredentialCooldownRepository, RedisCredentialCooldownRepository},
+};
+use redis::aio::ConnectionManager;
+use uuid::Uuid;
+
+#[test]
+fn credential_cooldown_is_revision_fenced() {
+    let cooldown = CredentialCooldown {
+        provider_account_id: "account-1".to_owned(),
+        credential_revision: Revision::new(2).expect("positive revision"),
+        cooldown_until: Utc::now() + Duration::seconds(30),
+        kind: ProviderCooldownKind::RateLimit,
+    };
+    assert_eq!(cooldown.credential_revision.get(), 2);
+}
+
+#[tokio::test]
+async fn credential_cooldown_round_trips_and_indexes_active_account_without_raw_id_in_keys() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let cooldown = cooldown("acct_cooldown_round_trip", 1, 30);
+
+    assert!(
+        repository
+            .cache_credential_cooldown(&cooldown)
+            .await
+            .expect("cache cooldown")
+    );
+    assert_eq!(
+        repository
+            .read_credential_cooldown(&cooldown.provider_account_id)
+            .await
+            .expect("read cooldown"),
+        Some(cooldown.clone())
+    );
+    let mut keys = namespace_keys(&mut connection, &namespace).await;
+    keys.sort();
+    assert_eq!(keys.len(), 2);
+    assert!(
+        keys.iter()
+            .all(|key| !key.contains(&cooldown.provider_account_id))
+    );
+
+    let index_key = keys
+        .iter()
+        .find(|key| key.ends_with(":account:active-cooldowns"))
+        .expect("active cooldown index key");
+    let indexed_accounts: Vec<String> = redis::cmd("ZRANGE")
+        .arg(index_key)
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut connection)
+        .await
+        .expect("read active cooldown index");
+    assert_eq!(indexed_accounts, [cooldown.provider_account_id]);
+}
+
+#[tokio::test]
+async fn credential_cooldown_rejects_older_revision_and_fences_invalidation() {
+    let Some((repository, _connection, _namespace)) = repository().await else {
+        return;
+    };
+    let current = cooldown("acct_cooldown_revision", 2, 30);
+    let stale = cooldown("acct_cooldown_revision", 1, 60);
+    repository
+        .cache_credential_cooldown(&current)
+        .await
+        .expect("cache current cooldown");
+
+    assert!(
+        !repository
+            .cache_credential_cooldown(&stale)
+            .await
+            .expect("reject stale cooldown")
+    );
+    assert!(
+        !repository
+            .invalidate_credential_cooldown(
+                &current.provider_account_id,
+                Revision::new(1).expect("positive revision"),
+            )
+            .await
+            .expect("fence stale invalidation")
+    );
+    assert!(
+        repository
+            .invalidate_credential_cooldown(
+                &current.provider_account_id,
+                current.credential_revision,
+            )
+            .await
+            .expect("invalidate current cooldown")
+    );
+    assert_eq!(
+        repository
+            .read_credential_cooldown(&current.provider_account_id)
+            .await
+            .expect("read invalidated cooldown"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn credential_cooldown_same_revision_only_extends_deadline() {
+    let Some((repository, _connection, _namespace)) = repository().await else {
+        return;
+    };
+    let initial = cooldown("acct_cooldown_extend", 3, 30);
+    let shorter = CredentialCooldown {
+        cooldown_until: initial.cooldown_until - Duration::seconds(5),
+        ..initial.clone()
+    };
+    let longer = CredentialCooldown {
+        cooldown_until: initial.cooldown_until + Duration::seconds(5),
+        ..initial.clone()
+    };
+    repository
+        .cache_credential_cooldown(&initial)
+        .await
+        .expect("cache initial cooldown");
+
+    assert!(
+        !repository
+            .cache_credential_cooldown(&shorter)
+            .await
+            .expect("reject shorter cooldown")
+    );
+    assert!(
+        repository
+            .cache_credential_cooldown(&longer)
+            .await
+            .expect("extend cooldown")
+    );
+    assert_eq!(
+        repository
+            .read_credential_cooldown(&initial.provider_account_id)
+            .await
+            .expect("read extended cooldown"),
+        Some(longer)
+    );
+}
+
+#[tokio::test]
+async fn credential_cooldown_read_removes_expired_grace_key() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let (seconds, microseconds): (i64, i64) = redis::cmd("TIME")
+        .query_async(&mut connection)
+        .await
+        .expect("read Redis time");
+    let now_ms = seconds * 1_000 + microseconds / 1_000;
+    let cooldown = CredentialCooldown {
+        provider_account_id: "acct_cooldown_expiry".to_owned(),
+        credential_revision: Revision::new(1).expect("positive revision"),
+        cooldown_until: DateTime::from_timestamp_millis(now_ms + 30_000).unwrap(),
+        kind: ProviderCooldownKind::RateLimit,
+    };
+    assert!(
+        repository
+            .cache_credential_cooldown(&cooldown)
+            .await
+            .expect("cache cooldown")
+    );
+    let keys = namespace_keys(&mut connection, &namespace).await;
+    let cooldown_key = keys
+        .iter()
+        .find(|key| key.ends_with(":cooldown"))
+        .expect("cooldown grace key");
+    let index_key = keys
+        .iter()
+        .find(|key| key.ends_with(":account:active-cooldowns"))
+        .expect("active cooldown index");
+    // 把逻辑期限设为已过期并保留实体 TTL，确保由读取路径清理 grace key
+    let (new_fields, new_members, ttl): (i64, i64, i64) = redis::pipe()
+        .atomic()
+        .cmd("HSET")
+        .arg(cooldown_key)
+        .arg("until_ms")
+        .arg(now_ms - 1)
+        .cmd("ZADD")
+        .arg(index_key)
+        .arg(now_ms - 1)
+        .arg(&cooldown.provider_account_id)
+        .cmd("PTTL")
+        .arg(cooldown_key)
+        .query_async(&mut connection)
+        .await
+        .expect("expire existing cooldown within its grace TTL");
+    assert_eq!(new_fields, 0, "expiry field already exists");
+    assert_eq!(new_members, 0, "account is already indexed");
+    assert!(ttl > 0, "expired cooldown still has a grace key");
+
+    assert_eq!(
+        repository
+            .read_credential_cooldown(&cooldown.provider_account_id)
+            .await
+            .expect("read expired cooldown"),
+        None
+    );
+    assert!(namespace_keys(&mut connection, &namespace).await.is_empty());
+}
+
+#[tokio::test]
+async fn scoped_cooldown_isolated_by_model_and_revision_fenced() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let account_id = ProviderAccountId::new("acct_scoped_cooldown").expect("valid account ID");
+    let revision = CredentialRevision::new(2).expect("positive revision");
+    let model_a = ProviderCooldownScope::upstream_model(
+        gateway_core::routing::UpstreamModelId::new("grok-4.5").expect("model"),
+    );
+    let model_b = ProviderCooldownScope::upstream_model(
+        gateway_core::routing::UpstreamModelId::new("grok-4.6").expect("model"),
+    );
+    let until_a: SystemTime = millisecond_precision(Utc::now() + Duration::seconds(30)).into();
+    let until_b: SystemTime = millisecond_precision(Utc::now() + Duration::seconds(60)).into();
+
+    assert!(
+        repository
+            .put_scoped_if_later(ProviderScopedCooldown::new(
+                account_id.clone(),
+                revision,
+                model_a.clone(),
+                until_a,
+            ))
+            .await
+            .expect("cache model A cooldown")
+    );
+    assert!(
+        !repository
+            .put_scoped_if_later(ProviderScopedCooldown::new(
+                account_id.clone(),
+                CredentialRevision::new(1).expect("stale revision"),
+                model_a.clone(),
+                until_b,
+            ))
+            .await
+            .expect("reject stale model A cooldown")
+    );
+    assert!(
+        repository
+            .put_scoped_if_later(ProviderScopedCooldown::new(
+                account_id.clone(),
+                revision,
+                model_b.clone(),
+                until_b,
+            ))
+            .await
+            .expect("cache model B cooldown")
+    );
+    assert_eq!(
+        repository
+            .read_scoped(&account_id, &model_a)
+            .await
+            .expect("read model A cooldown")
+            .expect("model A cooldown")
+            .until(),
+        until_a
+    );
+    assert_eq!(
+        repository
+            .read_scoped(&account_id, &model_b)
+            .await
+            .expect("read model B cooldown")
+            .expect("model B cooldown")
+            .until(),
+        until_b
+    );
+    assert!(
+        !repository
+            .clear_scoped(
+                &account_id,
+                &model_a,
+                CredentialRevision::new(1).expect("stale revision"),
+            )
+            .await
+            .expect("fence stale model A invalidation")
+    );
+    assert!(
+        repository
+            .clear_scoped(&account_id, &model_a, revision)
+            .await
+            .expect("clear model A cooldown")
+    );
+    assert!(
+        repository
+            .read_scoped(&account_id, &model_a)
+            .await
+            .expect("read cleared model A cooldown")
+            .is_none()
+    );
+    assert!(
+        repository
+            .read_scoped(&account_id, &model_b)
+            .await
+            .expect("read retained model B cooldown")
+            .is_some()
+    );
+    let keys = namespace_keys(&mut connection, &namespace).await;
+    assert_eq!(keys.len(), 1);
+    assert!(!keys[0].contains(account_id.as_str()));
+    assert!(!keys[0].contains(model_b.value()));
+}
+
+fn cooldown(account_id: &str, revision: u64, seconds: i64) -> CredentialCooldown {
+    CredentialCooldown {
+        provider_account_id: account_id.to_owned(),
+        credential_revision: Revision::new(revision).expect("positive revision"),
+        cooldown_until: millisecond_precision(Utc::now() + Duration::seconds(seconds)),
+        kind: ProviderCooldownKind::RateLimit,
+    }
+}
+
+#[tokio::test]
+async fn cooldown_batch_preserves_order_partial_errors_and_due_probe_freezes() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let mut accounts = (0..131)
+        .map(|index| ProviderAccountId::new(format!("acct_batch_{index}")).unwrap())
+        .collect::<Vec<_>>();
+    accounts.push(accounts[130].clone());
+    repository
+        .cache_credential_cooldown(&cooldown(accounts[1].as_str(), 1, 60))
+        .await
+        .unwrap();
+    let bad_type_key = namespace_keys(&mut connection, &namespace)
+        .await
+        .into_iter()
+        .find(|key| key.ends_with(":cooldown"))
+        .unwrap();
+    redis::cmd("SET")
+        .arg(&bad_type_key)
+        .arg("invalid")
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
+    repository
+        .cache_credential_cooldown(&cooldown(accounts[2].as_str(), 2, 60))
+        .await
+        .unwrap();
+    let bad_value_key = namespace_keys(&mut connection, &namespace)
+        .await
+        .into_iter()
+        .find(|key| key.ends_with(":cooldown") && key != &bad_type_key)
+        .unwrap();
+    redis::cmd("HSET")
+        .arg(bad_value_key)
+        .arg("kind")
+        .arg("unknown")
+        .query_async::<i64>(&mut connection)
+        .await
+        .unwrap();
+    repository
+        .cache_credential_cooldown(&CredentialCooldown {
+            kind: ProviderCooldownKind::CapacityFreezeProbe,
+            ..cooldown(accounts[3].as_str(), 3, -60)
+        })
+        .await
+        .unwrap();
+    repository
+        .cache_credential_cooldown(&cooldown(accounts[130].as_str(), 4, 60))
+        .await
+        .unwrap();
+
+    assert!(repository.read_many(&[]).await.is_empty());
+    let results = repository.read_many(&accounts).await;
+    assert_eq!(results.len(), accounts.len());
+    assert!(
+        results[3]
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .kind()
+            .requires_probe()
+    );
+    assert!(results[130].as_ref().unwrap().is_some());
+    for (index, (account, result)) in accounts.iter().zip(results).enumerate() {
+        if matches!(index, 1 | 2) {
+            assert!(result.is_err(), "{index}");
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                repository.read(account).await.unwrap(),
+                "{index}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn scoped_cooldown_batch_preserves_model_revision_and_partial_errors() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let mut accounts = (0..130)
+        .map(|index| ProviderAccountId::new(format!("acct_scoped_batch_{index}")).unwrap())
+        .collect::<Vec<_>>();
+    accounts.push(accounts[129].clone());
+    let scope = ProviderCooldownScope::upstream_model(
+        gateway_core::routing::UpstreamModelId::new("gpt-test").unwrap(),
+    );
+    let other_scope = ProviderCooldownScope::upstream_model(
+        gateway_core::routing::UpstreamModelId::new("gpt-other").unwrap(),
+    );
+    let revision = CredentialRevision::new(3).unwrap();
+    let until = millisecond_precision(Utc::now() + Duration::seconds(60)).into();
+    repository
+        .put_scoped_if_later(ProviderScopedCooldown::new(
+            accounts[1].clone(),
+            revision,
+            scope.clone(),
+            until,
+        ))
+        .await
+        .unwrap();
+    let bad_key = namespace_keys(&mut connection, &namespace)
+        .await
+        .pop()
+        .unwrap();
+    redis::cmd("SET")
+        .arg(bad_key)
+        .arg("invalid")
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
+    for (account, model) in [(&accounts[2], &other_scope), (&accounts[129], &scope)] {
+        repository
+            .put_scoped_if_later(ProviderScopedCooldown::new(
+                account.clone(),
+                revision,
+                model.clone(),
+                until,
+            ))
+            .await
+            .unwrap();
+    }
+
+    assert!(repository.read_scoped_many(&[], &scope).await.is_empty());
+    let results = repository.read_scoped_many(&accounts, &scope).await;
+    assert_eq!(results.len(), accounts.len());
+    assert!(results[2].as_ref().unwrap().is_none());
+    assert_eq!(
+        results[129]
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .credential_revision(),
+        revision
+    );
+    for (index, (account, result)) in accounts.iter().zip(results).enumerate() {
+        if index == 1 {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                repository.read_scoped(account, &scope).await.unwrap(),
+                "{index}"
+            );
+        }
+    }
+}
+
+fn millisecond_precision(value: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(value.timestamp_millis()).expect("valid timestamp")
+}
+
+async fn repository() -> Option<(RedisCredentialCooldownRepository, ConnectionManager, String)> {
+    let redis_url = crate::support::test_env("CPR_TEST_REDIS_URL")?;
+    let client = redis::Client::open(redis_url).expect("valid CPR_TEST_REDIS_URL");
+    let connection = client
+        .get_connection_manager()
+        .await
+        .expect("connect test Redis");
+    let namespace = format!("gateway-store-cooldown-test-{}", Uuid::new_v4());
+    let repository = RedisCredentialCooldownRepository::new(connection.clone(), &namespace)
+        .expect("valid cooldown namespace");
+    Some((repository, connection, namespace))
+}
+
+async fn namespace_keys(connection: &mut ConnectionManager, namespace: &str) -> Vec<String> {
+    redis::cmd("KEYS")
+        .arg(format!("{namespace}:*"))
+        .query_async(connection)
+        .await
+        .expect("list isolated cooldown keys")
+}
+
+fn runtime_store(
+    repository: &RedisCredentialCooldownRepository,
+    connection: ConnectionManager,
+    namespace: &str,
+) -> gateway_store::redis::RedisAdminAccountRuntimeStore {
+    gateway_store::redis::RedisAdminAccountRuntimeStore::new(
+        repository.clone(),
+        gateway_store::redis::RedisCredentialLeaseRepository::new(connection, namespace)
+            .expect("lease repository"),
+    )
+}
+
+#[tokio::test]
+async fn capacity_freeze_survives_due_time_and_runtime_restart_until_probe_succeeds() {
+    use gateway_admin::ports::store::AccountRuntimeStore as _;
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let frozen = CredentialCooldown {
+        kind: ProviderCooldownKind::CapacityFreezeProbe,
+        cooldown_until: millisecond_precision(Utc::now() - Duration::seconds(90)),
+        ..cooldown("acct_probe_due", 1, 30)
+    };
+    repository
+        .cache_credential_cooldown(&frozen)
+        .await
+        .expect("write due freeze");
+    let runtime = runtime_store(&repository, connection.clone(), &namespace);
+    let snapshot = runtime.active_rate_limits().await.unwrap_or_else(|error| {
+        // 来源默认不参与 Debug；只输出错误类别，保留诊断线索且不展开连接信息
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        while let Some(cause) = source {
+            if let Some(redis_error) = cause.downcast_ref::<redis::RedisError>() {
+                panic!(
+                    "status snapshot: Redis {:?}, timeout={}",
+                    redis_error.kind(),
+                    redis_error.is_timeout()
+                );
+            }
+            source = cause.source();
+        }
+        panic!("status snapshot: {error}");
+    });
+    assert!(snapshot.cooldown[&frozen.provider_account_id].is_active(SystemTime::now()));
+    let scoped = runtime
+        .account_rate_limits(&[frozen.provider_account_id.clone(), "acct_absent".to_owned()])
+        .await
+        .expect("scoped cooldown snapshot");
+    assert_eq!(scoped.cooldown.len(), 1);
+    assert!(scoped.cooldown[&frozen.provider_account_id].is_active(SystemTime::now()));
+    assert!(scoped.in_flight.is_none());
+    assert!(
+        runtime
+            .account_rate_limits(&["acct_absent".to_owned()])
+            .await
+            .unwrap()
+            .cooldown
+            .is_empty()
+    );
+    assert!(
+        snapshot.cooldown[&frozen.provider_account_id]
+            .kind
+            .requires_probe()
+    );
+    let key = namespace_keys(&mut connection, &namespace)
+        .await
+        .into_iter()
+        .find(|key| key.ends_with(":error-protection"))
+        .expect("freeze key");
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(key)
+        .query_async(&mut connection)
+        .await
+        .expect("TTL");
+    assert_eq!(
+        ttl, -1,
+        "awaiting probe must not expire while worker is unavailable"
+    );
+    drop(runtime);
+    let restarted = runtime_store(&repository, connection, &namespace);
+    let freezes = restarted
+        .active_freezes()
+        .await
+        .expect("due freezes after restart");
+    assert_eq!(freezes.len(), 1);
+    assert!(
+        restarted
+            .finish_freeze(
+                &frozen.provider_account_id,
+                &freezes[&frozen.provider_account_id],
+                None
+            )
+            .await
+            .expect("probe completion")
+    );
+    assert!(
+        repository
+            .read_credential_cooldown(&frozen.provider_account_id)
+            .await
+            .expect("read")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn stale_probe_cannot_recreate_manual_recovery_or_clear_or_extend_new_freeze() {
+    use gateway_admin::ports::store::AccountRuntimeStore as _;
+    let Some((repository, connection, namespace)) = repository().await else {
+        return;
+    };
+    let frozen = CredentialCooldown {
+        kind: ProviderCooldownKind::CapacityFreezeProbe,
+        ..cooldown("acct_probe_generation", 1, 30)
+    };
+    let runtime = runtime_store(&repository, connection, &namespace);
+    repository
+        .cache_credential_cooldown(&frozen)
+        .await
+        .expect("freeze");
+    let original =
+        runtime.active_freezes().await.expect("snapshot")[&frozen.provider_account_id].clone();
+    repository
+        .delete_account_cooldowns(&frozen.provider_account_id)
+        .await
+        .expect("manual recovery");
+    let postponed = Utc::now() + Duration::hours(2);
+    assert!(
+        !runtime
+            .finish_freeze(&frozen.provider_account_id, &original, Some(postponed))
+            .await
+            .expect("stale failure")
+    );
+    assert!(
+        repository
+            .read_credential_cooldown(&frozen.provider_account_id)
+            .await
+            .expect("read")
+            .is_none()
+    );
+    // 同凭据版本、相同截止时间的新冻结仍必须视为不同代次
+    repository
+        .cache_credential_cooldown(&frozen)
+        .await
+        .expect("new freeze");
+    assert!(
+        !runtime
+            .finish_freeze(&frozen.provider_account_id, &original, None)
+            .await
+            .expect("stale success")
+    );
+    assert!(
+        !runtime
+            .finish_freeze(&frozen.provider_account_id, &original, Some(postponed))
+            .await
+            .expect("stale failure")
+    );
+    let current =
+        runtime.active_freezes().await.expect("new snapshot")[&frozen.provider_account_id].clone();
+    assert_ne!(current.generation, original.generation);
+    assert!(
+        runtime
+            .finish_freeze(&frozen.provider_account_id, &current, Some(postponed))
+            .await
+            .expect("postpone current freeze")
+    );
+    assert!(
+        !runtime
+            .finish_freeze(&frozen.provider_account_id, &current, None)
+            .await
+            .expect("result from previous probe cycle")
+    );
+    let extended = runtime.active_freezes().await.expect("extended snapshot")
+        [&frozen.provider_account_id]
+        .clone();
+    assert!(extended.until >= current.until);
+    assert!(
+        runtime
+            .finish_freeze(&frozen.provider_account_id, &extended, None)
+            .await
+            .expect("recover current cycle")
+    );
+}
+
+fn protection_policy(threshold: u32) -> gateway_core::account::AccountErrorProtection {
+    serde_json::from_value(serde_json::json!({"enabled":true,"threshold":threshold,"windowSeconds":60,"durationSeconds":300,"probeEnabled":true,"probeModel":"probe-snapshot","rules":[{"id":"custom","name":"自定义拒绝","conditions":[{"field":"code","operator":"equals","values":["arbitrary_rejection"],"ignoreCase":false}]}]})).unwrap()
+}
+
+async fn protection_guard(
+    repository: &RedisCredentialCooldownRepository,
+    id: &ProviderAccountId,
+    revision: u64,
+    policy: &gateway_core::account::AccountErrorProtection,
+    policy_revision: u64,
+) -> gateway_core::provider_ports::AccountProtectionGuard {
+    repository
+        .begin_protection(
+            id,
+            CredentialRevision::new(revision).unwrap(),
+            &policy.fingerprint(),
+            gateway_core::routing::ConfigRevision::new(policy_revision).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("active protection guard")
+}
+
+fn matched() -> Vec<gateway_core::account::AccountProtectionMatch> {
+    vec![gateway_core::account::AccountProtectionMatch {
+        id: "custom".into(),
+        name: "自定义拒绝".into(),
+    }]
+}
+
+#[tokio::test]
+async fn protection_threshold_is_atomic_and_recovery_preserves_later_rate_limit() {
+    use gateway_admin::ports::store::AccountRuntimeStore;
+    let Some((repository, connection, namespace)) = repository().await else {
+        return;
+    };
+    let policy = protection_policy(2);
+    repository
+        .publish_protection_policy(
+            &policy,
+            gateway_core::routing::ConfigRevision::new(1).unwrap(),
+        )
+        .await
+        .unwrap();
+    let id = ProviderAccountId::new("acct_custom").unwrap();
+    let a = protection_guard(&repository, &id, 1, &policy, 1).await;
+    let b = protection_guard(&repository, &id, 1, &policy, 1).await;
+    let matches = matched();
+    let (one, two) = tokio::join!(
+        repository.record_protection_failure(&a, &policy, &matches),
+        repository.record_protection_failure(&b, &policy, &matches)
+    );
+    assert_ne!(one.unwrap(), two.unwrap());
+    let runtime = runtime_store(&repository, connection, &namespace);
+    let snapshot = runtime
+        .active_freezes()
+        .await
+        .unwrap()
+        .remove(id.as_str())
+        .unwrap();
+    assert_eq!(snapshot.protection_rules, matches);
+    assert_eq!(snapshot.duration_seconds, Some(300));
+    assert_eq!(snapshot.probe_model.as_deref(), Some("probe-snapshot"));
+    assert!(
+        !repository
+            .record_protection_failure(&a, &policy, &matches)
+            .await
+            .unwrap()
+    );
+    repository
+        .clear_after_success(&id, CredentialRevision::new(1).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .read(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .kind()
+            .is_error_protection()
+    );
+    let rate = cooldown(id.as_str(), 1, 600);
+    assert!(repository.cache_credential_cooldown(&rate).await.unwrap());
+    assert!(
+        runtime
+            .finish_freeze(id.as_str(), &snapshot, None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repository
+            .read_credential_cooldown(id.as_str())
+            .await
+            .unwrap(),
+        Some(rate)
+    );
+    assert!(
+        !runtime
+            .finish_freeze(id.as_str(), &snapshot, None)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn scheduling_cooldown_does_not_depend_on_protection_display_details() {
+    use gateway_admin::ports::store::AccountRuntimeStore;
+
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let policy = protection_policy(2);
+    repository
+        .publish_protection_policy(
+            &policy,
+            gateway_core::routing::ConfigRevision::new(1).unwrap(),
+        )
+        .await
+        .unwrap();
+    let id = ProviderAccountId::new("acct_display_details").unwrap();
+    let guard = protection_guard(&repository, &id, 1, &policy, 1).await;
+    repository
+        .record_protection_failure(&guard, &policy, &matched())
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .record_protection_failure(&guard, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    let expected = repository.read(&id).await.unwrap().unwrap();
+    let key = namespace_keys(&mut connection, &namespace)
+        .await
+        .into_iter()
+        .find(|key| key.ends_with(":error-protection"))
+        .unwrap();
+
+    // 管理展示快照损坏不能让调度丢失已生效的冻结事实
+    redis::cmd("HSET")
+        .arg(key)
+        .arg("rules")
+        .arg("invalid display snapshot")
+        .query_async::<i64>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(repository.read(&id).await.unwrap(), Some(expected));
+    let runtime = runtime_store(&repository, connection, &namespace);
+    assert!(runtime.account_runtime(&[id.to_string()]).await.is_err());
+}
+
+#[tokio::test]
+async fn protection_feedback_is_fenced_by_success_manual_recovery_and_policy_revision() {
+    let Some((repository, _, _)) = repository().await else {
+        return;
+    };
+    let policy = protection_policy(2);
+    let revision = gateway_core::routing::ConfigRevision::new(1).unwrap();
+    repository
+        .publish_protection_policy(&policy, revision)
+        .await
+        .unwrap();
+    let id = ProviderAccountId::new("acct_fenced").unwrap();
+    let before_failure = protection_guard(&repository, &id, 1, &policy, 1).await;
+    let failure = protection_guard(&repository, &id, 1, &policy, 1).await;
+    assert!(
+        !repository
+            .record_protection_failure(&failure, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .record_protection_success(&before_failure)
+            .await
+            .unwrap()
+    );
+    let success = protection_guard(&repository, &id, 1, &policy, 1).await;
+    assert!(
+        repository
+            .record_protection_success(&success)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .record_protection_failure(&failure, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    let before_manual = protection_guard(&repository, &id, 1, &policy, 1).await;
+    repository
+        .clear(&id, CredentialRevision::new(1).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !repository
+            .record_protection_failure(&before_manual, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    let old_a = protection_guard(&repository, &id, 1, &policy, 1).await;
+    // 同一策略的发布不推进代次；专属版本变化则即使内容相同也拒绝旧快照
+    repository
+        .publish_protection_policy(&policy, revision)
+        .await
+        .unwrap();
+    assert!(
+        !repository
+            .record_protection_failure(&old_a, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    repository
+        .publish_protection_policy(
+            &policy,
+            gateway_core::routing::ConfigRevision::new(3).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !repository
+            .record_protection_failure(&old_a, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    assert!(
+        repository
+            .begin_protection(
+                &id,
+                CredentialRevision::new(1).unwrap(),
+                &policy.fingerprint(),
+                revision
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let new_a = protection_guard(&repository, &id, 1, &policy, 3).await;
+    assert!(
+        !repository
+            .record_protection_failure(&new_a, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    let second = protection_guard(&repository, &id, 1, &policy, 3).await;
+    assert!(
+        repository
+            .record_protection_failure(&second, &policy, &matched())
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn credential_rotation_and_redis_state_loss_reject_old_protection_feedback() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let policy = protection_policy(2);
+    repository
+        .publish_protection_policy(
+            &policy,
+            gateway_core::routing::ConfigRevision::new(1).unwrap(),
+        )
+        .await
+        .unwrap();
+    let id = ProviderAccountId::new("acct_rotated").unwrap();
+    let old = protection_guard(&repository, &id, 1, &policy, 1).await;
+    let new = protection_guard(&repository, &id, 2, &policy, 1).await;
+    assert!(
+        !repository
+            .record_protection_failure(&old, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .record_protection_failure(&new, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    let state = namespace_keys(&mut connection, &namespace)
+        .await
+        .into_iter()
+        .find(|key| key.ends_with(":error-protection-state"))
+        .unwrap();
+    redis::cmd("DEL")
+        .arg(state)
+        .query_async::<i64>(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        !repository
+            .record_protection_failure(&new, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    let recovered = protection_guard(&repository, &id, 2, &policy, 1).await;
+    assert_ne!(recovered.reset_generation, new.reset_generation);
+    assert!(
+        !repository
+            .record_protection_failure(&recovered, &policy, &matched())
+            .await
+            .unwrap()
+    );
+    assert!(repository.read(&id).await.unwrap().is_none());
+}

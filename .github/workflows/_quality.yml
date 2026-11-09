@@ -1,0 +1,261 @@
+name: Quality
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact commit SHA to validate
+        required: true
+        type: string
+      run_backend:
+        description: Run backend quality checks
+        required: false
+        default: true
+        type: boolean
+      run_frontend:
+        description: Run frontend quality checks
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    if: inputs.run_backend
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: '1'
+      # 编译 AWS SDK 调试信息需要更大的 codegen 线程栈
+      RUST_MIN_STACK: 16777216
+      CPR_TEST_DATABASE_URL: postgres://codex_proxy:codex_proxy@127.0.0.1:5432/codex_proxy
+      CPR_TEST_REDIS_URL: redis://127.0.0.1:6379
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc
+        env:
+          POSTGRES_DB: codex_proxy
+          POSTGRES_USER: codex_proxy
+          POSTGRES_PASSWORD: codex_proxy
+          POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codex_proxy -d codex_proxy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8-alpine@sha256:0bf6577d7774e592b29d093e3ac9390eb91e13d72c21e506afce736de5e0eeb0
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          # PR 场景需要 base 提交做冻结清单的 append-only 比对。
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+
+      # 已应用迁移的字节被 sqlx 启动校验钉死：改动已发布迁移会让所有
+      # 存量部署重启即失败。冻结清单保证旧文件不被改、新文件必须入册。
+      - name: Migration freeze check
+        working-directory: backend/migrations
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict .frozen-sha256
+          for file in *.sql; do
+            if ! awk '{print $2}' .frozen-sha256 | grep -Fxq "$file"; then
+              echo "::error file=backend/migrations/$file::migration $file is not frozen; append its sha256 to backend/migrations/.frozen-sha256"
+              exit 1
+            fi
+          done
+          # 清单自证不足以防「改迁移 + 同 PR 刷新清单行」：校验对新哈希通过。
+          # 对 PR，断言 .frozen-sha256 相对 base 只增不改——base 里的每一行
+          # 必须原样保留（改哈希＝删行，删迁移＝删行，都会被挡）。
+          if [ -n "${BASE_SHA:-}" ]; then
+            base_manifest="$(git show "${BASE_SHA}:backend/migrations/.frozen-sha256" 2>/dev/null || true)"
+            if [ -n "$base_manifest" ]; then
+              while IFS= read -r line; do
+                [ -z "$line" ] && continue
+                if ! grep -Fxq "$line" .frozen-sha256; then
+                  file="$(printf '%s' "$line" | awk '{print $2}')"
+                  echo "::error file=backend/migrations/.frozen-sha256::frozen migration $file was modified or removed; released migrations are append-only — add a new numbered migration instead"
+                  exit 1
+                fi
+              done <<< "$base_manifest"
+            fi
+          fi
+
+      - name: Read build toolchains
+        id: toolchains
+        run: ruby .github/scripts/toolchains.rb >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ steps.toolchains.outputs.rust }}
+          components: rustfmt,clippy
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: backend -> target
+          shared-key: quality
+          cache-bin: false
+          save-if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
+      - name: Rust format
+        working-directory: backend
+        run: cargo fmt --check
+
+      - name: Rust clippy
+        working-directory: backend
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Setup nextest
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-nextest@0.9.143
+          fallback: none
+
+      - name: Build Rust tests once
+        working-directory: backend
+        run: |
+          cargo metadata --format-version 1 --locked > "$RUNNER_TEMP/nextest-cargo-metadata.json"
+          cargo nextest list --test main --locked --timings --list-type binaries-only --message-format json \
+            > "$RUNNER_TEMP/nextest-binaries.json"
+
+      - name: Configure PostgreSQL and Redis test authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          postgres_password="$(openssl rand -hex 24)"
+          redis_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$postgres_password"
+          echo "::add-mask::$redis_password"
+          docker exec --env PGPASSWORD=codex_proxy "${{ job.services.postgres.id }}" psql \
+            --username=codex_proxy --dbname=codex_proxy \
+            --set=ON_ERROR_STOP=1 \
+            --command="ALTER USER codex_proxy WITH PASSWORD '${postgres_password}'" >/dev/null
+          docker exec --env PGPASSWORD="$postgres_password" "${{ job.services.postgres.id }}" psql \
+            --username=codex_proxy --dbname=codex_proxy \
+            --set=ON_ERROR_STOP=1 --command='SELECT 1' >/dev/null
+          docker exec "${{ job.services.redis.id }}" redis-cli CONFIG SET requirepass "$redis_password" >/dev/null
+          docker exec "${{ job.services.redis.id }}" redis-cli --no-auth-warning -a "$redis_password" ping >/dev/null
+          {
+            echo "CPR_TEST_DATABASE_URL=postgres://codex_proxy:${postgres_password}@127.0.0.1:5432/codex_proxy"
+            echo "CPR_TEST_REDIS_URL=redis://:${redis_password}@127.0.0.1:6379"
+          } >> "$GITHUB_ENV"
+
+      - name: Expose matching PostgreSQL backup and restore tools
+        shell: bash
+        env:
+          CPR_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          client_dir="$RUNNER_TEMP/pg-client"
+          mkdir -p "$client_dir"
+          for tool in pg_dump psql; do
+            printf '#!/bin/sh\nexec docker exec -i --env PGPASSWORD "%s" %s "$@"\n' "$CPR_TEST_POSTGRES_CONTAINER" "$tool" > "$client_dir/$tool"
+            chmod +x "$client_dir/$tool"
+          done
+          echo "$client_dir" >> "$GITHUB_PATH"
+
+      - name: Rust tests
+        working-directory: backend
+        run: |
+          printf '[profile.ci.junit]\npath = "junit.xml"\n' > "$RUNNER_TEMP/nextest-ci.toml"
+          cargo nextest run --config-file "$RUNNER_TEMP/nextest-ci.toml" \
+            --cargo-metadata "$RUNNER_TEMP/nextest-cargo-metadata.json" \
+            --binaries-metadata "$RUNNER_TEMP/nextest-binaries.json" \
+            --test-threads 8 --no-tests fail --profile ci
+
+      - name: Upload test and build reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-quality-reports
+          path: |
+            backend/target/nextest/ci/junit.xml
+            backend/target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Store tests with Redis ACL authentication
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis_acl_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$redis_acl_password"
+          docker exec "${{ job.services.redis.id }}" redis-cli -e --no-auth-warning \
+            -u "$CPR_TEST_REDIS_URL" --user default ACL SETUSER cpr_acl reset on \
+            ">$redis_acl_password" '~*' '&*' '+@all' >/dev/null
+          docker exec --env REDISCLI_AUTH="$redis_acl_password" "${{ job.services.redis.id }}" \
+            redis-cli -e --user cpr_acl ACL SETUSER default off >/dev/null
+          export CPR_TEST_REDIS_URL="redis://cpr_acl:${redis_acl_password}@127.0.0.1:6379"
+          # 从同一份构建清单选择 Redis 测试，保留 workspace 特性图且不重复运行 PostgreSQL
+          cargo nextest run \
+            --cargo-metadata "$RUNNER_TEMP/nextest-cargo-metadata.json" \
+            --binaries-metadata "$RUNNER_TEMP/nextest-binaries.json" \
+            --test-threads 8 --no-tests fail -E 'package(=gateway-store) & test(/^redis::/)'
+
+  frontend:
+    if: inputs.run_frontend
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      CI: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Validate and build frontend
+        uses: ./.github/actions/build-frontend
+
+  workflow-lint:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      # GitHub 已支持 queue: max，actionlint 尚未支持该字段
+      # https://github.com/rhysd/actionlint/issues/657
+      # GitHub 已提供 ubuntu-26.04，actionlint 尚未收录该标签
+      # https://github.com/actions/runner-images#available-images
+      - name: Lint GitHub Actions workflows
+        run: >-
+          docker run --rm
+          --volume "$PWD:/repo"
+          --workdir /repo
+          rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+          -color
+          -ignore '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'
+          -ignore '^label "ubuntu-26\.04" is unknown\.'
+          .github/workflows/*.yml
+
+      - name: Check workflow script syntax
+        run: |
+          bash -n release/publish
+          shopt -s globstar nullglob
+          for script in .github/**/*.sh; do bash -n "$script"; done
+          for script in .github/scripts/*.rb; do ruby -c "$script"; done
+          ruby .github/scripts/toolchains.rb
+          ruby -c backend/crates/gateway-plugin/runtime/plugin-api-lifecycle.rb

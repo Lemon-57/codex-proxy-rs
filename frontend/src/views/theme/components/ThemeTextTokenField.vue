@@ -1,0 +1,46 @@
+<script setup lang="ts">
+import { ZIconButton, ZInput } from '@codex-proxy/ui'
+
+import { RotateCcw } from '@lucide/vue'
+
+import { useI18n } from 'vue-i18n'
+
+defineProps<{
+  label: string
+  token: string
+  value: string
+  overridden: boolean
+}>()
+
+const emit = defineEmits<{
+  change: [value: string]
+  reset: []
+}>()
+
+const { t } = useI18n({ useScope: 'global' })
+</script>
+
+<template>
+  <div class="grid gap-2 rounded-z-lg bg-z-fill-quaternary px-3 py-3">
+    <div class="flex items-center justify-between gap-3">
+      <div class="min-w-0">
+        <strong class="text-z-sm font-bold text-z-text">{{ label }}</strong>
+        <code class="mt-1 block truncate font-mono text-[10px] text-z-text-quaternary">{{ token }}</code>
+      </div>
+      <ZIconButton
+        v-if="overridden"
+        :aria-label="t('appearance.color.restoreDerivedValue')"
+        size="small"
+        @click="emit('reset')"
+      >
+        <RotateCcw class="size-3.5" />
+      </ZIconButton>
+    </div>
+    <ZInput
+      :model-value="value"
+      :aria-label="label"
+      class="font-mono"
+      @update:model-value="emit('change', $event)"
+    />
+  </div>
+</template>

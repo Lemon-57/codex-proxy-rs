@@ -1,0 +1,65 @@
+[workspace]
+members = [
+    "apps/gateway",
+    "apps/plugin-cli",
+    "crates/gateway-admin",
+    "crates/gateway-api",
+    "crates/gateway-core",
+    "crates/gateway-host",
+    "crates/gateway-plugin/runtime",
+    "crates/gateway-plugin/sdk",
+    "crates/gateway-protocol",
+    "crates/gateway-store",
+    "crates/providers/openai",
+    "crates/providers/xai",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+rust-version = "1.99.1"
+
+[workspace.lints.rust]
+warnings = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = 10 }
+redundant_clone = { level = "deny", priority = 9 }
+large_enum_variant = { level = "warn", priority = 8 }
+needless_collect = { level = "deny", priority = 7 }
+
+[profile.dev]
+debug = true
+
+# 测试保留真实密码参数和压缩数据量，优化热点依赖以减少 fixture 的计算开销。
+# test 继承 dev；workspace 代码仍保留默认调试与溢出检查。
+[profile.dev.package.argon2]
+opt-level = 2
+
+[profile.dev.package.blake2]
+opt-level = 2
+
+[profile.dev.package."sha2@0.11.1"]
+opt-level = 2
+
+[profile.dev.package."miniz_oxide@0.9.1"]
+opt-level = 2
+
+# workspace 的 WebSocket deflate 特性会让 flate2 选用 zlib-rs
+[profile.dev.package.zlib-rs]
+opt-level = 2
+
+[profile.release]
+debug = false
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[patch.crates-io]
+# 固定上游 BEGIN 取消回滚修复，避免未结束事务复用；见 transact-rs/sqlx#4394
+sqlx = { git = "https://github.com/transact-rs/sqlx", rev = "f1e94ec34dd5f11ad6488a3a8ac7988439a3f757" }

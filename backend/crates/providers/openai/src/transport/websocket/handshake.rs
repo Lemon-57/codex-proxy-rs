@@ -1,0 +1,475 @@
+//! Responses WebSocket endpoint、opening handshake 与首帧发送
+
+use std::time::Duration;
+
+use bytes::Bytes;
+use gateway_core::error::ProxyConnectionHint;
+use gateway_protocol::openai::events;
+use tokio::{io::BufWriter, time::timeout};
+use tokio_tungstenite::{
+    Connector, MaybeTlsStream, client_async_tls_with_config, connect_async_tls_with_config,
+};
+use tungstenite::{
+    self, Message,
+    extensions::{ExtensionsConfig, compression::deflate::DeflateConfig},
+    handshake::client::Request as WsRequest,
+    http::Response as WsResponse,
+    protocol::WebSocketConfig,
+};
+
+use crate::{
+    transport::protocol::{
+        responses::CodexResponsesRequest, websocket::websocket_response_create_payload_text,
+    },
+    transport::{
+        client::CodexClientVisibleUpstreamResponse, diagnostics::CodexUpstreamSendPhase,
+        endpoints::CODEX_RESPONSES_PATH, response_meta, tls,
+    },
+};
+
+use super::{
+    error::CodexWebSocketExchangeError,
+    model::{CodexWebSocketConnection, CodexWebSocketRequest, WebSocketContinuationRequirement},
+    pool::CodexWebSocketConnectionMetadata,
+    pump::{PumpLogContext, PumpedWebSocket, RawWsStream},
+};
+
+use super::control::WEBSOCKET_SEND_TIMEOUT;
+
+const WEBSOCKET_EXTENSIONS: &str = "permessage-deflate; client_max_window_bits";
+const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+impl CodexWebSocketConnection {
+    /// 复用传输库的握手编码检查，不能在拨号后才发现插件输出不可表示
+    pub(crate) fn validate_prepared_opening(&mut self) -> Result<(), tungstenite::Error> {
+        let mut offers = self
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-extensions"));
+        self.permessage_deflate = match (offers.next(), offers.next()) {
+            (None, None) => false,
+            (Some((_, value)), None) if value == WEBSOCKET_EXTENSIONS => true,
+            // 锁定的客户端按配置生成 offer，不支持任意原始扩展声明
+            _ => {
+                return Err(tungstenite::Error::Protocol(
+                    tungstenite::error::ProtocolError::InvalidHeader(
+                        tungstenite::http::HeaderName::from_static("sec-websocket-extensions")
+                            .into(),
+                    ),
+                ));
+            }
+        };
+        tungstenite::handshake::client::generate_request(
+            websocket_handshake_request(self)?,
+            Some(&websocket_config(self).extensions),
+        )?;
+        Ok(())
+    }
+
+    /// 构造 Responses WebSocket 连接描述
+    pub fn responses(
+        base_url: &str,
+        websocket_key: &str,
+        business_headers: Vec<(String, String)>,
+    ) -> Self {
+        let endpoint = responses_websocket_endpoint(base_url);
+        let mut headers = Vec::new();
+        if let Some(host) = websocket_host_header(&endpoint) {
+            headers.push(("Host".to_string(), host));
+        }
+        headers.extend([
+            ("Connection".to_string(), "Upgrade".to_string()),
+            ("Upgrade".to_string(), "websocket".to_string()),
+            ("Sec-WebSocket-Version".to_string(), "13".to_string()),
+            ("Sec-WebSocket-Key".to_string(), websocket_key.to_string()),
+        ]);
+        headers.extend(business_headers);
+        headers.push((
+            "sec-websocket-extensions".to_string(),
+            WEBSOCKET_EXTENSIONS.to_string(),
+        ));
+        Self {
+            endpoint,
+            headers,
+            permessage_deflate: true,
+            outbound_proxy: None,
+            connection_budget: None,
+        }
+    }
+
+    /// 构造 Responses WebSocket opening 与首个 `response.create` 文本帧
+    pub fn responses_create_request(
+        base_url: &str,
+        websocket_key: &str,
+        business_headers: Vec<(String, String)>,
+        request: &CodexResponsesRequest,
+    ) -> Result<CodexWebSocketRequest, serde_json::Error> {
+        Self::responses_create_request_for_path(
+            base_url,
+            CODEX_RESPONSES_PATH,
+            websocket_key,
+            business_headers,
+            request,
+        )
+    }
+
+    pub(crate) fn responses_create_request_for_path(
+        base_url: &str,
+        path: &str,
+        websocket_key: &str,
+        business_headers: Vec<(String, String)>,
+        request: &CodexResponsesRequest,
+    ) -> Result<CodexWebSocketRequest, serde_json::Error> {
+        let mut connection = Self::responses(base_url, websocket_key, business_headers);
+        let endpoint = crate::transport::endpoint_url(base_url, path);
+        connection.endpoint = endpoint
+            .replacen("https://", "wss://", 1)
+            .replacen("http://", "ws://", 1);
+        Ok(CodexWebSocketRequest {
+            connection,
+            payload_text: websocket_response_create_payload_text(request)?,
+            continuation: WebSocketContinuationRequirement::from_request(request),
+            codex_search_declared: (path == CODEX_RESPONSES_PATH)
+                .then(|| crate::compat::declares_hosted_search(request.body())),
+        })
+    }
+}
+
+/// 将 Codex backend base URL 转换为 Responses WebSocket endpoint
+pub fn responses_websocket_endpoint(base_url: &str) -> String {
+    let endpoint = format!("{}{}", base_url.trim_end_matches('/'), CODEX_RESPONSES_PATH);
+    if let Some(rest) = endpoint.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = endpoint.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        endpoint
+    }
+}
+
+/// Live sideband 复用同一条拨号路径；不计入请求连接预算。
+pub(super) async fn connect_sideband_websocket(
+    connection: &CodexWebSocketConnection,
+) -> Result<(RawWsStream, WsResponse<Option<Vec<u8>>>), CodexWebSocketExchangeError> {
+    connect_websocket(connection, false).await
+}
+
+pub(super) async fn connect_pumped_websocket(
+    connection: &CodexWebSocketConnection,
+    context: PumpLogContext,
+    fast_path: bool,
+    proxy_permit: Option<super::pool::ProxyConnectionPermit>,
+) -> Result<(PumpedWebSocket, WsResponse<Option<Vec<u8>>>), CodexWebSocketExchangeError> {
+    let (raw, response) = connect_websocket(connection, fast_path).await?;
+    Ok((PumpedWebSocket::new(raw, context, proxy_permit), response))
+}
+
+pub(super) async fn send_websocket_request(
+    websocket: &PumpedWebSocket,
+    payload_text: &str,
+) -> Result<(), CodexWebSocketExchangeError> {
+    timeout(
+        WEBSOCKET_SEND_TIMEOUT,
+        websocket.send(Message::Text(payload_text.to_string().into())),
+    )
+    .await
+    .map_err(|_| CodexWebSocketExchangeError::SendTimeout {
+        timeout: WEBSOCKET_SEND_TIMEOUT,
+    })??;
+    Ok(())
+}
+
+pub(super) fn websocket_connection_metadata(
+    response: &WsResponse<Option<Vec<u8>>>,
+    connection: &CodexWebSocketConnection,
+) -> CodexWebSocketConnectionMetadata {
+    CodexWebSocketConnectionMetadata {
+        routing_affinity: crate::transport::routing_affinity::ChatGptRoutingAffinity::from_response(
+            &connection.endpoint,
+            response.headers(),
+        ),
+        turn_state: response_meta::turn_state(response.headers()),
+        set_cookie_headers: response_meta::set_cookie_headers(response.headers()),
+        rate_limit_headers: response_meta::rate_limit_headers(response.headers()),
+        response_metadata: response_meta::response_metadata(response.headers()),
+        diagnostics: response_meta::diagnostics(
+            Some(response.status().as_u16()),
+            response.headers(),
+        )
+        .with_response_origin(websocket_response_origin(connection)),
+    }
+}
+
+async fn connect_websocket(
+    connection: &CodexWebSocketConnection,
+    fast_path: bool,
+) -> Result<(RawWsStream, WsResponse<Option<Vec<u8>>>), CodexWebSocketExchangeError> {
+    let request = websocket_handshake_request(connection)?;
+    let connector = tls::maybe_build_rustls_client_config_with_custom_ca()
+        .map_err(|error| CodexWebSocketExchangeError::Connect {
+            source: tungstenite::Error::Io(std::io::Error::other(error)),
+            proxy_hint: None,
+        })?
+        .map(Connector::Rustls);
+    let remaining = connection
+        .connection_budget
+        .as_ref()
+        .map(|budget| budget.begin())
+        .transpose()
+        .map_err(|error| CodexWebSocketExchangeError::Connect {
+            source: tungstenite::Error::Io(std::io::Error::other(error)),
+            proxy_hint: None,
+        })?
+        .flatten();
+    let connect_timeout = remaining.map_or(WEBSOCKET_CONNECT_TIMEOUT, |remaining| {
+        remaining.min(WEBSOCKET_CONNECT_TIMEOUT)
+    });
+    // 超时会取消拨号 future，当前阶段留给外层生成准确的代理诊断
+    let mut proxy_hint = None;
+    let result = timeout(connect_timeout, async {
+        let _permit = if fast_path {
+            crate::transport::connection::try_acquire()
+        } else {
+            crate::transport::connection::acquire().await
+        }
+        .map_err(tungstenite::Error::Io)?;
+        // 保留原生直连握手，显式出口不继承全局代理
+        if connection.outbound_proxy.is_none()
+            && matches!(
+                tungstenite::proxy::ProxyConfig::from_env(request.uri()),
+                Ok(None)
+            )
+        {
+            let (websocket, response) = connect_async_tls_with_config(
+                request,
+                Some(websocket_config(connection)),
+                false,
+                connector,
+            )
+            .await?;
+            return Ok((Box::new(websocket) as RawWsStream, response));
+        }
+        let stream = dial_account(connection, &mut proxy_hint).await?;
+        match stream {
+            MaybeTlsStream::Plain(tcp) => {
+                let (websocket, response) = client_async_tls_with_config(
+                    request,
+                    tcp,
+                    Some(websocket_config(connection)),
+                    connector,
+                )
+                .await?;
+                Ok((Box::new(websocket) as RawWsStream, response))
+            }
+            stream => {
+                let (websocket, response) = client_async_tls_with_config(
+                    request,
+                    stream,
+                    Some(websocket_config(connection)),
+                    connector,
+                )
+                .await?;
+                Ok((Box::new(websocket) as RawWsStream, response))
+            }
+        }
+    })
+    .await
+    .map_err(|_| CodexWebSocketExchangeError::ConnectTimeout {
+        timeout: connect_timeout,
+        proxy_hint,
+    })?;
+    match result {
+        Ok((websocket, response)) => Ok((websocket, response)),
+        Err(tungstenite::Error::Http(response)) => {
+            Err(websocket_opening_error(response.as_ref(), connection))
+        }
+        Err(error) => Err(CodexWebSocketExchangeError::Connect {
+            source: error,
+            proxy_hint,
+        }),
+    }
+}
+
+async fn dial_account(
+    connection: &CodexWebSocketConnection,
+    proxy_hint: &mut Option<ProxyConnectionHint>,
+) -> Result<MaybeTlsStream<tokio::net::TcpStream>, tungstenite::Error> {
+    use tokio::net::lookup_host;
+    use tungstenite::proxy::ProxyConfig;
+    let invalid =
+        || tungstenite::Error::Io(std::io::Error::other("account WebSocket egress failed"));
+    let endpoint = url::Url::parse(connection.endpoint()).map_err(|_| invalid())?;
+    let host = endpoint.host_str().ok_or_else(invalid)?;
+    let dns_host = match endpoint.host() {
+        Some(url::Host::Ipv6(ip)) => ip.to_string(),
+        _ => host.to_owned(),
+    };
+    let port = endpoint.port_or_known_default().ok_or_else(invalid)?;
+    let Some(proxy) = connection.outbound_proxy.as_ref() else {
+        return Ok(MaybeTlsStream::Plain(connect_tcp(host, port).await?));
+    };
+    *proxy_hint = Some(ProxyConnectionHint::InvalidConfiguration);
+    let mut proxy_url = url::Url::parse(proxy.expose_url()).map_err(|_| invalid())?;
+    let tls_proxy = proxy_url.scheme() == "https";
+    let proxy_port = proxy_url.port_or_known_default().ok_or_else(invalid)?;
+    if tls_proxy {
+        proxy_url.set_scheme("http").map_err(|_| invalid())?;
+        proxy_url
+            .set_port(Some(proxy_port))
+            .map_err(|_| invalid())?;
+    }
+    let config = ProxyConfig::parse(proxy_url.as_str()).map_err(|_| invalid())?;
+    let proxy_host = match proxy_url.host() {
+        Some(url::Host::Ipv6(ip)) => ip.to_string(),
+        _ => config.host.clone(),
+    };
+    *proxy_hint = Some(ProxyConnectionHint::Unreachable);
+    let tcp = connect_tcp(&proxy_host, config.port).await?;
+    let stream = if tls_proxy {
+        *proxy_hint = None;
+        let tls = tls::account_proxy_tls_config().map_err(|_| invalid())?;
+        let name = rustls_pki_types::ServerName::try_from(proxy_host).map_err(|_| invalid())?;
+        *proxy_hint = Some(ProxyConnectionHint::Unreachable);
+        MaybeTlsStream::Rustls(
+            tokio_rustls::TlsConnector::from(tls)
+                .connect(name, tcp)
+                .await?,
+        )
+    } else {
+        MaybeTlsStream::Plain(tcp)
+    };
+    // 固定的 tungstenite 分支对两种 SOCKS 协议均把域名交给代理解析
+    *proxy_hint = None;
+    let target = if proxy_url.scheme() == "socks5" {
+        lookup_host((dns_host.as_str(), port))
+            .await?
+            .next()
+            .ok_or_else(invalid)?
+            .ip()
+            .to_string()
+    } else if proxy_url.scheme() == "socks5h" {
+        dns_host
+    } else {
+        host.to_owned()
+    };
+    // 依赖分两次写入 SOCKS 方法协商，再显式 flush；部分代理会提前拒绝半包
+    // 仅在代理握手期间合并写入，不缓冲读取，也不改变后续 TLS/WS 的发送方式
+    // 这只是兼容措施，不能保证网络层不再拆分 TCP 数据
+    *proxy_hint = Some(ProxyConnectionHint::TunnelFailed);
+    let stream =
+        tokio_tungstenite::proxy::connect_via_proxy(BufWriter::new(stream), &config, &target, port)
+            .await?;
+    *proxy_hint = Some(ProxyConnectionHint::CheckProxy);
+    Ok(stream.into_inner())
+}
+
+async fn connect_tcp(host: &str, port: u16) -> Result<tokio::net::TcpStream, tungstenite::Error> {
+    use hyper_util::client::legacy::connect::HttpConnector;
+    use tower_service::Service;
+
+    // 显式直连和代理端点复用 Hyper 的 DNS 与 Happy Eyeballs 连接器
+    let authority = host.parse::<std::net::IpAddr>().map_or_else(
+        |_| format!("{host}:{port}"),
+        |ip| std::net::SocketAddr::new(ip, port).to_string(),
+    );
+    let uri = format!("http://{authority}")
+        .parse::<hyper::Uri>()
+        .map_err(|_| tungstenite::Error::Io(std::io::Error::other("invalid egress endpoint")))?;
+    let mut connector = HttpConnector::new();
+    connector
+        .call(uri)
+        .await
+        .map(|stream| stream.into_inner())
+        .map_err(|_| {
+            tungstenite::Error::Io(std::io::Error::other("account WebSocket connection failed"))
+        })
+}
+
+fn websocket_handshake_request(
+    connection: &CodexWebSocketConnection,
+) -> Result<WsRequest, tungstenite::http::Error> {
+    let mut builder = WsRequest::builder()
+        .method("GET")
+        .uri(connection.endpoint());
+    for (name, value) in connection.headers() {
+        if name.eq_ignore_ascii_case("sec-websocket-extensions") {
+            continue;
+        }
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    builder.body(())
+}
+
+fn websocket_config(connection: &CodexWebSocketConnection) -> WebSocketConfig {
+    let mut extensions = ExtensionsConfig::default();
+    extensions.permessage_deflate = connection.permessage_deflate.then(DeflateConfig::default);
+
+    let mut config = WebSocketConfig::default();
+    // 上游 Responses 事件属于 Codex 协议数据，不能沿用 tungstenite 的私有
+    // 64 MiB message / 16 MiB frame 默认限制提前中断本可继续的响应
+    config.max_message_size = None;
+    config.max_frame_size = None;
+    config.extensions = extensions;
+    config
+}
+
+fn websocket_opening_error(
+    response: &WsResponse<Option<Vec<u8>>>,
+    connection: &CodexWebSocketConnection,
+) -> CodexWebSocketExchangeError {
+    let status_code = response.status().as_u16();
+    let raw_body = response
+        .body()
+        .as_ref()
+        .map_or_else(Bytes::new, |body| Bytes::copy_from_slice(body));
+    let body = String::from_utf8_lossy(&raw_body).into_owned();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .map(|value| value.as_bytes().to_vec());
+    let client_headers = response_meta::client_headers(response.headers());
+    let retry_after_seconds = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(gateway_protocol::openai::parse_retry_after_seconds)
+        .or_else(|| events::retry_after_seconds_from_body(&body));
+    CodexWebSocketExchangeError::upstream(
+        status_code,
+        retry_after_seconds,
+        body,
+        reqwest::StatusCode::from_u16(status_code)
+            .ok()
+            .map(|status| {
+                Box::new(CodexClientVisibleUpstreamResponse::new(
+                    status,
+                    content_type,
+                    client_headers,
+                    raw_body,
+                ))
+            }),
+        response_meta::set_cookie_headers(response.headers()),
+        response_meta::diagnostics(Some(status_code), response.headers())
+            .with_response_origin(websocket_response_origin(connection)),
+        CodexUpstreamSendPhase::BeforePayload,
+    )
+}
+
+fn websocket_response_origin(connection: &CodexWebSocketConnection) -> Option<reqwest::Url> {
+    reqwest::Url::parse(
+        &connection
+            .endpoint
+            .replacen("wss://", "https://", 1)
+            .replacen("ws://", "http://", 1),
+    )
+    .ok()
+}
+
+fn websocket_host_header(endpoint: &str) -> Option<String> {
+    let url = reqwest::Url::parse(endpoint).ok()?;
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
+}

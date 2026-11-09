@@ -1,0 +1,101 @@
+<script setup lang="ts">
+import type { ProfileActivityLevel, ProfileActivityMode } from './activity'
+
+import type { ProfileActivityCalendar } from '@/api'
+import { ZEmpty, ZSegmented } from '@codex-proxy/ui'
+import { computed, shallowRef } from 'vue'
+
+import { useI18n } from 'vue-i18n'
+import { buildProfileActivityGrid, profileActivityCellLabel } from './activity'
+
+const props = defineProps<{
+  calendar: ProfileActivityCalendar | null
+}>()
+
+const { t } = useI18n({ useScope: 'global' })
+
+const mode = shallowRef<ProfileActivityMode>('daily')
+const modeOptions = computed(() => ([
+  {
+    label: t('accounts.profile.activity.daily'),
+    value: 'daily',
+  },
+  {
+    label: t('accounts.profile.activity.weekly'),
+    value: 'weekly',
+  },
+  {
+    label: t('accounts.profile.activity.cumulative'),
+    value: 'cumulative',
+  },
+]))
+const levelClasses: Record<ProfileActivityLevel, string> = {
+  0: 'bg-z-activity-level-0',
+  1: 'bg-z-activity-level-1',
+  2: 'bg-z-activity-level-2',
+  3: 'bg-z-activity-level-3',
+  4: 'bg-z-activity-level-4',
+}
+const grid = computed(() => buildProfileActivityGrid(props.calendar, mode.value))
+const rangeLabel = computed(() => grid.value.rangeLabel)
+const monthLabels = computed(() =>
+  grid.value.weeks.flatMap((week, weekIndex) =>
+    week.monthLabel
+      ? [
+          { label: week.monthLabel, weekIndex },
+        ]
+      : [],
+  ),
+)
+</script>
+
+<template>
+  <section class="min-w-0" aria-labelledby="profile-token-activity-title">
+    <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h3 id="profile-token-activity-title" class="m-0 text-z-lg font-heavy text-z-text">
+          {{ t('accounts.profile.activity.tokenActivity') }}
+        </h3>
+      </div>
+      <ZSegmented v-model="mode" :aria-label="t('accounts.profile.activity.tokenActivityStatisticsMethod')" size="small" :options="modeOptions" />
+    </div>
+
+    <ZEmpty
+      v-if="calendar === null"
+      :title="t('accounts.profile.activity.noTokenActivityYet')"
+      :description="t('accounts.profile.activity.noDailyActivity')"
+      size="small"
+      surface="none"
+    />
+
+    <div v-else class="overflow-x-auto pb-1" role="img" :aria-label="t('accounts.profile.activity.tokenActivityHeatmap', { rangeLabel })">
+      <div class="min-w-190">
+        <div class="mb-1.5 grid gap-1" style="grid-template-columns: repeat(52, minmax(0, 1fr))">
+          <!-- 首尾月份可能只占一周；标签固定在同一行，避免跨列占位触发自动换行。 -->
+          <span
+            v-for="(month, monthIndex) in monthLabels"
+            :key="`${month.weekIndex}-${month.label}`"
+            class="row-start-1 h-4 whitespace-nowrap text-[10px] leading-4 font-semibold text-z-text-quaternary"
+            :class="monthIndex === monthLabels.length - 1 ? 'text-right' : undefined"
+            :style="{
+              gridColumn: `${month.weekIndex + (monthIndex === monthLabels.length - 1 ? 0 : 1)} / span 2`,
+            }"
+          >
+            {{ month.label }}
+          </span>
+        </div>
+        <div class="grid gap-1" style="grid-template-columns: repeat(52, minmax(0, 1fr))">
+          <div v-for="week in grid.weeks" :key="week.key" class="grid grid-rows-7 gap-1">
+            <span
+              v-for="cell in week.cells"
+              :key="cell.date"
+              class="aspect-square rounded-[3px] transition-colors motion-reduce:transition-none"
+              :class="cell.isFuture ? 'invisible' : levelClasses[cell.level]"
+              :title="profileActivityCellLabel(cell, mode)"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</template>

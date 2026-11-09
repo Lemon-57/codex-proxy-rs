@@ -1,0 +1,1988 @@
+//! 验证路由快照编译的模型别名、版本一致性与请求事实冻结
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use futures::executor::block_on;
+use futures::future::BoxFuture;
+
+use gateway_core::account::FastMode;
+use gateway_core::operation::OperationKind;
+use gateway_core::policy::{ClientApiKeyId, PlaintextClientApiKey, RateLimits};
+use gateway_core::routing::extensions::{
+    ExtensionPreparationError, ExtensionPreparationPort, ExtensionSetId, ExtensionSetLease,
+    ExtensionSetReference,
+};
+use gateway_core::routing::snapshot::{
+    RuntimeSnapshotCompileError, RuntimeSnapshotCompiler, SnapshotAccountGroupFacts,
+    SnapshotAccountGroupMemberFacts, SnapshotClientPolicyFacts, SnapshotFacts,
+    SnapshotProviderAccountFacts, SnapshotStoreError, SnapshotStorePort,
+};
+use gateway_core::routing::{
+    ConfigRevision, ContributedModelAlias, ModelCapabilities, ModelPresentation,
+    ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable, ProviderKind,
+    ProviderModelCapabilities, PublicModelId, UpstreamModelId,
+};
+use gateway_core::settings::SettingsValues;
+
+#[derive(Clone)]
+struct TestSnapshotStore {
+    facts: Arc<Mutex<Result<SnapshotFacts, SnapshotStoreError>>>,
+    current_revision: Arc<Mutex<Result<ConfigRevision, SnapshotStoreError>>>,
+}
+
+impl TestSnapshotStore {
+    fn new(facts: Result<SnapshotFacts, SnapshotStoreError>) -> Self {
+        let current_revision = facts.as_ref().map(facts_revision).map_err(Clone::clone);
+        Self {
+            facts: Arc::new(Mutex::new(facts)),
+            current_revision: Arc::new(Mutex::new(current_revision)),
+        }
+    }
+}
+
+impl SnapshotStorePort for TestSnapshotStore {
+    fn load_snapshot_facts(&self) -> BoxFuture<'_, Result<SnapshotFacts, SnapshotStoreError>> {
+        Box::pin(async move { self.facts.lock().expect("facts lock").clone() })
+    }
+
+    fn current_config_revision(&self) -> BoxFuture<'_, Result<ConfigRevision, SnapshotStoreError>> {
+        Box::pin(async move { self.current_revision.lock().expect("revision lock").clone() })
+    }
+}
+
+struct SequencedSnapshotStore {
+    facts: Vec<SnapshotFacts>,
+    loads: AtomicUsize,
+    current_revision: ConfigRevision,
+}
+
+impl SnapshotStorePort for SequencedSnapshotStore {
+    fn load_snapshot_facts(&self) -> BoxFuture<'_, Result<SnapshotFacts, SnapshotStoreError>> {
+        Box::pin(async move {
+            let index = self.loads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.facts[index.min(self.facts.len() - 1)].clone())
+        })
+    }
+
+    fn current_config_revision(&self) -> BoxFuture<'_, Result<ConfigRevision, SnapshotStoreError>> {
+        Box::pin(async move { Ok(self.current_revision) })
+    }
+}
+
+struct PublishingCatalog {
+    generation: AtomicU64,
+    queries: AtomicUsize,
+}
+
+struct TestExtensionLease {
+    drops: Arc<AtomicUsize>,
+}
+
+impl Drop for TestExtensionLease {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl ExtensionSetLease for TestExtensionLease {
+    fn is_ready(&self) -> bool {
+        true
+    }
+}
+
+struct CountingExtensionPreparation {
+    prepares: AtomicUsize,
+    drops: Arc<AtomicUsize>,
+}
+
+struct AliasLease(Vec<ContributedModelAlias>);
+
+struct ModelLease(Vec<gateway_core::routing::ContributedModel>);
+
+#[test]
+fn same_name_native_and_adapted_sources_keep_account_capabilities_separate() {
+    use gateway_core::{
+        account::{AccountModelAccess, AccountModelAccessMode, ProviderAccountId},
+        operation::{Feature, GenerateRequest, Operation, ProtocolPayload},
+        routing::{ContributedModel, SupportLevel},
+    };
+    struct Catalog;
+    impl ProviderCatalogPort for Catalog {
+        fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+            [(
+                ProviderKind::new("alpha").unwrap(),
+                ProviderCatalogGeneration::new(1),
+            )]
+            .into()
+        }
+        fn query_model_capabilities(
+            &self,
+            _: &ProviderKind,
+        ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>>
+        {
+            Box::pin(async {
+                Ok(vec![
+                    ProviderModelCapabilities::new(
+                        UpstreamModelId::new("shared-model").unwrap(),
+                        super::capabilities().with_feature(Feature::Tools, SupportLevel::Native),
+                    )
+                    .with_catalog_accounts([ProviderAccountId::new("acct_a").unwrap()].into())
+                    .with_presentation(ModelPresentation::new(Some("Native".into()), None)),
+                ])
+            })
+        }
+    }
+    let id = PublicModelId::new("shared-model").unwrap();
+    let b = ProviderAccountId::new("acct_b").unwrap();
+    let mut contribution = ContributedModel {
+        owner: "fixture".into(),
+        id: id.clone(),
+        provider: ProviderKind::new("alpha").unwrap(),
+        accounts: [b.clone()].into(),
+        capabilities: super::capabilities(),
+        presentation: ModelPresentation::new(Some("Adapted".into()), None),
+    };
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        super::settings(),
+        vec![],
+        vec![],
+        ["acct_a", "acct_b", "acct_c"]
+            .into_iter()
+            .map(|id| {
+                SnapshotProviderAccountFacts::new(ProviderAccountId::new(id).unwrap(), "alpha")
+                    .with_model_access(
+                        AccountModelAccess::new(
+                            AccountModelAccessMode::Allowlist,
+                            vec![
+                                if id == "acct_c" {
+                                    "other"
+                                } else {
+                                    "shared-model"
+                                }
+                                .into(),
+                            ],
+                        )
+                        .unwrap(),
+                    )
+            })
+            .collect(),
+        vec![],
+    );
+    let native = block_on(
+        RuntimeSnapshotCompiler::new(
+            Arc::new(TestSnapshotStore::new(Ok(facts))),
+            Arc::new(Catalog),
+        )
+        .compile(),
+    )
+    .unwrap();
+    let scope = native.all_account_scope();
+    let b_only = Arc::new(scope.restricted_to(&Default::default(), &[b.clone()].into()));
+    assert!(native.public_models_for_scope(&b_only).is_empty());
+    assert!(native.allows_public_model_for_account(&id, &b_only, &b));
+    let c = ProviderAccountId::new("acct_c").unwrap();
+    assert!(!native.allows_public_model_for_account(&id, &scope, &c));
+    assert!(!native.allows_public_model_for_account(&id, &b_only, &c));
+    assert!(
+        native
+            .plan(
+                &id,
+                &super::operation(),
+                b_only.clone(),
+                &Default::default()
+            )
+            .unwrap()
+            .candidates()[0]
+            .account_scope()
+            .allows(&b)
+    );
+    let snapshot = native.with_extensions(Some(ExtensionSetReference::new(
+        ExtensionSetId::new("adapted".into()).unwrap(),
+        Arc::new(ModelLease(vec![contribution.clone()])),
+    )));
+    assert_eq!(snapshot.public_models_for_scope(&b_only), vec![id.clone()]);
+    assert_eq!(
+        snapshot.public_model_profiles_for_scope(&b_only)[0].presentation(),
+        &contribution.presentation
+    );
+    let plan = snapshot
+        .plan(
+            &id,
+            &super::operation(),
+            b_only.clone(),
+            &Default::default(),
+        )
+        .unwrap();
+    assert!(plan.candidates()[0].account_scope().allows(&b));
+    let tools = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "openai",
+            serde_json::json!({"model":"shared-model","tools":[{"type":"function","name":"test"}]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap(),
+    ));
+    assert!(
+        snapshot
+            .plan(&id, &tools, b_only, &Default::default())
+            .is_err()
+    );
+    let plan = snapshot
+        .plan(&id, &tools, scope.clone(), &Default::default())
+        .unwrap();
+    assert!(
+        plan.candidates()[0]
+            .account_scope()
+            .allows(&ProviderAccountId::new("acct_a").unwrap())
+    );
+    assert!(!plan.candidates()[0].account_scope().allows(&b));
+    contribution.accounts = [ProviderAccountId::new("acct_c").unwrap()].into();
+    let denied = snapshot.with_extensions(Some(ExtensionSetReference::new(
+        ExtensionSetId::new("denied".into()).unwrap(),
+        Arc::new(ModelLease(vec![contribution])),
+    )));
+    let c_only = Arc::new(scope.restricted_to(
+        &Default::default(),
+        &[ProviderAccountId::new("acct_c").unwrap()].into(),
+    ));
+    assert!(denied.public_models_for_scope(&c_only).is_empty());
+    assert!(
+        denied
+            .plan(&id, &super::operation(), c_only, &Default::default())
+            .is_err()
+    );
+}
+
+impl ExtensionSetLease for ModelLease {
+    fn is_ready(&self) -> bool {
+        true
+    }
+    fn models(&self) -> &[gateway_core::routing::ContributedModel] {
+        &self.0
+    }
+}
+
+#[test]
+fn native_model_without_presentation_cannot_borrow_an_unauthorized_plugin_profile() {
+    let snapshot = super::snapshot().with_extensions(Some(ExtensionSetReference::new(
+        ExtensionSetId::new("private-profile".into()).unwrap(),
+        Arc::new(ModelLease(vec![gateway_core::routing::ContributedModel {
+            owner: "fixture".into(),
+            id: PublicModelId::new("gpt-5.5").unwrap(),
+            provider: ProviderKind::new("openai").unwrap(),
+            accounts: [gateway_core::account::ProviderAccountId::new("acct_private").unwrap()]
+                .into(),
+            capabilities: super::capabilities(),
+            presentation: ModelPresentation::new(Some("Private model".into()), None),
+        }])),
+    )));
+    assert!(
+        snapshot
+            .public_model_profiles_for_scope(&super::account_scope())
+            .is_empty()
+    );
+}
+
+#[test]
+fn adapted_models_limit_visibility_and_routing_to_capable_authorized_accounts() {
+    use gateway_core::{
+        account::ProviderAccountId,
+        operation::{Feature, GenerateRequest, Operation, ProtocolPayload},
+        routing::{
+            ClientRoutingScope, ContributedModel, FrozenAccountScope, RuntimeAccount,
+            RuntimeAccountDirectory, SupportLevel,
+        },
+    };
+    let account = ProviderAccountId::new("acct_openai").unwrap();
+    let provider = ProviderKind::new("openai").unwrap();
+    let id = PublicModelId::new("adapted-model").unwrap();
+    let contribution = ContributedModel {
+        owner: "fixture".into(),
+        id: id.clone(),
+        provider,
+        accounts: [account.clone()].into(),
+        capabilities: super::capabilities(),
+        presentation: ModelPresentation::new(Some("Adapted".into()), None),
+    };
+    let snapshot = super::snapshot().with_extensions(Some(ExtensionSetReference::new(
+        ExtensionSetId::new("models".into()).unwrap(),
+        Arc::new(ModelLease(vec![contribution.clone()])),
+    )));
+    let scope = super::account_scope();
+    assert!(snapshot.public_models_for_scope(&scope).contains(&id));
+    assert!(snapshot.allows_public_model_for_account(&id, &scope, &account));
+    let undeclared = ProviderAccountId::new("acct_undeclared").unwrap();
+    let all = FrozenAccountScope::new(
+        Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
+            undeclared.clone(),
+            RuntimeAccount::new(ProviderKind::new("openai").unwrap(), Default::default()),
+        )]))),
+        ClientRoutingScope::all_accounts(),
+    );
+    assert!(!snapshot.allows_public_model_for_account(&id, &all, &undeclared));
+    assert!(
+        snapshot
+            .public_model_profiles_for_scope(&scope)
+            .iter()
+            .any(|p| p.model() == &id)
+    );
+    let plan = snapshot
+        .plan(&id, &super::operation(), scope.clone(), &Default::default())
+        .unwrap();
+    assert_eq!(plan.candidates().len(), 1);
+    assert!(plan.candidates()[0].account_scope().allows(&account));
+    let other = Arc::new(scope.restricted_to(
+        &Default::default(),
+        &[ProviderAccountId::new("acct_xai").unwrap()].into(),
+    ));
+    assert!(!snapshot.public_models_for_scope(&other).contains(&id));
+    assert!(
+        snapshot
+            .plan(&id, &super::operation(), other, &Default::default())
+            .is_err()
+    );
+    let tools = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object("openai", serde_json::json!({"model":"adapted-model","input":[],"tools":[{"type":"function","name":"test","parameters":{}}]}).as_object().unwrap().clone()).unwrap(),
+    ));
+    assert!(
+        snapshot
+            .plan(&id, &tools, scope.clone(), &Default::default())
+            .is_err()
+    );
+    let mut supported = contribution;
+    supported.capabilities = supported
+        .capabilities
+        .with_feature(Feature::Tools, SupportLevel::Native);
+    let capable = snapshot.with_extensions(Some(ExtensionSetReference::new(
+        ExtensionSetId::new("capable".into()).unwrap(),
+        Arc::new(ModelLease(vec![supported])),
+    )));
+    assert!(
+        capable
+            .plan(&id, &tools, scope, &Default::default())
+            .is_ok()
+    );
+}
+
+impl ExtensionSetLease for AliasLease {
+    fn is_ready(&self) -> bool {
+        true
+    }
+    fn model_aliases(&self) -> &[ContributedModelAlias] {
+        &self.0
+    }
+}
+
+struct AliasPreparation(ExtensionSetReference);
+
+impl ExtensionPreparationPort for AliasPreparation {
+    fn prepare(
+        &self,
+        _: ConfigRevision,
+    ) -> BoxFuture<'_, Result<ExtensionSetReference, ExtensionPreparationError>> {
+        Box::pin(async move { Ok(self.0.clone()) })
+    }
+}
+
+fn alias(id: &str, target: &str) -> ContributedModelAlias {
+    ContributedModelAlias {
+        owner: "test-plugin".into(),
+        id: PublicModelId::new(id).unwrap(),
+        provider: ProviderKind::new("alpha").unwrap(),
+        target: UpstreamModelId::new(target).unwrap(),
+    }
+}
+
+fn compile_aliases(
+    aliases: Vec<ContributedModelAlias>,
+) -> Result<gateway_core::routing::RuntimeSnapshot, RuntimeSnapshotCompileError> {
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        SettingsValues::new(
+            3,
+            "smart",
+            BTreeMap::from([("configured".into(), "upstream-model".into())]),
+            None,
+            None,
+        ),
+        vec![],
+        vec![],
+        vec![SnapshotProviderAccountFacts::new(
+            gateway_core::account::ProviderAccountId::new("acct_alias").unwrap(),
+            "alpha",
+        )],
+        vec![],
+    );
+    block_on(
+        RuntimeSnapshotCompiler::new(
+            Arc::new(TestSnapshotStore::new(Ok(facts))),
+            Arc::new(PublishingCatalog {
+                generation: AtomicU64::new(1),
+                queries: AtomicUsize::new(1),
+            }),
+        )
+        .with_extensions(Arc::new(AliasPreparation(ExtensionSetReference::new(
+            ExtensionSetId::new("alias-generation".into()).unwrap(),
+            Arc::new(AliasLease(aliases)),
+        ))))
+        .compile(),
+    )
+}
+
+#[test]
+fn contributed_alias_uses_the_same_target_for_listing_profiles_and_routing() {
+    let snapshot = compile_aliases(vec![alias("plugin-model", "upstream-model")]).unwrap();
+    let model = PublicModelId::new("plugin-model").unwrap();
+    let provider = ProviderKind::new("alpha").unwrap();
+    assert!(
+        snapshot
+            .public_models_for_scope(&snapshot.all_account_scope())
+            .contains(&model)
+    );
+    assert!(snapshot.contains_public_model_for_scope(&model, &snapshot.all_account_scope()));
+    let profiles = snapshot.public_model_profiles_for_provider(&provider);
+    let alias_profile = profiles
+        .iter()
+        .find(|profile| profile.model() == &model)
+        .unwrap();
+    let native_profile = profiles
+        .iter()
+        .find(|profile| profile.model().as_str() == "upstream-model")
+        .unwrap();
+    assert_eq!(alias_profile.presentation(), native_profile.presentation());
+    let plan = snapshot
+        .plan(
+            &model,
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &Default::default(),
+        )
+        .unwrap();
+    assert_eq!(plan.candidates()[0].provider(), &provider);
+    assert_eq!(
+        plan.candidates()[0].upstream_model().unwrap().as_str(),
+        "upstream-model"
+    );
+}
+
+#[test]
+fn contributed_alias_business_data_does_not_block_publication_or_native_routing() {
+    let mut unknown_provider = alias("plugin-model", "upstream-model");
+    unknown_provider.provider = ProviderKind::new("unregistered").unwrap();
+    for aliases in [
+        vec![alias("upstream-model", "upstream-model")],
+        vec![alias("configured", "upstream-model")],
+        vec![alias("plugin-model", "configured")],
+        vec![alias("plugin-model", "missing")],
+        vec![alias("plugin-model", "plugin-model")],
+        vec![unknown_provider],
+        vec![
+            alias("plugin-model", "other"),
+            alias("other", "plugin-model"),
+        ],
+        vec![
+            alias("plugin-model", "upstream-model"),
+            alias("plugin-model", "upstream-model"),
+        ],
+    ] {
+        let count = aliases.len();
+        let handle =
+            gateway_core::runtime::RuntimeSnapshotHandle::new(compile_aliases(vec![]).unwrap());
+        handle.publish(
+            compile_aliases(aliases).expect("plugin business data must not prevent publication"),
+        );
+        let snapshot = handle.acquire().unwrap();
+        assert_eq!(snapshot.extensions().unwrap().model_aliases().len(), count);
+        let native = PublicModelId::new("upstream-model").unwrap();
+        assert!(snapshot.contains_public_model_for_scope(&native, &snapshot.all_account_scope()));
+        let plan = snapshot
+            .plan(
+                &native,
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &Default::default(),
+            )
+            .unwrap();
+        assert_eq!(plan.candidates()[0].provider().as_str(), "alpha");
+        assert_eq!(
+            plan.candidates()[0].upstream_model().unwrap().as_str(),
+            "upstream-model"
+        );
+    }
+}
+
+#[test]
+fn contributed_alias_is_resolved_once_and_preserves_the_first_matching_entry() {
+    let snapshot = compile_aliases(vec![
+        alias("duplicate", "first-target"),
+        alias("duplicate", "upstream-model"),
+        alias("self", "self"),
+        alias("left", "right"),
+        alias("right", "left"),
+        alias("configured", "plugin-target"),
+        alias("to-configured", "configured"),
+    ])
+    .unwrap();
+    assert_eq!(snapshot.mapped_model("duplicate"), "first-target");
+    assert_eq!(snapshot.mapped_model("self"), "self");
+    assert_eq!(snapshot.mapped_model("left"), "right");
+    assert_eq!(snapshot.mapped_model("right"), "left");
+    assert_eq!(snapshot.mapped_model("configured"), "plugin-target");
+    assert_eq!(snapshot.mapped_model("to-configured"), "configured");
+}
+
+#[test]
+fn contributed_alias_unknown_provider_is_a_request_routing_error() {
+    let mut unknown_provider = alias("plugin-model", "upstream-model");
+    unknown_provider.provider = ProviderKind::new("unregistered").unwrap();
+    let snapshot = compile_aliases(vec![unknown_provider]).unwrap();
+    let model = PublicModelId::new("plugin-model").unwrap();
+    assert!(!snapshot.contains_public_model_for_scope(&model, &snapshot.all_account_scope()));
+    assert!(
+        snapshot
+            .plan(
+                &model,
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &Default::default(),
+            )
+            .is_err()
+    );
+}
+
+impl ExtensionPreparationPort for CountingExtensionPreparation {
+    fn prepare(
+        &self,
+        _: ConfigRevision,
+    ) -> BoxFuture<'_, Result<ExtensionSetReference, ExtensionPreparationError>> {
+        let sequence = self.prepares.fetch_add(1, Ordering::SeqCst) + 1;
+        let lease = Arc::new(TestExtensionLease {
+            drops: Arc::clone(&self.drops),
+        });
+        Box::pin(async move {
+            Ok(ExtensionSetReference::new(
+                ExtensionSetId::new(format!("prepared-{sequence}")).unwrap(),
+                lease,
+            ))
+        })
+    }
+}
+
+enum TestCatalog {
+    NoProviders,
+    Unavailable,
+    Empty,
+    Discovery,
+}
+
+impl ProviderCatalogPort for TestCatalog {
+    fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+        match self {
+            Self::NoProviders => BTreeMap::new(),
+            Self::Unavailable | Self::Empty | Self::Discovery => catalog_generations(0),
+        }
+    }
+
+    fn query_model_capabilities(
+        &self,
+        _: &ProviderKind,
+    ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>> {
+        Box::pin(async move {
+            match self {
+                Self::NoProviders | Self::Unavailable => Err(ProviderCatalogUnavailable),
+                Self::Empty => Ok(Vec::new()),
+                Self::Discovery => Ok(vec![ProviderModelCapabilities::new(
+                    UpstreamModelId::new("listed-model").expect("model"),
+                    ModelCapabilities::new(
+                        std::collections::BTreeSet::from([OperationKind::Generate]),
+                        None,
+                    ),
+                )]),
+            }
+        })
+    }
+
+    fn model_catalog_is_exhaustive(&self, _: &ProviderKind) -> bool {
+        !matches!(self, Self::Discovery)
+    }
+}
+
+struct MixedCatalog {
+    xai_available: bool,
+}
+
+impl ProviderCatalogPort for MixedCatalog {
+    fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+        ["openai", "xai"]
+            .into_iter()
+            .map(|provider| {
+                (
+                    ProviderKind::new(provider).unwrap(),
+                    ProviderCatalogGeneration::new(1),
+                )
+            })
+            .collect()
+    }
+
+    fn model_catalog_is_exhaustive(&self, provider: &ProviderKind) -> bool {
+        provider.as_str() != "openai"
+    }
+
+    fn query_model_capabilities(
+        &self,
+        provider: &ProviderKind,
+    ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>> {
+        let model = match provider.as_str() {
+            "openai" => "gpt-5.5",
+            "xai" if self.xai_available => "grok-4.7",
+            _ => return Box::pin(async { Err(ProviderCatalogUnavailable) }),
+        };
+        Box::pin(async move {
+            Ok([model, "shared-model"]
+                .into_iter()
+                .map(|model| {
+                    ProviderModelCapabilities::new(
+                        UpstreamModelId::new(model).unwrap(),
+                        super::capabilities(),
+                    )
+                })
+                .collect())
+        })
+    }
+}
+
+fn mixed_catalog_snapshot() -> gateway_core::routing::RuntimeSnapshot {
+    mixed_catalog_snapshot_with_xai(true)
+}
+
+fn mixed_catalog_snapshot_with_xai(xai_available: bool) -> gateway_core::routing::RuntimeSnapshot {
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        super::settings(),
+        vec![],
+        vec![],
+        ["openai", "xai"]
+            .into_iter()
+            .map(|provider| {
+                SnapshotProviderAccountFacts::new(
+                    gateway_core::account::ProviderAccountId::new(format!("acct_{provider}"))
+                        .unwrap(),
+                    provider,
+                )
+            })
+            .collect(),
+        vec![],
+    );
+    block_on(
+        RuntimeSnapshotCompiler::new(
+            Arc::new(TestSnapshotStore::new(Ok(facts))),
+            Arc::new(MixedCatalog { xai_available }),
+        )
+        .compile(),
+    )
+    .unwrap()
+}
+
+fn catalog_generations(generation: u64) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+    BTreeMap::from([(
+        ProviderKind::new("alpha").expect("provider"),
+        ProviderCatalogGeneration::new(generation),
+    )])
+}
+
+impl ProviderCatalogPort for PublishingCatalog {
+    fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+        catalog_generations(self.generation.load(Ordering::SeqCst))
+    }
+
+    fn query_model_capabilities(
+        &self,
+        _: &ProviderKind,
+    ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>> {
+        Box::pin(async move {
+            if self.queries.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.generation.store(1, Ordering::SeqCst);
+            }
+            Ok(vec![
+                ProviderModelCapabilities::new(
+                    UpstreamModelId::new("upstream-model").expect("model"),
+                    ModelCapabilities::new(
+                        std::collections::BTreeSet::from([OperationKind::Generate]),
+                        None,
+                    ),
+                )
+                .with_presentation(ModelPresentation::new(
+                    Some("Upstream Model".to_owned()),
+                    None,
+                )),
+            ])
+        })
+    }
+}
+
+#[test]
+fn compiler_should_reject_revision_changed_during_consistent_read() {
+    let store = Arc::new(SequencedSnapshotStore {
+        facts: vec![facts(1, 2)],
+        loads: AtomicUsize::new(0),
+        current_revision: revision(2),
+    });
+    let compiler = compiler(store.clone());
+
+    let error = block_on(compiler.compile()).expect_err("revision drift must fail closed");
+
+    assert_eq!(error, RuntimeSnapshotCompileError::RevisionChanged);
+    assert_eq!(store.loads.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn compiler_reloads_complete_facts_after_revision_changes_during_read() {
+    let store = Arc::new(SequencedSnapshotStore {
+        facts: vec![facts(1, 2), facts(2, 2)],
+        loads: AtomicUsize::new(0),
+        current_revision: revision(2),
+    });
+
+    let snapshot = block_on(compiler(store.clone()).compile()).expect("latest consistent facts");
+
+    assert_eq!(snapshot.revision(), revision(2));
+    assert_eq!(store.loads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn compiler_reloads_revision_changed_after_extension_preparation() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let extensions = Arc::new(CountingExtensionPreparation {
+        prepares: AtomicUsize::new(0),
+        drops: Arc::clone(&drops),
+    });
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(SequencedSnapshotStore {
+            facts: vec![facts(1, 1), facts(2, 2)],
+            loads: AtomicUsize::new(0),
+            current_revision: revision(2),
+        }),
+        Arc::new(TestCatalog::Empty),
+    )
+    .with_extensions(extensions.clone());
+
+    let snapshot = block_on(compiler.compile()).expect("latest prepared snapshot");
+
+    assert_eq!(snapshot.revision(), revision(2));
+    assert_eq!(snapshot.extensions().unwrap().id().as_str(), "prepared-2");
+    assert_eq!(extensions.prepares.load(Ordering::SeqCst), 2);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    drop(snapshot);
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn compiler_rechecks_revision_when_extension_preparation_rejects_stale_facts() {
+    struct RacingPreparation {
+        store: Arc<TestSnapshotStore>,
+        changes: usize,
+        calls: AtomicUsize,
+    }
+
+    impl ExtensionPreparationPort for RacingPreparation {
+        fn prepare(
+            &self,
+            _: ConfigRevision,
+        ) -> BoxFuture<'_, Result<ExtensionSetReference, ExtensionPreparationError>> {
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.changes == 0 || call < self.changes {
+                    if self.changes != 0 {
+                        let next = u64::try_from(call).unwrap() + 2;
+                        *self.store.facts.lock().unwrap() = Ok(facts(next, next));
+                        *self.store.current_revision.lock().unwrap() = Ok(revision(next));
+                    }
+                    return Err(ExtensionPreparationError);
+                }
+                Ok(ExtensionSetReference::new(
+                    ExtensionSetId::new("ready".to_owned()).unwrap(),
+                    Arc::new(AliasLease(vec![])),
+                ))
+            })
+        }
+    }
+
+    for (changes, expected_calls) in [(0, 1), (1, 2), (4, 4)] {
+        let store = Arc::new(TestSnapshotStore::new(Ok(facts(1, 1))));
+        let extensions = Arc::new(RacingPreparation {
+            store: store.clone(),
+            changes,
+            calls: AtomicUsize::new(0),
+        });
+        let compiler = RuntimeSnapshotCompiler::new(store, Arc::new(TestCatalog::Empty))
+            .with_extensions(extensions.clone());
+
+        let result = block_on(compiler.compile());
+
+        match changes {
+            0 => assert_eq!(
+                result.unwrap_err(),
+                RuntimeSnapshotCompileError::ExtensionsUnavailable
+            ),
+            1 => assert_eq!(result.unwrap().revision(), revision(2)),
+            _ => assert_eq!(
+                result.unwrap_err(),
+                RuntimeSnapshotCompileError::RevisionChanged
+            ),
+        }
+        assert_eq!(extensions.calls.load(Ordering::SeqCst), expected_calls);
+    }
+}
+
+#[test]
+fn compiler_accepts_unlimited_default_account_concurrency() {
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        SettingsValues::new(0, "smart", BTreeMap::new(), None, None),
+        Vec::new(),
+        Vec::new(),
+        vec![SnapshotProviderAccountFacts::new(
+            gateway_core::account::ProviderAccountId::new("acct_unlimited").expect("account"),
+            "alpha",
+        )],
+        Vec::new(),
+    );
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts))),
+        Arc::new(TestCatalog::Unavailable),
+    );
+    let snapshot = block_on(compiler.compile()).expect("compile unlimited default");
+    let plan = snapshot
+        .plan(
+            &PublicModelId::new("any-model").expect("model"),
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &Default::default(),
+        )
+        .expect("plan request");
+    assert_eq!(
+        plan.account_selection_policy().max_concurrent_per_account(),
+        gateway_core::account::AccountConcurrency::Unlimited
+    );
+}
+
+#[test]
+fn compiled_plans_keep_their_scheduling_config_after_a_new_snapshot_is_built() {
+    use gateway_core::account::SmartSchedulingConfig;
+    let configs = [
+        SmartSchedulingConfig::default(),
+        SmartSchedulingConfig::new([0.0, 2.0, 1.0, 0.5, 1.2, 2.3]).unwrap(),
+    ];
+    let mut plans = Vec::new();
+    for (index, config) in configs.into_iter().enumerate() {
+        let facts = SnapshotFacts::new(
+            revision(index as u64 + 1),
+            revision(index as u64 + 1),
+            SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
+                .with_smart_scheduling(config)
+                .with_openai_guardian_reserved_concurrency(index as u32),
+            vec![],
+            vec![],
+            vec![SnapshotProviderAccountFacts::new(
+                gateway_core::account::ProviderAccountId::new("acct_config").unwrap(),
+                "alpha",
+            )],
+            vec![],
+        );
+        let compiler = RuntimeSnapshotCompiler::new(
+            Arc::new(TestSnapshotStore::new(Ok(facts))),
+            Arc::new(TestCatalog::Unavailable),
+        );
+        let snapshot = block_on(compiler.compile()).unwrap();
+        plans.push(
+            snapshot
+                .plan(
+                    &PublicModelId::new("any-model").unwrap(),
+                    &super::operation(),
+                    snapshot.all_account_scope(),
+                    &Default::default(),
+                )
+                .unwrap(),
+        );
+    }
+    for (index, (plan, config)) in plans.iter().zip(configs).enumerate() {
+        assert_eq!(
+            plan.account_selection_policy()
+                .openai_guardian_reserved_concurrency(),
+            index as u32
+        );
+        assert_eq!(plan.account_selection_policy().smart_scheduling(), config);
+    }
+}
+
+#[test]
+fn withdrawn_provider_keeps_accounts_without_becoming_a_route_or_expanding_group_scope() {
+    use gateway_core::{
+        account::ProviderAccountId,
+        error::RoutingError,
+        routing::{AccountGroupId, RoutingContext},
+    };
+
+    let retired = ProviderKind::new("retired").unwrap();
+    let retired_account = ProviderAccountId::new("acct_retired").unwrap();
+    let active_account = ProviderAccountId::new("acct_active").unwrap();
+    let group = AccountGroupId::new("grp_00000000000000000000000000000001").unwrap();
+    let model = PublicModelId::new("listed-model").unwrap();
+    for restricted in [false, true] {
+        let facts = SnapshotFacts::new(
+            revision(1),
+            revision(1),
+            SettingsValues::new(
+                3,
+                "smart",
+                BTreeMap::from([("alias".into(), "listed-model".into())]),
+                None,
+                None,
+            ),
+            vec![SnapshotClientPolicyFacts::new(
+                ClientApiKeyId::new("key_retired").unwrap(),
+                PlaintextClientApiKey::new("sk_retired_test").unwrap(),
+                if restricted {
+                    vec![group.clone()]
+                } else {
+                    vec![]
+                },
+                RateLimits::unlimited(),
+            )],
+            vec![SnapshotAccountGroupFacts::new(
+                group.clone(),
+                "Retired".into(),
+                true,
+            )],
+            vec![
+                SnapshotProviderAccountFacts::new(retired_account.clone(), "retired"),
+                SnapshotProviderAccountFacts::new(active_account.clone(), "alpha"),
+            ],
+            vec![SnapshotAccountGroupMemberFacts::new(
+                group.clone(),
+                retired_account.clone(),
+            )],
+        );
+        let snapshot = block_on(
+            RuntimeSnapshotCompiler::new(
+                Arc::new(TestSnapshotStore::new(Ok(facts))),
+                Arc::new(TestCatalog::Discovery),
+            )
+            .compile(),
+        )
+        .unwrap();
+        let scope = snapshot
+            .client_policies()
+            .next()
+            .unwrap()
+            .account_scope()
+            .clone();
+        assert!(scope.allows(&retired_account));
+        assert_eq!(scope.allows(&active_account), !restricted);
+        assert!(snapshot.public_models_for_provider(&retired).is_empty());
+        let plan = snapshot.plan(
+            &model,
+            &super::operation(),
+            scope.clone(),
+            &Default::default(),
+        );
+        if restricted {
+            assert!(matches!(plan, Err(RoutingError::NoCapableProvider { .. })));
+            assert!(snapshot.public_models_for_scope(&scope).is_empty());
+        } else {
+            let plan = plan.unwrap();
+            assert_eq!(plan.candidates().len(), 1);
+            assert_eq!(plan.candidates()[0].provider().as_str(), "alpha");
+        }
+        let forced = RoutingContext {
+            required_provider: Some(retired.clone()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            snapshot.plan(&model, &super::operation(), scope.clone(), &forced),
+            Err(RoutingError::NoCapableProvider { .. })
+        ));
+        assert!(matches!(
+            snapshot.plan_provider_endpoint(&retired, None, &super::operation(), scope, &forced),
+            Err(RoutingError::NoCapableProviderEndpoint { .. })
+        ));
+    }
+}
+
+#[test]
+fn routing_plans_share_frozen_pricing_after_a_new_snapshot_is_published() {
+    use gateway_core::{metering::PricingOverrides, runtime::RuntimeSnapshotHandle};
+    let prices = |bps| -> Arc<PricingOverrides> {
+        Arc::new(
+            serde_json::from_value(serde_json::json!({"openai":{"gpt-5.5":{
+                "multiplierBps":bps,"bands":{}
+            }}}))
+            .unwrap(),
+        )
+    };
+    let original = prices(12500);
+    let snapshot = super::snapshot();
+    let handle = RuntimeSnapshotHandle::new(
+        snapshot
+            .with_settings(&snapshot.settings().clone().with_pricing(original.clone()))
+            .unwrap(),
+    );
+    let frozen = handle.acquire().unwrap();
+    let plan = |snapshot: &gateway_core::routing::RuntimeSnapshot| {
+        snapshot
+            .plan(
+                &PublicModelId::new("gpt-5.4").unwrap(),
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &gateway_core::routing::RoutingContext::default(),
+            )
+            .unwrap()
+    };
+    let old_plan = plan(&frozen);
+    handle.publish(
+        snapshot
+            .with_settings(&snapshot.settings().clone().with_pricing(prices(20000)))
+            .unwrap(),
+    );
+    let new_plan = plan(&handle.acquire().unwrap());
+    assert!(Arc::ptr_eq(&old_plan.pricing(), &original));
+    assert!(Arc::ptr_eq(&plan(&frozen).pricing(), &original));
+    assert_eq!(
+        old_plan.pricing()["openai"]["gpt-5.5"].multiplier_bps,
+        12500
+    );
+    assert_eq!(
+        new_plan.pricing()["openai"]["gpt-5.5"].multiplier_bps,
+        20000
+    );
+}
+
+#[test]
+fn compiler_should_preserve_passthrough_when_provider_catalog_is_unavailable() {
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))),
+        Arc::new(TestCatalog::Unavailable),
+    );
+
+    let snapshot = block_on(compiler.compile()).expect("compile snapshot");
+    let provider = ProviderKind::new("alpha").expect("provider");
+
+    assert_eq!(snapshot.revision().get(), 3);
+    assert!(snapshot.contains_public_model_for_provider(
+        &PublicModelId::new("unknown-upstream-model").expect("model"),
+        &provider,
+    ));
+    assert_eq!(snapshot.mapped_model("public-model"), "upstream-model");
+    assert_eq!(snapshot.client_policies().count(), 1);
+}
+
+#[test]
+fn discovery_catalog_should_not_reject_an_unlisted_model() {
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))),
+        Arc::new(TestCatalog::Discovery),
+    );
+    let snapshot = block_on(compiler.compile()).expect("compile discovery catalog");
+    let provider = ProviderKind::new("alpha").expect("provider");
+    let snapshot = snapshot.with_account_directory(Arc::new(
+        gateway_core::routing::RuntimeAccountDirectory::new(BTreeMap::from([(
+            gateway_core::account::ProviderAccountId::new("acct_discovery").expect("account"),
+            gateway_core::routing::RuntimeAccount::new(provider.clone(), Default::default()),
+        )])),
+    ));
+    let model = PublicModelId::new("unknown-upstream-model").expect("model");
+    assert!(snapshot.contains_public_model_for_provider(&model, &provider));
+    snapshot
+        .plan(
+            &model,
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &gateway_core::routing::RoutingContext {
+                required_provider: Some(provider),
+                ..gateway_core::routing::RoutingContext::default()
+            },
+        )
+        .expect("upstream decides model availability");
+}
+
+#[test]
+fn mixed_catalog_should_bind_known_model_to_its_declared_provider() {
+    let snapshot = mixed_catalog_snapshot();
+    let model = PublicModelId::new("grok-4.7").unwrap();
+    assert!(
+        snapshot
+            .public_models_for_scope(&snapshot.all_account_scope())
+            .contains(&model)
+    );
+
+    let plan = snapshot
+        .plan(
+            &model,
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        plan.candidates()
+            .iter()
+            .map(|candidate| candidate.provider().as_str())
+            .collect::<Vec<_>>(),
+        ["xai"]
+    );
+}
+
+#[test]
+fn mixed_catalog_should_bind_the_mapped_upstream_model() {
+    let snapshot = mixed_catalog_snapshot();
+    let settings = snapshot
+        .settings()
+        .clone()
+        .with_model_mappings(BTreeMap::from([(
+            "public-model".to_owned(),
+            "grok-4.7".to_owned(),
+        )]));
+    let snapshot = snapshot.with_settings(&settings).unwrap();
+
+    let plan = snapshot
+        .plan(
+            &PublicModelId::new("public-model").unwrap(),
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(plan.candidates().len(), 1);
+    assert_eq!(plan.candidates()[0].provider().as_str(), "xai");
+    assert_eq!(
+        plan.candidates()[0].upstream_model().unwrap().as_str(),
+        "grok-4.7"
+    );
+}
+
+#[test]
+fn mixed_catalog_should_keep_discovery_routes_for_unlisted_models() {
+    let snapshot = mixed_catalog_snapshot();
+    let plan = snapshot
+        .plan(
+            &PublicModelId::new("unlisted-model").unwrap(),
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(plan.candidates().len(), 1);
+    assert_eq!(plan.candidates()[0].provider().as_str(), "openai");
+}
+
+#[test]
+fn mixed_catalog_should_preserve_provider_order_for_shared_models() {
+    let snapshot = mixed_catalog_snapshot();
+    let plan = snapshot
+        .plan(
+            &PublicModelId::new("shared-model").unwrap(),
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        plan.candidates()
+            .iter()
+            .map(|candidate| candidate.provider().as_str())
+            .collect::<Vec<_>>(),
+        ["openai", "xai"]
+    );
+}
+
+#[test]
+fn mixed_catalog_should_reject_forcing_a_model_to_another_provider() {
+    let snapshot = mixed_catalog_snapshot();
+    let plan = snapshot.plan(
+        &PublicModelId::new("grok-4.7").unwrap(),
+        &super::operation(),
+        snapshot.all_account_scope(),
+        &gateway_core::routing::RoutingContext {
+            required_provider: Some(ProviderKind::new("openai").unwrap()),
+            ..Default::default()
+        },
+    );
+
+    assert!(matches!(
+        plan,
+        Err(gateway_core::validation::RoutingError::NoCapableProvider { .. })
+    ));
+}
+
+#[test]
+fn mixed_catalog_should_not_escape_a_blocked_model_provider() {
+    let snapshot = mixed_catalog_snapshot();
+    let plan = snapshot.plan(
+        &PublicModelId::new("grok-4.7").unwrap(),
+        &super::operation(),
+        snapshot.all_account_scope(),
+        &gateway_core::routing::RoutingContext {
+            blocked_providers: std::collections::BTreeSet::from(
+                [ProviderKind::new("xai").unwrap()],
+            ),
+            ..Default::default()
+        },
+    );
+
+    assert!(matches!(
+        plan,
+        Err(gateway_core::validation::RoutingError::NoCapableProvider { .. })
+    ));
+}
+
+#[test]
+fn mixed_catalog_should_not_escape_model_capability_requirements() {
+    let snapshot = mixed_catalog_snapshot();
+    let plan = snapshot.plan(
+        &PublicModelId::new("grok-4.7").unwrap(),
+        &super::image_operation(),
+        snapshot.all_account_scope(),
+        &Default::default(),
+    );
+    assert!(matches!(
+        plan,
+        Err(gateway_core::validation::RoutingError::NoCapableProvider { .. })
+    ));
+}
+
+#[test]
+fn mixed_catalog_should_not_escape_the_authorized_account_scope() {
+    let snapshot = mixed_catalog_snapshot();
+    let scope = Arc::new(gateway_core::routing::FrozenAccountScope::new(
+        Arc::new(gateway_core::routing::RuntimeAccountDirectory::new(
+            BTreeMap::from([(
+                gateway_core::account::ProviderAccountId::new("acct_openai").unwrap(),
+                gateway_core::routing::RuntimeAccount::new(
+                    ProviderKind::new("openai").unwrap(),
+                    Default::default(),
+                ),
+            )]),
+        )),
+        gateway_core::routing::ClientRoutingScope::all_accounts(),
+    ));
+    let model = PublicModelId::new("grok-4.7").unwrap();
+    assert!(!snapshot.contains_public_model_for_scope(&model, &scope));
+    let plan = snapshot.plan(&model, &super::operation(), scope, &Default::default());
+    assert!(matches!(
+        plan,
+        Err(gateway_core::validation::RoutingError::NoCapableProvider { .. })
+    ));
+}
+
+#[test]
+fn mixed_catalog_should_reject_ambiguous_models_when_xai_catalog_is_unavailable() {
+    let snapshot = mixed_catalog_snapshot_with_xai(false);
+    let plan = snapshot.plan(
+        &PublicModelId::new("grok-4.7").unwrap(),
+        &super::operation(),
+        snapshot.all_account_scope(),
+        &Default::default(),
+    );
+    assert!(matches!(
+        plan,
+        Err(gateway_core::validation::RoutingError::NoCapableProvider { .. })
+    ));
+
+    let plan = snapshot
+        .plan(
+            &PublicModelId::new("gpt-5.5").unwrap(),
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &Default::default(),
+        )
+        .unwrap();
+    assert_eq!(plan.candidates().len(), 1);
+    assert_eq!(plan.candidates()[0].provider().as_str(), "openai");
+}
+
+#[test]
+fn known_empty_catalog_should_report_model_not_found() {
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))),
+        Arc::new(TestCatalog::Empty),
+    );
+    let snapshot = block_on(compiler.compile()).expect("compile empty catalog");
+    let error = snapshot
+        .plan(
+            &PublicModelId::new("public-model").expect("model"),
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &gateway_core::routing::RoutingContext {
+                required_provider: Some(ProviderKind::new("alpha").expect("provider")),
+                ..gateway_core::routing::RoutingContext::default()
+            },
+        )
+        .expect_err("a successfully published empty catalog proves model absence");
+
+    assert_eq!(
+        error,
+        gateway_core::error::RoutingError::ModelNotFound {
+            model: "public-model".to_owned(),
+            mapped_model: "upstream-model".to_owned(),
+        },
+    );
+}
+
+#[test]
+fn compiler_retries_when_provider_publishes_catalog_during_compilation() {
+    let catalog = Arc::new(PublishingCatalog {
+        generation: AtomicU64::new(0),
+        queries: AtomicUsize::new(0),
+    });
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))),
+        catalog.clone(),
+    );
+
+    let snapshot = block_on(compiler.compile()).expect("stable catalog snapshot");
+
+    assert_eq!(catalog.queries.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        snapshot
+            .provider_catalog_generations()
+            .get(&ProviderKind::new("alpha").expect("provider"))
+            .map(|generation| generation.get()),
+        Some(1),
+    );
+    let profiles =
+        snapshot.public_model_profiles_for_provider(&ProviderKind::new("alpha").expect("provider"));
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| profile.model().as_str())
+            .collect::<Vec<_>>(),
+        vec!["public-model", "upstream-model"],
+    );
+}
+
+#[test]
+fn catalog_stability_retry_reuses_and_retains_extensions_for_the_same_revision() {
+    let catalog = Arc::new(PublishingCatalog {
+        generation: AtomicU64::new(0),
+        queries: AtomicUsize::new(0),
+    });
+    let drops = Arc::new(AtomicUsize::new(0));
+    let extensions = Arc::new(CountingExtensionPreparation {
+        prepares: AtomicUsize::new(0),
+        drops: Arc::clone(&drops),
+    });
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(TestSnapshotStore::new(Ok(facts(3, 3)))),
+        catalog.clone(),
+    )
+    .with_extensions(extensions.clone());
+
+    let snapshot = block_on(compiler.compile()).expect("stable catalog snapshot");
+
+    assert_eq!(catalog.queries.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        extensions.prepares.load(Ordering::SeqCst),
+        1,
+        "catalog generation retry must not prepare a second extension set"
+    );
+    assert_eq!(snapshot.extensions().unwrap().id().as_str(), "prepared-1");
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(snapshot);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn catalog_stability_retry_reprepares_extensions_after_revision_change() {
+    let catalog = Arc::new(PublishingCatalog {
+        generation: AtomicU64::new(0),
+        queries: AtomicUsize::new(0),
+    });
+    let drops = Arc::new(AtomicUsize::new(0));
+    let extensions = Arc::new(CountingExtensionPreparation {
+        prepares: AtomicUsize::new(0),
+        drops: Arc::clone(&drops),
+    });
+    let compiler = RuntimeSnapshotCompiler::new(
+        Arc::new(SequencedSnapshotStore {
+            facts: vec![facts(1, 1), facts(2, 2)],
+            loads: AtomicUsize::new(0),
+            current_revision: revision(2),
+        }),
+        catalog,
+    )
+    .with_extensions(extensions.clone());
+
+    let snapshot = block_on(compiler.compile()).expect("new revision snapshot");
+
+    assert_eq!(snapshot.revision(), revision(2));
+    assert_eq!(snapshot.extensions().unwrap().id().as_str(), "prepared-2");
+    assert_eq!(extensions.prepares.load(Ordering::SeqCst), 2);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    drop(snapshot);
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn compiler_should_freeze_valid_client_min_versions() {
+    let store = Arc::new(TestSnapshotStore::new(Ok(facts_with_min_versions(
+        1,
+        1,
+        Some("26.825.6671".to_owned()),
+        Some("0.40.0".to_owned()),
+    ))));
+
+    let snapshot = block_on(compiler(store).compile()).expect("valid min versions");
+
+    assert_eq!(
+        snapshot
+            .min_codex_client_versions()
+            .desktop()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("26.825.6671")
+    );
+    assert_eq!(
+        snapshot
+            .min_codex_client_versions()
+            .cli()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("0.40.0")
+    );
+}
+
+#[test]
+fn compiler_should_reject_invalid_persisted_client_min_version() {
+    let store = Arc::new(TestSnapshotStore::new(Ok(facts_with_min_versions(
+        1,
+        1,
+        None,
+        Some("v0.40.0".to_owned()),
+    ))));
+
+    assert_eq!(
+        block_on(compiler(store).compile()).expect_err("invalid min version"),
+        RuntimeSnapshotCompileError::InvalidData
+    );
+}
+
+fn facts(config_revision: u64, observed_current_revision: u64) -> SnapshotFacts {
+    facts_with_min_versions(config_revision, observed_current_revision, None, None)
+}
+
+#[test]
+fn peer_policy_compilation_keeps_only_explicitly_shared_direct_accounts() {
+    use gateway_core::{
+        account::ProviderAccountId, policy::ClientPeerSharing, routing::AccountGroupId,
+    };
+    struct DirectCatalog;
+    impl ProviderCatalogPort for DirectCatalog {
+        fn is_direct_account(&self, provider: &ProviderKind, kind: &str) -> bool {
+            provider.as_str() == "alpha" && kind == "oauth"
+        }
+        fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+            BTreeMap::from([(
+                ProviderKind::new("alpha").unwrap(),
+                ProviderCatalogGeneration::new(1),
+            )])
+        }
+        fn query_model_capabilities(
+            &self,
+            _: &ProviderKind,
+        ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+    let group = AccountGroupId::new("grp_11111111111111111111111111111111").unwrap();
+    let direct = ProviderAccountId::new("acct_direct").unwrap();
+    let proxy = ProviderAccountId::new("acct_proxy").unwrap();
+    for (bound, enabled, expected) in [
+        (true, true, true),
+        (true, false, false),
+        (false, true, false),
+    ] {
+        let facts = SnapshotFacts::new(
+            revision(1),
+            revision(1),
+            SettingsValues::new(3, "smart", BTreeMap::new(), None, None),
+            vec![
+                SnapshotClientPolicyFacts::new(
+                    ClientApiKeyId::new("key_peer").unwrap(),
+                    PlaintextClientApiKey::new("sk_peer_test").unwrap(),
+                    if bound {
+                        vec![group.clone()]
+                    } else {
+                        Vec::new()
+                    },
+                    RateLimits::unlimited(),
+                )
+                .with_peer_sharing(ClientPeerSharing {
+                    enabled: true,
+                    ..Default::default()
+                }),
+            ],
+            vec![SnapshotAccountGroupFacts::new(
+                group.clone(),
+                "共享组".into(),
+                enabled,
+            )],
+            vec![
+                SnapshotProviderAccountFacts::new(direct.clone(), "alpha")
+                    .with_authentication_kind("oauth".into()),
+                SnapshotProviderAccountFacts::new(proxy.clone(), "alpha")
+                    .with_authentication_kind("api_key".into()),
+            ],
+            vec![
+                SnapshotAccountGroupMemberFacts::new(group.clone(), direct.clone()),
+                SnapshotAccountGroupMemberFacts::new(group.clone(), proxy.clone()),
+            ],
+        );
+        let snapshot = block_on(
+            RuntimeSnapshotCompiler::new(
+                Arc::new(TestSnapshotStore::new(Ok(facts))),
+                Arc::new(DirectCatalog),
+            )
+            .compile(),
+        )
+        .unwrap();
+        let scope = snapshot.client_policies().next().unwrap().account_scope();
+        assert_eq!(scope.allows(&direct), expected);
+        assert!(!scope.allows(&proxy));
+        assert_eq!(scope.provider_kinds().is_empty(), !expected);
+    }
+}
+
+fn facts_with_min_versions(
+    config_revision: u64,
+    observed_current_revision: u64,
+    desktop: Option<String>,
+    cli: Option<String>,
+) -> SnapshotFacts {
+    SnapshotFacts::new(
+        revision(config_revision),
+        revision(observed_current_revision),
+        SettingsValues::new(
+            3,
+            "smart",
+            BTreeMap::from([("public-model".to_owned(), "upstream-model".to_owned())]),
+            desktop,
+            cli,
+        ),
+        vec![SnapshotClientPolicyFacts::new(
+            ClientApiKeyId::new("key_one").expect("key ID"),
+            PlaintextClientApiKey::new("sk_test").expect("plaintext key"),
+            Vec::new(),
+            RateLimits::unlimited(),
+        )],
+        Vec::<SnapshotAccountGroupFacts>::new(),
+        Vec::<SnapshotProviderAccountFacts>::new(),
+        Vec::<SnapshotAccountGroupMemberFacts>::new(),
+    )
+}
+
+fn facts_revision(facts: &SnapshotFacts) -> ConfigRevision {
+    facts.config_revision()
+}
+
+fn compiler(store: Arc<dyn SnapshotStorePort>) -> RuntimeSnapshotCompiler {
+    RuntimeSnapshotCompiler::new(store, Arc::new(TestCatalog::NoProviders))
+}
+
+fn revision(value: u64) -> ConfigRevision {
+    ConfigRevision::new(value).expect("positive revision")
+}
+
+#[test]
+fn global_request_location_should_be_frozen_when_snapshot_is_published() {
+    use gateway_core::account::{ProviderAccountId, RequestLocation};
+    use gateway_core::runtime::RuntimeSnapshotHandle;
+    let make_snapshot = |version, timezone: &str, enabled| {
+        let location = RequestLocation {
+            timezone: timezone.parse().unwrap(),
+            ..RequestLocation::default()
+        };
+        let facts = SnapshotFacts::new(
+            revision(version),
+            revision(version),
+            SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
+                .with_request_location(location, enabled),
+            Vec::new(),
+            Vec::new(),
+            vec![SnapshotProviderAccountFacts::new(
+                ProviderAccountId::new("acct_location").unwrap(),
+                "alpha",
+            )],
+            Vec::new(),
+        );
+        block_on(
+            RuntimeSnapshotCompiler::new(
+                Arc::new(TestSnapshotStore::new(Ok(facts))),
+                Arc::new(TestCatalog::Unavailable),
+            )
+            .compile(),
+        )
+        .unwrap()
+    };
+    let handle = RuntimeSnapshotHandle::new(make_snapshot(1, "Asia/Tokyo", true));
+    let frozen = handle.acquire().unwrap();
+    let plan = |snapshot: &gateway_core::routing::RuntimeSnapshot| {
+        snapshot
+            .plan(
+                &PublicModelId::new("public-model").unwrap(),
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &gateway_core::routing::RoutingContext::default(),
+            )
+            .unwrap()
+    };
+    let old_plan = plan(&frozen);
+    handle.publish(make_snapshot(2, "America/New_York", true));
+    assert_eq!(
+        old_plan.request_location().unwrap().timezone.name(),
+        "Asia/Tokyo"
+    );
+    assert_eq!(
+        plan(&frozen).request_location().unwrap().timezone.name(),
+        "Asia/Tokyo"
+    );
+    assert_eq!(
+        plan(&handle.acquire().unwrap())
+            .request_location()
+            .unwrap()
+            .timezone
+            .name(),
+        "America/New_York"
+    );
+    handle.publish(make_snapshot(3, "Asia/Tokyo", false));
+    assert!(
+        plan(&handle.acquire().unwrap())
+            .request_location()
+            .is_none()
+    );
+    assert_eq!(
+        old_plan.request_location().unwrap().timezone.name(),
+        "Asia/Tokyo"
+    );
+    handle.publish(make_snapshot(4, "Asia/Tokyo", true));
+    assert_eq!(
+        plan(&handle.acquire().unwrap())
+            .request_location()
+            .unwrap()
+            .timezone
+            .name(),
+        "Asia/Tokyo"
+    );
+}
+
+#[test]
+fn decompression_setting_should_validate_and_remain_frozen_across_publication() {
+    use gateway_core::runtime::RuntimeSnapshotHandle;
+    let compile = |version, bytes| {
+        let facts = SnapshotFacts::new(
+            revision(version),
+            revision(version),
+            SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
+                .with_responses_max_decompressed_body_bytes(bytes),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        block_on(compiler(Arc::new(TestSnapshotStore::new(Ok(facts)))).compile())
+    };
+    for invalid in [0, u64::MAX] {
+        assert!(matches!(
+            compile(1, invalid),
+            Err(RuntimeSnapshotCompileError::InvalidData)
+        ));
+    }
+    let handle = RuntimeSnapshotHandle::new(compile(1, 64 * 1024 * 1024).unwrap());
+    let reader = handle.downgrade();
+    let frozen = reader.acquire().unwrap();
+    handle.publish(compile(2, 128 * 1024 * 1024).unwrap());
+    assert_eq!(
+        handle
+            .acquire()
+            .unwrap()
+            .responses_max_decompressed_body_bytes(),
+        128 * 1024 * 1024
+    );
+    assert_eq!(
+        frozen.responses_max_decompressed_body_bytes(),
+        64 * 1024 * 1024
+    );
+    assert_eq!(
+        reader
+            .acquire()
+            .unwrap()
+            .responses_max_decompressed_body_bytes(),
+        128 * 1024 * 1024
+    );
+    handle.publish(compile(3, 1024 * 1024).unwrap());
+    assert_eq!(
+        handle
+            .acquire()
+            .unwrap()
+            .responses_max_decompressed_body_bytes(),
+        1024 * 1024
+    );
+    handle.suspend();
+    assert!(reader.acquire().is_err());
+    drop(handle);
+    assert!(reader.acquire().is_err());
+}
+
+#[test]
+fn fast_mode_merges_only_bound_groups_without_changing_account_scope() {
+    use gateway_core::account::ProviderAccountId;
+    use gateway_core::routing::AccountGroupId;
+    for (mode, other_mode, expected) in [
+        (FastMode::Default, FastMode::Default, FastMode::Default),
+        (FastMode::Default, FastMode::Enabled, FastMode::Enabled),
+        (FastMode::Default, FastMode::Disabled, FastMode::Disabled),
+        (FastMode::Enabled, FastMode::Default, FastMode::Enabled),
+        (FastMode::Enabled, FastMode::Enabled, FastMode::Enabled),
+        (FastMode::Enabled, FastMode::Disabled, FastMode::Disabled),
+        (FastMode::Disabled, FastMode::Default, FastMode::Disabled),
+        (FastMode::Disabled, FastMode::Enabled, FastMode::Disabled),
+        (FastMode::Disabled, FastMode::Disabled, FastMode::Disabled),
+    ] {
+        for group_enabled in [false, true] {
+            for bound in [false, true] {
+                let group_id = AccountGroupId::new("grp_00000000000000000000000000000001").unwrap();
+                let open_group_id =
+                    AccountGroupId::new("grp_00000000000000000000000000000002").unwrap();
+                let account_id = ProviderAccountId::new("acct_fast_policy").unwrap();
+                let facts = SnapshotFacts::new(
+                    revision(1),
+                    revision(1),
+                    SettingsValues::new(3, "smart", BTreeMap::new(), None, None),
+                    vec![SnapshotClientPolicyFacts::new(
+                        ClientApiKeyId::new("key_fast_policy").unwrap(),
+                        PlaintextClientApiKey::new("sk_fast_policy").unwrap(),
+                        if bound {
+                            vec![group_id.clone(), open_group_id.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                        RateLimits::unlimited(),
+                    )],
+                    vec![
+                        SnapshotAccountGroupFacts::new(
+                            group_id.clone(),
+                            "Restricted".to_owned(),
+                            group_enabled,
+                        )
+                        .with_fast_mode(mode),
+                        SnapshotAccountGroupFacts::new(
+                            open_group_id.clone(),
+                            "Open".to_owned(),
+                            true,
+                        )
+                        .with_fast_mode(other_mode),
+                    ],
+                    vec![SnapshotProviderAccountFacts::new(
+                        account_id.clone(),
+                        "alpha",
+                    )],
+                    vec![
+                        SnapshotAccountGroupMemberFacts::new(group_id, account_id.clone()),
+                        SnapshotAccountGroupMemberFacts::new(open_group_id, account_id.clone()),
+                    ],
+                );
+                let snapshot = block_on(
+                    RuntimeSnapshotCompiler::new(
+                        Arc::new(TestSnapshotStore::new(Ok(facts))),
+                        Arc::new(TestCatalog::Unavailable),
+                    )
+                    .compile(),
+                )
+                .unwrap();
+                let scope = snapshot
+                    .client_policies()
+                    .next()
+                    .unwrap()
+                    .account_scope()
+                    .clone();
+                assert!(scope.allows(&account_id));
+                let plan = snapshot
+                    .plan(
+                        &PublicModelId::new("public-model").unwrap(),
+                        &super::operation(),
+                        scope,
+                        &Default::default(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    plan.fast_mode(),
+                    if bound { expected } else { FastMode::Default },
+                    "mode={mode:?}, other={other_mode:?}, enabled={group_enabled}, bound={bound}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn image_generation_merges_bound_groups_with_deny_precedence() {
+    use gateway_core::account::ProviderAccountId;
+    use gateway_core::routing::AccountGroupId;
+    for (allowed, other_allowed) in [(true, true), (true, false), (false, true), (false, false)] {
+        for group_enabled in [false, true] {
+            for bound in [false, true] {
+                let group_id = AccountGroupId::new("grp_00000000000000000000000000000001").unwrap();
+                let open_group_id =
+                    AccountGroupId::new("grp_00000000000000000000000000000002").unwrap();
+                let account_id = ProviderAccountId::new("acct_fast_policy").unwrap();
+                let facts = SnapshotFacts::new(
+                    revision(1),
+                    revision(1),
+                    SettingsValues::new(3, "smart", BTreeMap::new(), None, None),
+                    vec![SnapshotClientPolicyFacts::new(
+                        ClientApiKeyId::new("key_fast_policy").unwrap(),
+                        PlaintextClientApiKey::new("sk_fast_policy").unwrap(),
+                        if bound {
+                            vec![group_id.clone(), open_group_id.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                        RateLimits::unlimited(),
+                    )],
+                    vec![
+                        SnapshotAccountGroupFacts::new(
+                            group_id.clone(),
+                            "Restricted".to_owned(),
+                            group_enabled,
+                        )
+                        .with_image_generation(allowed),
+                        SnapshotAccountGroupFacts::new(
+                            open_group_id.clone(),
+                            "Open".to_owned(),
+                            true,
+                        )
+                        .with_image_generation(other_allowed),
+                    ],
+                    vec![SnapshotProviderAccountFacts::new(
+                        account_id.clone(),
+                        "alpha",
+                    )],
+                    vec![
+                        SnapshotAccountGroupMemberFacts::new(group_id, account_id.clone()),
+                        SnapshotAccountGroupMemberFacts::new(open_group_id, account_id.clone()),
+                    ],
+                );
+                let snapshot = block_on(
+                    RuntimeSnapshotCompiler::new(
+                        Arc::new(TestSnapshotStore::new(Ok(facts))),
+                        Arc::new(TestCatalog::Unavailable),
+                    )
+                    .compile(),
+                )
+                .unwrap();
+                let scope = snapshot
+                    .client_policies()
+                    .next()
+                    .unwrap()
+                    .account_scope()
+                    .clone();
+                assert!(scope.allows(&account_id));
+                assert_eq!(
+                    scope.allows_image_generation(),
+                    !bound || (allowed && other_allowed),
+                    "allowed={allowed}, other={other_allowed}, enabled={group_enabled}, bound={bound}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn key_profiles_replace_whole_global_choice_and_previous_snapshot_stays_frozen() {
+    use gateway_core::account::OpaqueProviderData;
+    let provider = ProviderKind::new("alpha").unwrap();
+    let document = |label| {
+        OpaqueProviderData::new(
+            serde_json::json!({"choice":label})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+    };
+    let build = |global, overridden| {
+        let profiles = BTreeMap::from([(provider.clone(), document(global))]);
+        let settings = SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
+            .with_request_profiles(profiles);
+        let inherited = SnapshotClientPolicyFacts::new(
+            ClientApiKeyId::new("key_inherited").unwrap(),
+            PlaintextClientApiKey::new("sk_inherited").unwrap(),
+            vec![],
+            RateLimits::unlimited(),
+        );
+        let independent = SnapshotClientPolicyFacts::new(
+            ClientApiKeyId::new("key_independent").unwrap(),
+            PlaintextClientApiKey::new("sk_independent").unwrap(),
+            vec![],
+            RateLimits::unlimited(),
+        )
+        .with_request_profiles(if overridden {
+            BTreeMap::from([(provider.clone(), document("override"))])
+        } else {
+            BTreeMap::new()
+        });
+        block_on(
+            compiler(Arc::new(TestSnapshotStore::new(Ok(SnapshotFacts::new(
+                revision(1),
+                revision(1),
+                settings,
+                vec![inherited, independent],
+                vec![],
+                vec![],
+                vec![],
+            )))))
+            .compile(),
+        )
+        .unwrap()
+    };
+    let values = |snapshot: &gateway_core::routing::RuntimeSnapshot| {
+        let settings = gateway_core::routing::request_settings::RequestSettings::new(Arc::new(
+            snapshot.clone(),
+        ));
+        let mut values: Vec<_> = snapshot
+            .client_policies()
+            .map(|policy| {
+                if policy.key_id().as_str() == "key_inherited" {
+                    assert!(policy.defaults().request_profiles.is_empty());
+                }
+                settings
+                    .apply_policy(policy.clone())
+                    .account_scope()
+                    .request_profile(&provider)
+                    .unwrap()
+                    .expose_to_provider()["choice"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        values.sort();
+        values
+    };
+    let previous = build("global-a", true);
+    assert_eq!(values(&build("global-b", true)), ["global-b", "override"]);
+    assert_eq!(values(&previous), ["global-a", "override"]);
+    assert_eq!(values(&build("global-b", false)), ["global-b", "global-b"]);
+}

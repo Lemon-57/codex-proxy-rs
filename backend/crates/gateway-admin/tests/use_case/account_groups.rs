@@ -1,0 +1,494 @@
+//! 验证账号分组分页查询的运行态补充与可用容量聚合
+
+use std::{
+    collections::BTreeMap,
+    str::FromStr as _,
+    sync::{Arc, Mutex},
+};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
+use gateway_admin::{
+    model::{
+        AdminErrorKind, MutationContext, PageSize, Revision,
+        account_groups::{
+            AccountGroupAccountSummary, AccountGroupCapacity, AccountGroupColor,
+            AccountGroupListQuery, AccountGroupMemberFact, AccountGroupMutation,
+            AccountGroupOptionsPage, AccountGroupPage, AccountGroupRecord, AccountGroupRef,
+            AccountGroupUsage, DeleteAccountGroup, NewAccountGroup, SetAccountGroupEnabled,
+            UpdateAccountGroup,
+        },
+        accounts::AccountRuntimeSnapshot,
+        observability::DecimalAmount,
+    },
+    ports::store::{
+        AccountGroupStore, AccountRuntimeStore, AdminStoreError, AdminStoreErrorKind,
+        AdminStoreResult,
+    },
+};
+use gateway_core::{
+    account::FastMode,
+    account::{AccountStatusFacts, CredentialState, QuotaState},
+    routing::AccountGroupId,
+};
+
+use super::AdminHarness;
+
+const GROUP_ID: &str = "grp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[tokio::test]
+async fn group_query_service_enriches_only_current_page_members_with_runtime_facts() {
+    let groups = Arc::new(FakeGroupStore::default());
+    let runtime = Arc::new(FakeRuntimeStore::default());
+    let service = AdminHarness::new()
+        .account_groups(groups.clone())
+        .account_runtime(runtime.clone())
+        .build()
+        .await;
+
+    let page = service
+        .account_groups()
+        .list(AccountGroupListQuery {
+            page: 1,
+            page_size: PageSize::new(20).expect("page size"),
+            search: None,
+            enabled: None,
+        })
+        .await
+        .expect("list projected account groups");
+
+    assert_eq!(
+        groups
+            .requested_groups
+            .lock()
+            .expect("requested groups")
+            .as_slice(),
+        [GROUP_ID]
+    );
+    assert_eq!(
+        runtime
+            .requested_accounts
+            .lock()
+            .expect("requested accounts")
+            .as_slice(),
+        ["acct_available", "acct_limited"]
+    );
+    let group = &page.items[0];
+    assert_eq!(
+        group.account_summary,
+        AccountGroupAccountSummary {
+            available: 1,
+            limited: 1,
+            total: 2,
+        }
+    );
+    assert_eq!(
+        group.capacity,
+        AccountGroupCapacity {
+            used_slots: Some(2),
+            total_slots: Some(4),
+        }
+    );
+}
+
+#[tokio::test]
+async fn group_options_query_should_skip_member_and_runtime_enrichment() {
+    let groups = Arc::new(FakeGroupStore::default());
+    let runtime = Arc::new(FakeRuntimeStore::default());
+    let service = AdminHarness::new()
+        .account_groups(groups.clone())
+        .account_runtime(runtime.clone())
+        .build()
+        .await;
+
+    let page = service
+        .account_groups()
+        .list_options(AccountGroupListQuery {
+            page: 1,
+            page_size: PageSize::new(20).expect("page size"),
+            search: None,
+            enabled: None,
+        })
+        .await
+        .expect("list account group options");
+
+    assert_eq!(page.items[0].id.as_str(), GROUP_ID);
+    assert!(
+        groups
+            .requested_groups
+            .lock()
+            .expect("requested groups")
+            .is_empty()
+    );
+    assert!(
+        runtime
+            .requested_accounts
+            .lock()
+            .expect("requested accounts")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn group_options_query_should_preserve_store_failures() {
+    let service = AdminHarness::new().build().await;
+
+    let error = service
+        .account_groups()
+        .list_options(AccountGroupListQuery {
+            page: 1,
+            page_size: PageSize::new(20).expect("page size"),
+            search: None,
+            enabled: None,
+        })
+        .await
+        .expect_err("unavailable options store must fail");
+
+    assert_eq!(error.kind(), AdminErrorKind::Unavailable);
+}
+
+#[derive(Default)]
+struct FakeGroupStore {
+    projection_failure: bool,
+    missing_record: bool,
+    published_revision: Option<Arc<std::sync::atomic::AtomicU64>>,
+    requested_groups: Mutex<Vec<String>>,
+    members: Option<Vec<AccountGroupMemberFact>>,
+}
+
+#[tokio::test]
+async fn group_capacity_only_becomes_unlimited_for_available_unlimited_members() {
+    for (available_slots, unavailable_slots, expected) in
+        [(None, Some(3), None), (Some(4), None, Some(4))]
+    {
+        let mut available = member("acct_available", 4);
+        available.total_slots = available_slots;
+        let mut unavailable = member("acct_limited", 3);
+        unavailable.total_slots = unavailable_slots;
+        let groups = Arc::new(FakeGroupStore {
+            members: Some(vec![available, unavailable]),
+            ..Default::default()
+        });
+        let service = AdminHarness::new()
+            .account_groups(groups)
+            .account_runtime(Arc::new(FakeRuntimeStore::default()))
+            .build()
+            .await;
+        let page = service
+            .account_groups()
+            .list(AccountGroupListQuery {
+                page: 1,
+                page_size: PageSize::new(20).expect("page size"),
+                search: None,
+                enabled: None,
+            })
+            .await
+            .expect("group capacity");
+        assert_eq!(page.items[0].capacity.total_slots, expected);
+        assert_eq!(page.items[0].capacity.used_slots, Some(2));
+    }
+}
+
+#[async_trait]
+impl AccountGroupStore for FakeGroupStore {
+    async fn list_account_groups(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> AdminStoreResult<AccountGroupPage> {
+        Ok(AccountGroupPage {
+            config_revision: Revision::new(1).expect("revision"),
+            items: vec![group_record()],
+            total: 1,
+            page: query.page,
+            page_size: query.page_size.get(),
+        })
+    }
+
+    async fn list_account_group_options(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> AdminStoreResult<AccountGroupOptionsPage> {
+        Ok(AccountGroupOptionsPage {
+            config_revision: Revision::new(1).expect("revision"),
+            items: vec![AccountGroupRef {
+                id: group_id(),
+                name: "Primary".to_owned(),
+                color: AccountGroupColor::parse("#2563EBFF").expect("color"),
+                enabled: true,
+            }],
+            total: 1,
+            page: query.page,
+            page_size: query.page_size.get(),
+        })
+    }
+
+    async fn load_account_group_members(
+        &self,
+        group_ids: &[AccountGroupId],
+    ) -> AdminStoreResult<Vec<AccountGroupMemberFact>> {
+        if self.projection_failure {
+            assert_eq!(
+                self.published_revision
+                    .as_ref()
+                    .expect("publication counter")
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                2
+            );
+            return Err(unused());
+        }
+        *self.requested_groups.lock().expect("requested groups") = group_ids
+            .iter()
+            .map(|group_id| group_id.as_str().to_owned())
+            .collect();
+        Ok(self
+            .members
+            .clone()
+            .unwrap_or_else(|| vec![member("acct_available", 4), member("acct_limited", 3)]))
+    }
+
+    async fn create_account_group(
+        &self,
+        _: NewAccountGroup,
+        _: &MutationContext,
+    ) -> AdminStoreResult<AccountGroupMutation> {
+        Err(unused())
+    }
+
+    async fn update_account_group(
+        &self,
+        _: UpdateAccountGroup,
+        _: &MutationContext,
+    ) -> AdminStoreResult<AccountGroupMutation> {
+        Err(unused())
+    }
+
+    async fn set_account_group_enabled(
+        &self,
+        command: SetAccountGroupEnabled,
+        _: &MutationContext,
+    ) -> AdminStoreResult<AccountGroupMutation> {
+        let mut record = group_record();
+        record.enabled = command.enabled;
+        Ok(AccountGroupMutation {
+            config_revision: Revision::new(2).expect("committed revision"),
+            id: record.id.clone(),
+            record: (!self.missing_record).then_some(record),
+        })
+    }
+
+    async fn delete_account_group(
+        &self,
+        _: DeleteAccountGroup,
+        _: &MutationContext,
+    ) -> AdminStoreResult<AccountGroupMutation> {
+        Err(unused())
+    }
+}
+
+#[derive(Default)]
+struct FakeRuntimeStore {
+    requested_accounts: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl AccountRuntimeStore for FakeRuntimeStore {
+    async fn account_concurrency(
+        &self,
+        _: &str,
+        _: u64,
+        _: u32,
+    ) -> AdminStoreResult<gateway_admin::model::accounts::AccountConcurrencyPage> {
+        Err(gateway_admin::ports::store::AdminStoreError::new(
+            gateway_admin::ports::store::AdminStoreErrorKind::Unavailable,
+            "account concurrency",
+            "not configured in this fixture",
+        ))
+    }
+
+    async fn active_rate_limits(&self) -> AdminStoreResult<AccountRuntimeSnapshot> {
+        Ok(AccountRuntimeSnapshot::default())
+    }
+
+    async fn account_runtime(
+        &self,
+        account_ids: &[String],
+    ) -> AdminStoreResult<AccountRuntimeSnapshot> {
+        *self.requested_accounts.lock().expect("requested accounts") = account_ids.to_vec();
+        Ok(AccountRuntimeSnapshot {
+            protection_rules: std::collections::BTreeMap::new(),
+            cooldown: BTreeMap::from([(
+                "acct_limited".to_owned(),
+                std::time::SystemTime::from(Utc::now() + Duration::minutes(5)).into(),
+            )]),
+            in_flight: Some(BTreeMap::from([("acct_available".to_owned(), 2)])),
+        })
+    }
+
+    async fn active_freezes(
+        &self,
+    ) -> AdminStoreResult<BTreeMap<String, gateway_admin::model::accounts::AccountFreeze>> {
+        Ok(BTreeMap::new())
+    }
+
+    async fn finish_freeze(
+        &self,
+        _account_id: &str,
+        _expected: &gateway_admin::model::accounts::AccountFreeze,
+        _postpone_until: Option<DateTime<Utc>>,
+    ) -> AdminStoreResult<bool> {
+        Ok(false)
+    }
+}
+
+fn group_record() -> AccountGroupRecord {
+    let now = Utc::now();
+    AccountGroupRecord {
+        allow_image_generation: true,
+        fast_mode: FastMode::Default,
+        id: group_id(),
+        name: "Primary".to_owned(),
+        description: None,
+        color: AccountGroupColor::parse("#2563EBFF").expect("color"),
+        enabled: true,
+        member_count: 2,
+        provider_counts: BTreeMap::from([("openai".to_owned(), 2)]),
+        client_key_count: 1,
+        account_summary: AccountGroupAccountSummary {
+            available: 0,
+            limited: 0,
+            total: 0,
+        },
+        capacity: AccountGroupCapacity {
+            used_slots: None,
+            total_slots: Some(0),
+        },
+        usage: AccountGroupUsage {
+            today_usd: DecimalAmount::from_str("1").expect("today usage"),
+            retained_total_usd: DecimalAmount::from_str("3").expect("retained usage"),
+        },
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn member(account_id: &str, total_slots: u64) -> AccountGroupMemberFact {
+    AccountGroupMemberFact {
+        inherited_version: None,
+        group_id: group_id(),
+        account_id: account_id.to_owned(),
+        status: AccountStatusFacts {
+            enabled: true,
+            credential_state: CredentialState::Ready,
+            access_token_expires_at: None,
+            quota: QuotaState::default(),
+            cooldown: None,
+            last_error_reason: None,
+            last_error_message: None,
+        },
+        total_slots: Some(total_slots),
+    }
+}
+
+fn group_id() -> AccountGroupId {
+    AccountGroupId::new(GROUP_ID).expect("group ID")
+}
+
+fn unused() -> AdminStoreError {
+    AdminStoreError::new(
+        AdminStoreErrorKind::Unavailable,
+        "account group",
+        "unused test operation",
+    )
+}
+
+#[tokio::test]
+async fn invalid_group_fields_are_rejected_before_store_mutations() {
+    use gateway_admin::model::{MutationActor, account_groups::CreateAccountGroup};
+    let service = AdminHarness::new()
+        .account_groups(Arc::new(FakeGroupStore::default()))
+        .build()
+        .await;
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "invalid-group".to_owned(),
+    };
+    let record = group_record();
+    let created = service
+        .account_groups()
+        .create(
+            &context,
+            CreateAccountGroup {
+                allow_image_generation: true,
+                fast_mode: FastMode::Default,
+                name: " invalid".to_owned(),
+                description: None,
+                color: record.color.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+    let updated = service
+        .account_groups()
+        .update(
+            &context,
+            UpdateAccountGroup {
+                allow_image_generation: None,
+                fast_mode: None,
+                id: record.id,
+                name: "valid".to_owned(),
+                description: Some("invalid\n".to_owned()),
+                color: record.color,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(created.kind(), AdminErrorKind::Invalid);
+    assert_eq!(updated.kind(), AdminErrorKind::Invalid);
+}
+
+struct RecordingPublication(Arc<std::sync::atomic::AtomicU64>);
+
+impl gateway_core::runtime::SnapshotControl for RecordingPublication {
+    fn publish_committed(
+        &self,
+        revision: gateway_core::routing::ConfigRevision,
+    ) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            self.0
+                .store(revision.get(), std::sync::atomic::Ordering::SeqCst);
+        })
+    }
+}
+
+#[tokio::test]
+async fn committed_group_mutations_publish_even_when_the_display_projection_is_unavailable() {
+    for missing_record in [false, true] {
+        let published = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let groups = Arc::new(FakeGroupStore {
+            projection_failure: true,
+            missing_record,
+            published_revision: Some(published.clone()),
+            ..Default::default()
+        });
+        let services = AdminHarness::new()
+            .account_groups(groups)
+            .snapshot(Arc::new(RecordingPublication(published.clone())))
+            .build()
+            .await;
+        let mutation = services
+            .account_groups()
+            .set_enabled(
+                &crate::backup::support::system_context(),
+                SetAccountGroupEnabled {
+                    id: group_id(),
+                    enabled: false,
+                },
+            )
+            .await
+            .expect("committed mutation remains successful");
+        assert_eq!(mutation.config_revision.get(), 2);
+        assert_eq!(mutation.id, group_id());
+        assert!(mutation.record.is_none());
+        assert_eq!(published.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+}

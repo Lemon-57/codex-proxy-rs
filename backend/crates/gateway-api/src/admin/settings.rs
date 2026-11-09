@@ -1,0 +1,878 @@
+//! Runtime settings、旧设置页聚合投影与明文 Admin API Key wire
+
+use crate::auth::SessionState;
+
+use std::{collections::BTreeMap, fmt};
+
+use axum::{
+    Router,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
+use chrono::{DateTime, Utc};
+use gateway_admin::model::client_distribution::{
+    ClientDownloadPackage, CodexDesktopWindowsDownloads,
+};
+use gateway_admin::model::settings::{
+    ModelMappings as DomainModelMappings, ReplaceRuntimeSettings, RotationStrategy, RuntimeSettings,
+};
+use gateway_core::routing::{PublicModelId, UpstreamModelId};
+use serde::{Deserialize, Serialize};
+
+use super::{
+    AdminAuth, AdminEnvelope, AdminError, AdminJson, AdminQuery, AdminResponse,
+    WireValidationError, wire::map_admin_service_error,
+};
+
+/// 客户端模型到上游模型的全局精确映射
+pub type ModelMappings = BTreeMap<String, String>;
+pub type ProviderRequestProfiles = BTreeMap<String, serde_json::Map<String, serde_json::Value>>;
+pub type ProviderRequestProfileUpdates =
+    BTreeMap<String, Option<serde_json::Map<String, serde_json::Value>>>;
+
+/// HTTP 读写共用的设置字段；仅保留 wire 数值类型与命名
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSettingsFields {
+    pub codex_privacy_policy: gateway_core::settings::privacy::CodexPrivacyPolicy,
+    pub request_location_enabled: bool,
+    pub request_location: gateway_core::account::RequestLocation,
+    pub refresh_margin_seconds: u64,
+    pub refresh_concurrency: u64,
+    pub max_concurrent_per_account: u64,
+    pub max_waiting_per_key: u32,
+    pub max_waiting_per_account: u32,
+    pub key_queue_timeout_seconds: u32,
+    pub account_queue_timeout_seconds: u32,
+    pub switch_account_on_queue_failure: bool,
+    pub max_retry_after_seconds: u32,
+    pub openai_guardian_reserved_concurrency: u32,
+    pub openai_account_affinity: gateway_core::account::AccountAffinity,
+    pub max_account_rotations: u32,
+    pub openai_session_affinity_ttl_hours: u32,
+    pub responses_max_decompressed_body_bytes: u64,
+    pub smart_scheduling: gateway_core::account::SmartSchedulingConfig,
+    pub min_codex_desktop_version: Option<String>,
+    pub min_codex_cli_version: Option<String>,
+    pub usage_retention_days: u64,
+    pub ops_event_retention_days: u64,
+    pub audit_retention_days: u64,
+    pub account_error_protection: gateway_core::account::AccountErrorProtection,
+    pub account_warmup_enabled: bool,
+    pub account_warmup_schedule_time: String,
+    pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_default_enabled: bool,
+    pub reset_credit_lead_minutes: u32,
+    pub reset_credit_max_weekly_remaining_percent: Option<u32>,
+}
+
+/// 运行配置投影与设置页字段的聚合响应
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSettingsView {
+    #[serde(flatten)]
+    pub values: RuntimeSettingsFields,
+    pub config_revision: u64,
+    pub smart_scheduling_defaults: gateway_core::account::SmartSchedulingConfig,
+    pub provider_request_profiles: ProviderRequestProfiles,
+    /// 固定兼容字段；值始终从 provider_request_profiles 派生
+    pub openai_client_profile: Option<serde_json::Map<String, serde_json::Value>>,
+    /// 固定兼容字段；值始终从 provider_request_profiles 派生
+    pub xai_client_profile: Option<serde_json::Map<String, serde_json::Value>>,
+    pub model_mappings: ModelMappings,
+    pub rotation_strategy: String,
+    pub updated_at: DateTime<Utc>,
+    pub updated_at_display: String,
+}
+
+/// 原子替换全局运行参数的请求
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateRuntimeSettingsRequest {
+    #[serde(flatten)]
+    pub values: RuntimeSettingsFields,
+    pub config_revision: u64,
+    #[serde(default)]
+    pub provider_request_profiles: ProviderRequestProfileUpdates,
+    /// 兼容既有 wire；与泛化字段冲突时拒绝整个请求
+    #[serde(default, deserialize_with = "deserialize_profile_update")]
+    pub openai_client_profile: Option<serde_json::Map<String, serde_json::Value>>,
+    /// 兼容既有 wire；与泛化字段冲突时拒绝整个请求
+    #[serde(default, deserialize_with = "deserialize_profile_update")]
+    pub xai_client_profile: Option<serde_json::Map<String, serde_json::Value>>,
+    pub model_mappings: ModelMappings,
+    pub rotation_strategy: String,
+}
+
+impl UpdateRuntimeSettingsRequest {
+    /// 校验公共运行参数
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        validate_model_mappings(&self.model_mappings)?;
+        if RotationStrategy::parse(&self.rotation_strategy).is_none() {
+            return Err(WireValidationError::new("rotationStrategy"));
+        }
+        self.values.clone().into_values().map(|_| ())
+    }
+
+    fn into_command(self) -> Result<ReplaceRuntimeSettings, WireValidationError> {
+        validate_model_mappings(&self.model_mappings)?;
+        let request_profile_updates = normalize_request_profile_updates(
+            self.provider_request_profiles,
+            self.openai_client_profile,
+            self.xai_client_profile,
+        )?;
+        Ok(ReplaceRuntimeSettings {
+            expected_revision: gateway_admin::model::Revision::new(self.config_revision)
+                .map_err(|_| WireValidationError::new("configRevision"))?,
+            request_profile_updates,
+            model_mappings: domain_model_mappings(self.model_mappings)?,
+            rotation_strategy: RotationStrategy::parse(&self.rotation_strategy)
+                .ok_or_else(|| WireValidationError::new("rotationStrategy"))?,
+            values: self.values.into_values()?,
+        })
+    }
+}
+
+impl From<(RuntimeSettings, crate::time::TimePresenter)> for RuntimeSettingsView {
+    fn from((settings, time): (RuntimeSettings, crate::time::TimePresenter)) -> Self {
+        let provider_request_profiles = settings
+            .request_profiles
+            .into_iter()
+            .map(|(provider, profile)| (provider.as_str().to_owned(), profile.into_inner()))
+            .collect::<ProviderRequestProfiles>();
+        Self {
+            config_revision: settings.config_revision.get(),
+            openai_client_profile: provider_request_profiles.get("openai").cloned(),
+            xai_client_profile: provider_request_profiles.get("xai").cloned(),
+            provider_request_profiles,
+            model_mappings: wire_model_mappings(settings.model_mappings),
+            smart_scheduling_defaults: gateway_core::account::SmartSchedulingConfig::default(),
+            rotation_strategy: settings.rotation_strategy.as_str().to_owned(),
+            updated_at_display: time.datetime(&settings.updated_at),
+            updated_at: settings.updated_at,
+            values: settings.values.into(),
+        }
+    }
+}
+
+/// 管理 API Key 状态；状态读取不回显完整值
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminApiKeyStatus {
+    pub exists: bool,
+}
+
+/// 管理 API Key 重新生成响应
+#[derive(Serialize)]
+pub struct RegeneratedAdminApiKey {
+    pub key: String,
+}
+
+impl fmt::Debug for RegeneratedAdminApiKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegeneratedAdminApiKey")
+            .field("key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// 管理 API Key 删除响应
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DeletedAdminApiKey {
+    pub message: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ClientDownloadsQuery {
+    refresh: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientDownloadPackageView {
+    architecture: String,
+    source: String,
+    version: Option<String>,
+    file_name: String,
+    size_bytes: Option<u64>,
+    download_url: String,
+    expires_at: Option<DateTime<Utc>>,
+    expires_at_display: Option<String>,
+}
+
+impl From<(ClientDownloadPackage, crate::time::TimePresenter)> for ClientDownloadPackageView {
+    fn from((package, time): (ClientDownloadPackage, crate::time::TimePresenter)) -> Self {
+        Self {
+            architecture: package.architecture.as_str().to_owned(),
+            source: package.source.as_str().to_owned(),
+            version: package.version,
+            file_name: package.file_name,
+            size_bytes: package.size_bytes,
+            download_url: package.download_url,
+            expires_at_display: package
+                .expires_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
+            expires_at: package.expires_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexDesktopWindowsDownloadsView {
+    resolved_at: DateTime<Utc>,
+    resolved_at_display: String,
+    cached: bool,
+    warning: Option<String>,
+    packages: Vec<ClientDownloadPackageView>,
+}
+
+impl From<(CodexDesktopWindowsDownloads, crate::time::TimePresenter)>
+    for CodexDesktopWindowsDownloadsView
+{
+    fn from((downloads, time): (CodexDesktopWindowsDownloads, crate::time::TimePresenter)) -> Self {
+        Self {
+            resolved_at_display: time.datetime(&downloads.resolved_at),
+            resolved_at: downloads.resolved_at,
+            cached: downloads.cached,
+            warning: downloads.warning,
+            packages: downloads
+                .packages
+                .into_iter()
+                .map(|value| ClientDownloadPackageView::from((value, time)))
+                .collect(),
+        }
+    }
+}
+
+impl Default for DeletedAdminApiKey {
+    fn default() -> Self {
+        Self {
+            message: "Admin API key deleted",
+        }
+    }
+}
+
+/// 构造固定 GET/POST 设置路由
+pub fn router<S>() -> Router<S>
+where
+    S: SessionState + Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/api/admin/settings/pricing", get(pricing::<S>))
+        .route(
+            "/api/admin/settings/pricing/update",
+            post(update_pricing::<S>),
+        )
+        .route(
+            "/api/admin/settings/pricing/sync/preview",
+            post(preview_pricing_sync::<S>),
+        )
+        .route("/api/admin/settings/pricing/sync", post(sync_pricing::<S>))
+        .route("/api/admin/settings", get(settings::<S>))
+        .route(
+            "/api/admin/settings/location/detect",
+            post(detect_location::<S>),
+        )
+        .route(
+            "/api/admin/settings/client-profiles/{provider}",
+            get(client_profile_options::<S>),
+        )
+        .route(
+            "/api/admin/settings/client-profiles/{provider}/preview",
+            post(preview_client_profile::<S>),
+        )
+        .route(
+            "/api/admin/settings/privacy/preview",
+            post(preview_privacy::<S>),
+        )
+        .route("/api/admin/settings/update", post(update_settings::<S>))
+        .route(
+            "/api/admin/settings/client-downloads/codex-desktop/windows",
+            get(codex_desktop_windows_downloads::<S>),
+        )
+        .route(
+            "/api/admin/settings/admin-api-key",
+            get(admin_api_key_status::<S>),
+        )
+        .route(
+            "/api/admin/settings/admin-api-key/delete",
+            post(delete_admin_api_key::<S>),
+        )
+        .route(
+            "/api/admin/settings/admin-api-key/regenerate",
+            post(regenerate_admin_api_key::<S>),
+        )
+}
+
+async fn codex_desktop_windows_downloads<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<ClientDownloadsQuery>,
+) -> impl IntoResponse
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let downloads = state
+        .admin_services()
+        .client_distribution()
+        .codex_desktop_windows(query.refresh)
+        .await;
+    AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(CodexDesktopWindowsDownloadsView::from((downloads, time))),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PricingUpdateRequest {
+    provider: String,
+    models: Vec<String>,
+    change: PricingChangeRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
+enum PricingChangeRequest {
+    Replace {
+        pricing: gateway_core::metering::ModelPriceOverride,
+    },
+    Multiplier {
+        #[serde(rename = "multiplierBps")]
+        multiplier_bps: u32,
+    },
+    Reset {},
+    Delete {},
+}
+
+async fn pricing<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let pricing = state
+        .admin_services()
+        .settings()
+        .pricing()
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(serde_json::json!({
+            "defaults": pricing.defaults, "overrides": pricing.overrides,
+            "synced": pricing.synced, "syncedAt": pricing.synced_at,
+            "syncedAtDisplay": pricing.synced_at.as_ref().map(|value| crate::time::TimePresenter::new(state.admin_services().timezone()).datetime(value)),
+        })),
+    ))
+}
+
+async fn preview_pricing_sync<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let preview = state
+        .admin_services()
+        .settings()
+        .preview_pricing_sync()
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(preview),
+    ))
+}
+
+async fn sync_pricing<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(command): AdminJson<gateway_admin::model::pricing::SyncPricing>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    state
+        .admin_services()
+        .settings()
+        .sync_pricing(&auth.context().mutation_context(), command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(serde_json::json!({"saved": true})),
+    ))
+}
+
+async fn update_pricing<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<PricingUpdateRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    use gateway_admin::model::pricing::{PricingChange, UpdatePricing};
+    let change = match request.change {
+        PricingChangeRequest::Replace { pricing } => PricingChange::Replace(pricing),
+        PricingChangeRequest::Multiplier { multiplier_bps } => {
+            PricingChange::Multiplier(multiplier_bps)
+        }
+        PricingChangeRequest::Reset {} => PricingChange::Reset,
+        PricingChangeRequest::Delete {} => PricingChange::Delete,
+    };
+    state
+        .admin_services()
+        .settings()
+        .update_pricing(
+            &auth.context().mutation_context(),
+            UpdatePricing {
+                provider: request.provider,
+                models: request.models,
+                change,
+            },
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(serde_json::json!({"saved": true})),
+    ))
+}
+
+async fn settings<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let result = state
+        .admin_services()
+        .settings()
+        .load()
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(RuntimeSettingsView::from((result, time))),
+    ))
+}
+
+async fn update_settings<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<UpdateRuntimeSettingsRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let command = request.into_command().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .settings()
+        .replace(&auth.context().mutation_context(), command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(RuntimeSettingsView::from((result, time))),
+    ))
+}
+
+async fn admin_api_key_status<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let exists = state
+        .admin_services()
+        .settings()
+        .admin_api_key_exists()
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AdminApiKeyStatus { exists }),
+    ))
+}
+
+async fn regenerate_admin_api_key<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let result = state
+        .admin_services()
+        .settings()
+        .regenerate_admin_api_key(&auth.context().mutation_context())
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(RegeneratedAdminApiKey {
+            key: result.key.expose_for_response().to_owned(),
+        }),
+    ))
+}
+
+async fn delete_admin_api_key<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    state
+        .admin_services()
+        .settings()
+        .delete_admin_api_key(&auth.context().mutation_context())
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(DeletedAdminApiKey::default()),
+    ))
+}
+
+fn validate_model_mappings(mappings: &ModelMappings) -> Result<(), WireValidationError> {
+    gateway_admin::model::settings::validate_model_mappings(
+        mappings
+            .iter()
+            .map(|(requested, upstream)| (requested.as_str(), upstream.as_str())),
+    )
+    .map_err(|_| WireValidationError::new("modelMappings"))
+}
+
+fn domain_model_mappings(
+    mappings: ModelMappings,
+) -> Result<DomainModelMappings, WireValidationError> {
+    mappings
+        .into_iter()
+        .map(|(requested, upstream)| {
+            Ok((
+                PublicModelId::new(requested)
+                    .map_err(|_| WireValidationError::new("modelMappings"))?,
+                UpstreamModelId::new(upstream)
+                    .map_err(|_| WireValidationError::new("modelMappings"))?,
+            ))
+        })
+        .collect()
+}
+
+fn wire_model_mappings(mappings: DomainModelMappings) -> ModelMappings {
+    mappings
+        .into_iter()
+        .map(|(requested, upstream)| (requested.to_string(), upstream.to_string()))
+        .collect()
+}
+
+fn map_wire_error(error: WireValidationError) -> AdminError {
+    let message = match error.field() {
+        "settingsRefreshConcurrencyOverflow" => "刷新并发数不合法".to_owned(),
+        "settingsMaxConcurrencyOverflow" => "单账号并发上限不合法".to_owned(),
+        "settingsUsageRetentionOverflow" => "用量记录保留天数不合法".to_owned(),
+        "settingsOpsRetentionOverflow" => "运维事件保留天数不合法".to_owned(),
+        "settingsAuditRetentionOverflow" => "审计记录保留天数不合法".to_owned(),
+        "requestLocation" => "请求位置的国家代码、地区或城市不合法".to_owned(),
+        "providerRequestProfiles" => "服务商客户端身份配置无效或字段冲突".to_owned(),
+        "minCodexDesktopVersion" => "Codex Desktop 最低版本格式不合法".to_owned(),
+        "minCodexCliVersion" => "Codex CLI 最低版本格式不合法".to_owned(),
+        field => format!("{field} 字段不合法"),
+    };
+    AdminError::bad_request(message)
+}
+
+fn map_service_error(error: gateway_admin::model::AdminError) -> AdminError {
+    map_admin_service_error(error)
+}
+
+fn normalize_request_profile_updates(
+    profiles: ProviderRequestProfileUpdates,
+    openai: Option<serde_json::Map<String, serde_json::Value>>,
+    xai: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<gateway_admin::model::settings::ProviderRequestProfileUpdates, WireValidationError> {
+    let mut normalized = profiles
+        .into_iter()
+        .map(|(provider, profile)| {
+            if !matches!(provider.as_str(), "openai" | "xai") {
+                return Err(WireValidationError::new("providerRequestProfiles"));
+            }
+            let provider = gateway_core::routing::ProviderKind::new(provider)
+                .map_err(|_| WireValidationError::new("providerRequestProfiles"))?;
+            Ok((
+                provider,
+                profile.map(gateway_core::account::OpaqueProviderData::new),
+            ))
+        })
+        .collect::<Result<gateway_admin::model::settings::ProviderRequestProfileUpdates, _>>()?;
+    for (provider, profile) in [("openai", openai), ("xai", xai)] {
+        let Some(profile) = profile else {
+            continue;
+        };
+        let provider = gateway_core::routing::ProviderKind::new(provider)
+            .expect("static Provider kind is valid");
+        let profile = gateway_core::account::OpaqueProviderData::new(profile);
+        if normalized
+            .get(&provider)
+            .is_some_and(|current| current.as_ref() != Some(&profile))
+        {
+            return Err(WireValidationError::new("providerRequestProfiles"));
+        }
+        normalized.insert(provider, Some(profile));
+    }
+    Ok(normalized)
+}
+
+// 字段省略时保留已有配置；显式 null 不能清空唯一的通用默认
+fn deserialize_profile_update<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, D::Error> {
+    serde_json::Map::<String, serde_json::Value>::deserialize(deserializer).map(Some)
+}
+
+async fn detect_location<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let result = state
+        .admin_services()
+        .proxies()
+        .probe(None, true)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(result.location),
+    ))
+}
+
+async fn client_profile_options<S>(
+    _auth: AdminAuth,
+    Path(provider): Path<String>,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let result = state
+        .admin_services()
+        .settings()
+        .client_profile_options(&provider)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(client_profile_preview_view(
+            result.into_inner(),
+            crate::time::TimePresenter::new(state.admin_services().timezone()),
+        )),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientProfilePreviewRequest {
+    configuration: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+async fn preview_client_profile<S>(
+    _auth: AdminAuth,
+    Path(provider): Path<String>,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<ClientProfilePreviewRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let configuration = request
+        .configuration
+        .map(gateway_core::account::OpaqueProviderData::new);
+    let result = state
+        .admin_services()
+        .settings()
+        .preview_client_profile(&provider, configuration.as_ref())
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(client_profile_preview_view(
+            result.into_inner(),
+            crate::time::TimePresenter::new(state.admin_services().timezone()),
+        )),
+    ))
+}
+
+fn client_profile_preview_view(
+    mut profile: serde_json::Map<String, serde_json::Value>,
+    time: crate::time::TimePresenter,
+) -> serde_json::Map<String, serde_json::Value> {
+    for (raw, display) in [
+        ("verifiedAt", "verifiedAtDisplay"),
+        ("checkedAt", "checkedAtDisplay"),
+    ] {
+        let value = time.rfc_display(profile.get(raw).and_then(serde_json::Value::as_str));
+        profile.insert(display.to_owned(), serde_json::json!(value));
+    }
+    profile
+}
+
+impl RuntimeSettingsFields {
+    fn into_values(
+        self,
+    ) -> Result<gateway_admin::model::settings::RuntimeSettingsValues, WireValidationError> {
+        let values = gateway_admin::model::settings::RuntimeSettingsValues {
+            codex_privacy_policy: self.codex_privacy_policy,
+            request_location_enabled: self.request_location_enabled,
+            request_location: self
+                .request_location
+                .normalized()
+                .map_err(|_| WireValidationError::new("requestLocation"))?,
+            refresh_margin_seconds: self.refresh_margin_seconds,
+            refresh_concurrency: u32::try_from(self.refresh_concurrency)
+                .map_err(|_| WireValidationError::new("settingsRefreshConcurrencyOverflow"))?,
+            max_concurrent_per_account: u32::try_from(self.max_concurrent_per_account)
+                .map_err(|_| WireValidationError::new("settingsMaxConcurrencyOverflow"))?,
+            max_waiting_per_key: self.max_waiting_per_key,
+            max_waiting_per_account: self.max_waiting_per_account,
+            key_queue_timeout_seconds: self.key_queue_timeout_seconds,
+            account_queue_timeout_seconds: self.account_queue_timeout_seconds,
+            switch_account_on_queue_failure: self.switch_account_on_queue_failure,
+            max_retry_after_seconds: self.max_retry_after_seconds,
+            openai_guardian_reserved_concurrency: self.openai_guardian_reserved_concurrency,
+            openai_account_affinity: self.openai_account_affinity,
+            max_account_rotations: self.max_account_rotations,
+            openai_session_affinity_ttl_hours: self.openai_session_affinity_ttl_hours,
+            responses_max_decompressed_body_bytes: self.responses_max_decompressed_body_bytes,
+            smart_scheduling: self.smart_scheduling,
+            min_codex_desktop_version: self.min_codex_desktop_version,
+            min_codex_cli_version: self.min_codex_cli_version,
+            usage_retention_days: u32::try_from(self.usage_retention_days)
+                .map_err(|_| WireValidationError::new("settingsUsageRetentionOverflow"))?,
+            ops_event_retention_days: u32::try_from(self.ops_event_retention_days)
+                .map_err(|_| WireValidationError::new("settingsOpsRetentionOverflow"))?,
+            audit_retention_days: u32::try_from(self.audit_retention_days)
+                .map_err(|_| WireValidationError::new("settingsAuditRetentionOverflow"))?,
+            account_error_protection: self.account_error_protection,
+            account_warmup_enabled: self.account_warmup_enabled,
+            account_warmup_schedule_time: self.account_warmup_schedule_time,
+            account_warmup_model: self.account_warmup_model,
+            reset_credit_default_enabled: self.reset_credit_default_enabled,
+            reset_credit_lead_minutes: self.reset_credit_lead_minutes,
+            reset_credit_max_weekly_remaining_percent: self
+                .reset_credit_max_weekly_remaining_percent,
+        };
+        values.validate().map_err(settings_validation_error)?;
+        Ok(values)
+    }
+}
+
+impl From<gateway_admin::model::settings::RuntimeSettingsValues> for RuntimeSettingsFields {
+    fn from(settings: gateway_admin::model::settings::RuntimeSettingsValues) -> Self {
+        crate::admin::settings::RuntimeSettingsFields {
+            codex_privacy_policy: settings.codex_privacy_policy,
+            request_location_enabled: settings.request_location_enabled,
+            request_location: settings.request_location,
+            refresh_margin_seconds: settings.refresh_margin_seconds,
+            refresh_concurrency: u64::from(settings.refresh_concurrency),
+            max_concurrent_per_account: u64::from(settings.max_concurrent_per_account),
+            max_waiting_per_key: settings.max_waiting_per_key,
+            max_waiting_per_account: settings.max_waiting_per_account,
+            key_queue_timeout_seconds: settings.key_queue_timeout_seconds,
+            account_queue_timeout_seconds: settings.account_queue_timeout_seconds,
+            switch_account_on_queue_failure: settings.switch_account_on_queue_failure,
+            max_retry_after_seconds: settings.max_retry_after_seconds,
+            openai_guardian_reserved_concurrency: settings.openai_guardian_reserved_concurrency,
+            openai_account_affinity: settings.openai_account_affinity,
+            max_account_rotations: settings.max_account_rotations,
+            openai_session_affinity_ttl_hours: settings.openai_session_affinity_ttl_hours,
+            responses_max_decompressed_body_bytes: settings.responses_max_decompressed_body_bytes,
+            smart_scheduling: settings.smart_scheduling,
+            min_codex_desktop_version: settings.min_codex_desktop_version,
+            min_codex_cli_version: settings.min_codex_cli_version,
+            usage_retention_days: u64::from(settings.usage_retention_days),
+            ops_event_retention_days: u64::from(settings.ops_event_retention_days),
+            audit_retention_days: u64::from(settings.audit_retention_days),
+            account_error_protection: settings.account_error_protection,
+            account_warmup_enabled: settings.account_warmup_enabled,
+            account_warmup_schedule_time: settings.account_warmup_schedule_time,
+            account_warmup_model: settings.account_warmup_model,
+            reset_credit_default_enabled: settings.reset_credit_default_enabled,
+            reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
+            reset_credit_max_weekly_remaining_percent: settings
+                .reset_credit_max_weekly_remaining_percent,
+        }
+    }
+}
+
+fn settings_validation_error(field: &'static str) -> WireValidationError {
+    WireValidationError::new(match field {
+        "account_error_protection" => "accountErrorProtection",
+        "account_warmup_enabled" => "accountWarmupEnabled",
+        "account_warmup_model" => "accountWarmupModel",
+        "reset_credit_lead_minutes" => "resetCreditLeadMinutes",
+        "reset_credit_max_weekly_remaining_percent" => "resetCreditMaxWeeklyRemainingPercent",
+        "account_warmup_schedule_time" => "accountWarmupScheduleTime",
+        "audit_retention_days" => "auditRetentionDays",
+        "key_queue_timeout_seconds" => "keyQueueTimeoutSeconds",
+        "account_queue_timeout_seconds" => "accountQueueTimeoutSeconds",
+        "max_account_rotations" => "maxAccountRotations",
+        "max_concurrent_per_account" => "maxConcurrentPerAccount",
+        "max_waiting_per_account" => "maxWaitingPerAccount",
+        "max_waiting_per_key" => "maxWaitingPerKey",
+        "min_codex_cli_version" => "minCodexCliVersion",
+        "min_codex_desktop_version" => "minCodexDesktopVersion",
+        "openai_account_affinity" => "openaiAccountAffinity",
+        "openai_guardian_reserved_concurrency" => "openaiGuardianReservedConcurrency",
+        "openai_session_affinity_ttl_hours" => "openaiSessionAffinityTtlHours",
+        "ops_event_retention_days" => "opsEventRetentionDays",
+        "refresh_concurrency" => "refreshConcurrency",
+        "refresh_margin_seconds" => "refreshMarginSeconds",
+        "request_location" => "requestLocation",
+        "request_location_enabled" => "requestLocationEnabled",
+        "responses_max_decompressed_body_bytes" => "responsesMaxDecompressedBodyBytes",
+        "smart_scheduling" => "smartScheduling",
+        "usage_retention_days" => "usageRetentionDays",
+        _ => "settings",
+    })
+}
+
+async fn preview_privacy<S>(
+    State(state): State<S>,
+    _auth: AdminAuth,
+    AdminJson(request): AdminJson<gateway_core::settings::privacy::PrivacyPreviewRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let result = state
+        .admin_services()
+        .settings()
+        .preview_privacy_policy(request)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(result),
+    ))
+}

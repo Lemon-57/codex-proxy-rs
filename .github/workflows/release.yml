@@ -1,0 +1,584 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release, for example v0.1.0'
+        required: true
+        type: string
+      index_only:
+        description: 'Recover the index for an already public release without rebuilding'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: zyycn/codex-proxy-rs
+
+jobs:
+  release-info:
+    if: ${{ !inputs.index_only }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      docker_version: ${{ steps.version.outputs.docker_version }}
+      build_time: ${{ steps.version.outputs.build_time }}
+      git_sha: ${{ steps.version.outputs.git_sha }}
+      platform_matrix: ${{ steps.version.outputs.platform_matrix }}
+      docker_matrix: ${{ steps.version.outputs.docker_matrix }}
+      non_docker_matrix: ${{ steps.version.outputs.non_docker_matrix }}
+      windows_matrix: ${{ steps.version.outputs.windows_matrix }}
+      docker_platforms: ${{ steps.version.outputs.docker_platforms }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      build_type: ${{ steps.version.outputs.build_type }}
+      rust: ${{ steps.toolchains.outputs.rust }}
+      rust_image: ${{ steps.toolchains.outputs.rust_image }}
+      run_backend: ${{ steps.quality.outputs.run_backend }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Read release metadata and seal plugin manifest
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: ruby .github/scripts/release-metadata.rb outputs "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Read build toolchains
+        id: toolchains
+        run: ruby .github/scripts/toolchains.rb >> "$GITHUB_OUTPUT"
+
+      - name: Check reusable backend CI evidence
+        id: quality
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ruby .github/scripts/release-quality.rb >> "$GITHUB_OUTPUT"
+
+      - name: Upload sealed plugin assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plugin-release-assets
+          path: dist/plugin-release-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  quality:
+    needs: [release-info]
+    uses: ./.github/workflows/_quality.yml
+    with:
+      ref: ${{ needs.release-info.outputs.git_sha }}
+      run_backend: ${{ needs.release-info.outputs.run_backend == 'true' }}
+      run_frontend: false
+
+  windows:
+    needs: release-info
+    name: windows-tests (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.release-info.outputs.windows_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RUST_MIN_STACK: '16777216'
+      RUSTFLAGS: '-C target-feature=+crt-static'
+      CARGO_PROFILE_DEV_DEBUG: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-info.outputs.git_sha }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ needs.release-info.outputs.rust }}
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: backend -> target
+          shared-key: platform-tests-${{ matrix.target }}
+          cache-bin: false
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Setup nextest
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-nextest@0.9.143
+          fallback: none
+      - name: Verify Windows platform behavior
+        shell: bash
+        working-directory: backend
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        # 同一次构建统一两个 package 的依赖特性，保留原有平台用例和静态运行库
+        run: |
+          printf '[profile.ci.junit]\npath = "junit.xml"\n' > "$RUNNER_TEMP/nextest-ci.toml"
+          cargo nextest run --config-file "$RUNNER_TEMP/nextest-ci.toml" --locked --target "$BUILD_TARGET" \
+            -p gateway-admin -p gateway-host --test main --no-tests fail --profile ci \
+            -E '(package(=gateway-admin) & test(/^use_case::plugins::official::/)) | (package(=gateway-host) & test(/^system_update::/))'
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-tests-${{ matrix.arch }}
+          path: backend/target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  security:
+    needs: release-info
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+      security-events: write
+    with:
+      ref: ${{ needs.release-info.outputs.git_sha }}
+
+  frontend:
+    needs: release-info
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      CI: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-info.outputs.git_sha }}
+
+      - name: Validate and build frontend
+        uses: ./.github/actions/build-frontend
+        with:
+          upload-artifact: 'true'
+
+  build-docker-binary:
+    name: build-docker-binary (${{ matrix.os }}-${{ matrix.arch }})
+    needs: release-info
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.release-info.outputs.docker_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-info.outputs.git_sha }}
+
+      - name: Build binary
+        uses: ./.github/actions/build-binary
+        with:
+          rust: ${{ needs.release-info.outputs.rust }}
+          target: ${{ matrix.target }}
+          platform: ${{ matrix.os }}-${{ matrix.arch }}
+          binary: ${{ matrix.binary }}
+          rust-image: ${{ needs.release-info.outputs.rust_image }}
+        env:
+          CPR_VERSION: ${{ needs.release-info.outputs.version }}
+          CPR_GIT_SHA: ${{ needs.release-info.outputs.git_sha }}
+          CPR_BUILD_TIME: ${{ needs.release-info.outputs.build_time }}
+          CPR_BUILD_TYPE: ${{ needs.release-info.outputs.build_type }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: codex-proxy-rs-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  build-binary:
+    name: build-binary (${{ matrix.os }}-${{ matrix.arch }})
+    needs: release-info
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.release-info.outputs.non_docker_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-info.outputs.git_sha }}
+
+      - name: Build binary
+        uses: ./.github/actions/build-binary
+        with:
+          rust: ${{ needs.release-info.outputs.rust }}
+          target: ${{ matrix.target }}
+          platform: ${{ matrix.os }}-${{ matrix.arch }}
+          binary: ${{ matrix.binary }}
+        env:
+          CPR_VERSION: ${{ needs.release-info.outputs.version }}
+          CPR_GIT_SHA: ${{ needs.release-info.outputs.git_sha }}
+          CPR_BUILD_TIME: ${{ needs.release-info.outputs.build_time }}
+          CPR_BUILD_TYPE: ${{ needs.release-info.outputs.build_type }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: codex-proxy-rs-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  package-assets:
+    needs: [release-info, frontend, build-docker-binary, build-binary]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-info.outputs.git_sha }}
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frontend-dist
+          path: dist/frontend
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: codex-proxy-rs-*
+          path: dist/binaries
+
+      - name: Download sealed plugin assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plugin-release-assets
+          path: dist/plugin-release-assets
+
+      - name: Package release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.release-info.outputs.version }}
+          DOCKER_VERSION: ${{ needs.release-info.outputs.docker_version }}
+          PLATFORM_MATRIX: ${{ needs.release-info.outputs.platform_matrix }}
+        run: ruby .github/scripts/package-release.rb archives
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: dist/release
+          if-no-files-found: error
+          retention-days: 7
+          # tar.gz 已压缩，Actions 只负责传递原始发行字节。
+          compression-level: 0
+
+  build-docker-image:
+    name: build-docker-image (${{ matrix.dockerPlatform }})
+    needs: [release-info, frontend, build-docker-binary]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.release-info.outputs.docker_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      security-events: write
+    env:
+      TRIVY_QUIET: 'true'
+      TRIVY_SKIP_VERSION_CHECK: 'true'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-info.outputs.git_sha }}
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frontend-dist
+          path: dist/docker/web/dist
+
+      - name: Download Docker binary artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: codex-proxy-rs-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/docker-artifacts/codex-proxy-rs-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Download sealed plugin assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plugin-release-assets
+          path: dist/plugin-release-assets
+
+      - name: Prepare Docker prebuilt assets
+        shell: bash
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+          MATRIX_BINARY: ${{ matrix.binary }}
+        run: ruby .github/scripts/package-release.rb image
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push app image
+        id: build-and-push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: runtime-prebuilt
+          platforms: ${{ matrix.dockerPlatform }}
+          push: true
+          build-args: |
+            CPR_PREBUILT_DIR=dist/docker
+          no-cache-filters: |
+            runtime-base
+            runtime-prebuilt
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.os }}-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.os }}-${{ matrix.arch }},mode=min
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.title=Codex Proxy RS
+            org.opencontainers.image.version=${{ needs.release-info.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.release-info.outputs.git_sha }}
+            org.opencontainers.image.source=https://github.com/zyycn/codex-proxy-rs
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.release-info.outputs.git_sha }}-${{ matrix.arch }}
+
+      - name: Verify exact app image digest
+        uses: ./.github/actions/verify-container
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-and-push.outputs.digest }}
+          platform: ${{ matrix.dockerPlatform }}
+          artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
+
+      - name: Record verified image digest
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.build-and-push.outputs.digest }}
+          IMAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p dist/digests
+          printf '%s\n' "$IMAGE_DIGEST" > "dist/digests/linux-${IMAGE_ARCH}.txt"
+
+      - name: Upload verified image digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-digest-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/digests/*.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    concurrency:
+      group: release-publication
+      queue: max
+    # 产物准备可与测试重叠，版本标签和 GitHub Release 必须等全部质量与镜像验证通过
+    needs: [release-info, quality, windows, security, package-assets, build-docker-image]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-info.outputs.git_sha }}
+
+      - name: Download release assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: dist/release
+
+      - name: Download verified image digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-digest-*
+          path: dist/digests
+          merge-multiple: true
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Login to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble candidate image manifest
+        id: manifest
+        shell: bash
+        env:
+          GIT_SHA: ${{ needs.release-info.outputs.git_sha }}
+          DOCKER_PLATFORMS: ${{ needs.release-info.outputs.docker_platforms }}
+        run: |
+          set -euo pipefail
+
+          image="${REGISTRY}/${IMAGE_NAME}"
+          sources=()
+          IFS=',' read -ra platforms <<< "${DOCKER_PLATFORMS}"
+          for platform in "${platforms[@]}"; do
+            platform="${platform//[[:space:]]/}"
+            [ -n "${platform}" ] || continue
+            arch="${platform##*/}"
+            digest="$(cat "dist/digests/linux-${arch}.txt")"
+            if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "invalid verified image digest for ${platform}" >&2
+              exit 1
+            fi
+            sources+=("${image}@${digest}")
+          done
+
+          if [ "${#sources[@]}" -eq 0 ]; then
+            echo "missing Docker image sources"
+            exit 1
+          fi
+
+          candidate="${image}:sha-${GIT_SHA}"
+          docker buildx imagetools create -t "$candidate" "${sources[@]}"
+
+          inspect_output="$(docker buildx imagetools inspect "$candidate")"
+          platform_list="$(awk '$1 == "Platform:" { print $2 }' <<< "${inspect_output}")"
+          for platform in "${platforms[@]}"; do
+            if ! grep -Eq "^${platform}(/|$)" <<< "${platform_list}"; then
+              echo "image manifest is missing platform ${platform}"
+              echo "${inspect_output}"
+              exit 1
+            fi
+          done
+
+          digest="$(docker buildx imagetools inspect "$candidate" --format '{{ .Manifest.Digest }}')"
+          if [ -z "${digest}" ]; then
+            echo "missing image digest"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate container provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Sign app image digest
+        env:
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: cosign sign --yes "${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+
+      - name: Prepare release notes
+        shell: bash
+        env:
+          INSTALLATION_NOTES: |
+            ## Linux 一键安装（Docker Compose）
+
+            ```bash
+            curl -fsSLO https://raw.githubusercontent.com/${{ github.repository }}/${{ needs.release-info.outputs.tag }}/deploy/install.sh && CPR_RELEASE_TAG=${{ needs.release-info.outputs.tag }} bash install.sh
+            ```
+
+            ## 📚 文档
+
+            - [GitHub 仓库](https://github.com/${{ github.repository }})
+            - [部署指南](https://github.com/${{ github.repository }}/blob/${{ needs.release-info.outputs.tag }}/deploy/README.md)
+        run: |
+          ruby <<'RUBY'
+          notes = File.readlines('release/notes.md').drop(1).join.strip
+          installation = ENV.fetch('INSTALLATION_NOTES').strip
+          output = File.join(ENV.fetch('RUNNER_TEMP'), 'release-notes.md')
+          File.write(output, "#{notes}\n\n#{installation}\n")
+          RUBY
+
+      - name: Check that the release is unpublished
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release-info.outputs.version }}
+        run: ruby .github/scripts/published-channels.rb check "$VERSION"
+
+      - name: Generate release asset provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/release/*
+
+      - name: Upload GitHub Release assets
+        id: release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          tag_name: ${{ needs.release-info.outputs.tag }}
+          generate_release_notes: true
+          previous_tag: ${{ needs.release-info.outputs.previous_tag }}
+          prerelease: ${{ needs.release-info.outputs.prerelease == 'true' }}
+          # action 保留已公开 Release 的状态，新 Release 上传完成后仍保持草稿
+          draft: true
+          make_latest: 'false'
+          body_path: ${{ runner.temp }}/release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            dist/release/*
+
+      - name: Publish version and advance latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.release-info.outputs.version }}
+          DIGEST: ${{ steps.manifest.outputs.digest }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: ruby .github/scripts/publish-release.rb
+
+      - name: Publish verified channels to main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.release-info.outputs.version }}
+        run: ruby .github/scripts/published-channels.rb publish "$VERSION"
+
+  recover-index:
+    if: inputs.index_only
+    runs-on: ubuntu-26.04
+    concurrency:
+      group: release-publication
+      queue: max
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify public assets and publish channels to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: ruby .github/scripts/published-channels.rb publish "$TAG"

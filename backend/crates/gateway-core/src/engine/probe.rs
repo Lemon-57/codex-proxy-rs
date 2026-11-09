@@ -1,0 +1,209 @@
+//! 管理端账号连通性测试的真实执行链端口
+
+use std::fmt;
+
+use bytes::Bytes;
+use futures::future::BoxFuture;
+
+use crate::error::{
+    ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind, ProxyConnectionHint,
+};
+use crate::identity::ProviderKind;
+use crate::routing::UpstreamModelId;
+use crate::{
+    account::{AccountEligibilityPolicy, ProviderAccountId},
+    operation::Operation,
+    upstream::UpstreamSendState,
+};
+
+/// 探测始终固定账号，恢复探测的账号状态由解冻任务持有
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountProbeTarget {
+    ConnectionTest(ProviderAccountId),
+    FreezeRecovery(ProviderAccountId),
+}
+
+impl AccountProbeTarget {
+    pub fn account_id(&self) -> &ProviderAccountId {
+        match self {
+            Self::ConnectionTest(account) | Self::FreezeRecovery(account) => account,
+        }
+    }
+
+    pub(super) fn into_selection(self) -> (ProviderAccountId, AccountEligibilityPolicy) {
+        match self {
+            Self::ConnectionTest(account) => {
+                (account, AccountEligibilityPolicy::BypassForDiagnostic)
+            }
+            Self::FreezeRecovery(account) => (account, AccountEligibilityPolicy::FreezeRecovery),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountProbeRequest {
+    pub target: AccountProbeTarget,
+    pub provider_kind: ProviderKind,
+    pub upstream_model: UpstreamModelId,
+    pub operation: Operation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountProbeResult {
+    pub text: Vec<String>,
+    pub completed_text: bool,
+}
+
+/// 仅供当前管理端连接测试展示的原始上游失败响应
+///
+/// 正文不进入 `Debug`、日志或持久化；Core 只在探测终态从原始 Provider 错误显式复制
+#[derive(PartialEq, Eq)]
+pub struct AccountProbeUpstreamResponse {
+    status: u16,
+    content_type: Option<Vec<u8>>,
+    body: Bytes,
+}
+
+impl AccountProbeUpstreamResponse {
+    pub(crate) fn from_client_response(response: &ClientVisibleUpstreamResponse) -> Self {
+        Self {
+            status: response.status(),
+            content_type: response.content_type().map(<[u8]>::to_vec),
+            body: response.body().clone(),
+        }
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
+
+    #[must_use]
+    pub fn content_type(&self) -> Option<&[u8]> {
+        self.content_type.as_deref()
+    }
+
+    #[must_use]
+    pub const fn body(&self) -> &Bytes {
+        &self.body
+    }
+}
+
+impl fmt::Debug for AccountProbeUpstreamResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AccountProbeUpstreamResponse")
+            .field("status", &self.status)
+            .field(
+                "content_type",
+                &self.content_type.as_ref().map(|_| "<present>"),
+            )
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
+
+/// 连接测试失败发生的稳定责任边界
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountProbeErrorSource {
+    Gateway,
+    Provider,
+    Upstream,
+}
+
+impl AccountProbeErrorSource {
+    /// 返回管理端 wire 使用的稳定值
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gateway => "gateway",
+            Self::Provider => "provider",
+            Self::Upstream => "upstream",
+        }
+    }
+}
+
+/// 管理端连接测试的终态错误
+///
+/// `gateway` 保留稳定分类，`upstream_response` 只面向本次认证管理请求展示源响应
+#[derive(Debug)]
+pub struct AccountProbeError {
+    gateway: GatewayError,
+    pub(super) proxy_hint: Option<ProxyConnectionHint>,
+    source: AccountProbeErrorSource,
+    send_state: Option<UpstreamSendState>,
+    upstream_response: Option<Box<AccountProbeUpstreamResponse>>,
+}
+
+impl AccountProbeError {
+    #[must_use]
+    pub fn new(
+        gateway: GatewayError,
+        source: AccountProbeErrorSource,
+        send_state: Option<UpstreamSendState>,
+        upstream_response: Option<AccountProbeUpstreamResponse>,
+    ) -> Self {
+        Self {
+            gateway,
+            proxy_hint: None,
+            source,
+            send_state,
+            upstream_response: upstream_response.map(Box::new),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> GatewayErrorKind {
+        self.gateway.kind()
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> AccountProbeErrorSource {
+        self.source
+    }
+
+    #[must_use]
+    pub const fn send_state(&self) -> Option<UpstreamSendState> {
+        self.send_state
+    }
+
+    #[must_use]
+    pub const fn proxy_hint(&self) -> Option<ProxyConnectionHint> {
+        self.proxy_hint
+    }
+
+    #[must_use]
+    pub fn client_message(&self) -> &str {
+        self.gateway.client_message()
+    }
+
+    #[must_use]
+    pub fn client_error_type(&self) -> Option<&str> {
+        self.gateway.client_error_type()
+    }
+
+    #[must_use]
+    pub fn client_error_code(&self) -> Option<&str> {
+        self.gateway.client_error_code()
+    }
+
+    #[must_use]
+    pub fn upstream_response(&self) -> Option<&AccountProbeUpstreamResponse> {
+        self.upstream_response.as_deref()
+    }
+}
+
+impl From<GatewayError> for AccountProbeError {
+    fn from(gateway: GatewayError) -> Self {
+        Self::new(gateway, AccountProbeErrorSource::Gateway, None, None)
+    }
+}
+
+pub trait AccountProbe: Send + Sync {
+    /// 插件管理操作传入其冻结快照；其他调用可使用当前发布视图
+    fn probe(
+        &self,
+        request: AccountProbeRequest,
+        snapshot: Option<std::sync::Arc<crate::routing::RuntimeSnapshot>>,
+    ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>>;
+}

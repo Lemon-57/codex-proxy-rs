@@ -1,0 +1,694 @@
+//! 验证维护任务的跨发布保活、取消顺序、资源创建重试及事务归属和幂等性
+
+use crate::support::environment::{Environment, mutation};
+use gateway_admin::{
+    model::{
+        Revision,
+        account_groups::{AccountGroupColor, CreateAccountGroup},
+        plugin_resources::{GroupMembersChange, ManagedKeyConfig, PluginResourceOwner},
+        plugins::instances::{PluginInstanceRuntimeStatus, PluginInstanceSnapshot},
+    },
+    ports::{plugin_resources::PluginResourceAccess, plugins::PluginPreparation},
+};
+use gateway_core::{
+    account::FastMode,
+    lifecycle::CancellationToken,
+    routing::{ConfigRevision, RuntimeSnapshot},
+    runtime::RuntimeSnapshotHandle,
+    task::{WorkerContribution, WorkerDaemonContext, WorkerRunnable},
+};
+use gateway_plugin_runtime::PluginRuntime;
+use gateway_plugin_sdk::{Capability, Contributions, Stage};
+use serde_json::{Value, json};
+use std::{path::Path, sync::Arc, time::Duration};
+
+fn group(name: &str) -> CreateAccountGroup {
+    CreateAccountGroup {
+        allow_image_generation: true,
+        name: name.into(),
+        description: None,
+        fast_mode: FastMode::Default,
+        color: AccountGroupColor::parse("#2563EBFF").unwrap(),
+    }
+}
+
+fn key() -> ManagedKeyConfig {
+    ManagedKeyConfig {
+        name: " managed key ".into(),
+        limits: gateway_core::policy::RateLimits::unlimited(),
+        budget: Default::default(),
+    }
+}
+
+async fn owner(environment: &Environment) -> PluginResourceOwner {
+    let instance = environment
+        .store
+        .admin_ports()
+        .plugins()
+        .load_instances()
+        .await
+        .unwrap()
+        .instances
+        .remove(0);
+    PluginResourceOwner {
+        instance_id: instance.id,
+        artifact_sha256: instance.artifact_sha256,
+        revision: instance.revision,
+    }
+}
+
+async fn import_account(
+    environment: &Environment,
+    core: &gateway_core::CoreBundle,
+) -> gateway_core::account::ProviderAccountId {
+    use gateway_admin::model::provider_credentials::{
+        PreparedCredentialCreate, PreparedPluginAccountSave, ProviderDocument,
+    };
+    let access = gateway_admin::initialize_plugin_accounts(
+        crate::support::native::admin_registry(),
+        environment.store.admin_ports().accounts(),
+        core.snapshot_control(),
+        None,
+    );
+    let result = access
+        .save(
+            PreparedPluginAccountSave::Create(PreparedCredentialCreate {
+                account_id: gateway_core::account::ProviderAccountId::new(format!(
+                    "acct_{}",
+                    uuid::Uuid::new_v4().simple()
+                ))
+                .unwrap(),
+                provider_kind: gateway_core::routing::ProviderKind::new("openai").unwrap(),
+                name: "imported maintenance fixture".into(),
+                email: None,
+                upstream_user_id: None,
+                upstream_account_id: None,
+                plan_type: None,
+                authentication_kind: "api_key".into(),
+                provider_material: ProviderDocument::new(
+                    gateway_core::account::OpaqueProviderData::new(
+                        json!({"key":"test-only"}).as_object().unwrap().clone(),
+                    ),
+                ),
+                model_access: None,
+                outbound_proxy: None,
+                has_refresh_token: false,
+                access_token_expires_at: None,
+                next_refresh_at: None,
+                enabled: true,
+                credential_state: gateway_core::account::CredentialState::Ready,
+                credential_observed_at: chrono::Utc::now(),
+            }),
+            &mutation(),
+        )
+        .await
+        .unwrap();
+    result.account_id
+}
+
+async fn revision(environment: &Environment) -> gateway_admin::model::Revision {
+    environment
+        .store
+        .admin_ports()
+        .plugins()
+        .load_instances()
+        .await
+        .unwrap()
+        .config_revision
+}
+
+async fn start(
+    environment: &Environment,
+    phase: &str,
+) -> (
+    Arc<PluginRuntime>,
+    gateway_core::CoreBundle,
+    Arc<dyn PluginResourceAccess>,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    let (runtime, core) = environment.runtime().await;
+    // 集合就绪允许保留隔离的启动失败实例；维护测试必须确认插件本身正在运行
+    let snapshot = core.snapshots().snapshot_for_diagnostics().unwrap();
+    let extensions = snapshot.extensions().unwrap();
+    let instances = environment
+        .store
+        .admin_ports()
+        .plugins()
+        .load_instances()
+        .await
+        .unwrap();
+    let diagnostics = gateway_admin::ports::plugins::PluginRuntimeDiagnostics::runtime_diagnostics(
+        runtime.as_ref(),
+        &instances,
+        Some(snapshot.revision().get()),
+        Some(extensions),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !diagnostics.is_empty()
+            && diagnostics
+                .values()
+                .all(|instance| instance.status == PluginInstanceRuntimeStatus::Running),
+        "plugin was not ready during {phase}: {diagnostics:?}"
+    );
+    drop(snapshot);
+    let resources = gateway_admin::initialize_plugin_resources(
+        environment.store.admin_ports().plugin_resources(),
+        core.snapshot_control(),
+    );
+    runtime.bind_resource_ports(&resources).unwrap();
+    let WorkerContribution::Registration(registration) = runtime
+        .maintenance_worker_with_account_changes(
+            core.snapshots(),
+            environment.store.account_state_notifications(),
+        )
+        .unwrap()
+    else {
+        panic!("maintenance registration")
+    };
+    let WorkerRunnable::Daemon { task, .. } = registration.runnable else {
+        panic!("maintenance daemon")
+    };
+    let stop = CancellationToken::new();
+    let cancellation = stop.clone();
+    let task = tokio::spawn(async move {
+        task.run(WorkerDaemonContext::new(cancellation))
+            .await
+            .unwrap();
+    });
+    (runtime, core, resources, stop, task)
+}
+
+async fn wait_done(path: &std::path::Path, after: usize, phase: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let entries: Vec<Value> = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            let done: Vec<_> = entries
+                .iter()
+                .filter(|value| value["phase"] == "done")
+                .collect();
+            if done.len() > after {
+                return (*done.last().unwrap()).clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "plugin reconciliation did not finish during {phase}: {error}; observations: {}",
+            std::fs::read_to_string(path).unwrap_or_default(),
+        )
+    })
+}
+
+async fn publish(
+    runtime: &PluginRuntime,
+    snapshots: &RuntimeSnapshotHandle,
+    instances: PluginInstanceSnapshot,
+) {
+    let revision = ConfigRevision::new(instances.config_revision.get()).unwrap();
+    let prepared = PluginPreparation::prepare(runtime, instances)
+        .await
+        .unwrap();
+    snapshots.publish(
+        RuntimeSnapshot::new(
+            revision,
+            gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+            vec![],
+            vec![],
+            vec![],
+        )
+        .unwrap()
+        .with_extensions(Some(prepared)),
+    );
+}
+
+fn records(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+async fn wait_records(path: &Path, count: usize) -> Vec<Value> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let entries = records(path);
+            if entries.len() >= count {
+                return entries;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| panic!("missing maintenance records: {error}; {:?}", records(path)))
+}
+
+#[tokio::test]
+async fn unused_maintenance_response_does_not_stop_the_host_worker() {
+    let Some(environment) = Environment::create().await else {
+        return;
+    };
+    let marker = environment.directory.path().join("invalid-response.jsonl");
+    environment
+        .install_plugin(
+            json!({"maintenance_fixture":true,"invalid_response_method":"plugin.reconcile","invalid_response_marker":marker}),
+        )
+        .await;
+    let (runtime, core, resources, stop, task) = start(&environment, "malformed response").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        core.snapshots()
+            .acquire()
+            .unwrap()
+            .extensions()
+            .unwrap()
+            .is_ready()
+    );
+    assert!(!task.is_finished(), "单个插件失败不能终止宿主维护任务");
+    for probe in core.health_probes() {
+        assert!(matches!(
+            probe.check().await,
+            gateway_core::health::HealthState::Healthy
+        ));
+    }
+    stop.cancel();
+    task.await.unwrap();
+    drop(resources);
+    environment.release_plugin_accounts(&runtime);
+    drop(core);
+    drop(runtime);
+    environment.close().await;
+}
+
+#[tokio::test]
+async fn committed_account_state_signal_wakes_maintenance_before_periodic_compensation() {
+    let Some(environment) = Environment::create().await else {
+        return;
+    };
+    let marker = environment.directory.path().join("account-state.jsonl");
+    environment
+        .install_plugin(json!({"maintenance_fixture":true,"maintenance_marker":marker}))
+        .await;
+    let (runtime, core, resources, stop, task) =
+        start(&environment, "account state notification").await;
+    wait_done(&marker, 0, "startup").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let count = std::fs::read_to_string(&marker)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| entry["phase"] == "done")
+        .count();
+    environment.store.account_state_notifications().notify();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        wait_done(&marker, count, "account state change"),
+    )
+    .await
+    .unwrap();
+    stop.cancel();
+    task.await.unwrap();
+    runtime.shutdown().await;
+    drop(resources);
+    environment.release_plugin_accounts(&runtime);
+    drop(core);
+    drop(runtime);
+    environment.close().await;
+}
+
+#[tokio::test]
+async fn published_reconciliation_provisions_retries_imports_and_restores_without_overwriting_groups()
+ {
+    let Some(environment) = Environment::create().await else {
+        return;
+    };
+    let account = environment.account(None).await;
+    let original = environment.account_group_with_account(&account).await;
+    let marker = environment.directory.path().join("maintenance.jsonl");
+    let failed = environment.directory.path().join("failed-once");
+    environment.install_plugin(json!({"maintenance_fixture":true, "maintenance_marker":marker, "maintenance_fail_once":failed})).await;
+    let (runtime, core, resources, stop, task) = start(&environment, "initial startup").await;
+    let first = wait_done(&marker, 0, "initial startup").await;
+    assert!(failed.exists());
+    let group_id =
+        gateway_core::routing::AccountGroupId::new(first["group"].as_str().unwrap()).unwrap();
+    let members = environment
+        .store
+        .admin_ports()
+        .account_groups()
+        .load_account_group_members(&[original.clone(), group_id.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        members
+            .iter()
+            .filter(|m| m.account_id == account.as_str())
+            .count(),
+        2
+    );
+    let owner = owner(&environment).await;
+    let before = revision(&environment).await;
+    let same = resources
+        .ensure_group(
+            &owner,
+            "pool".into(),
+            group("ignored replacement name"),
+            &mutation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(same.id, first["group"]);
+    assert_eq!(same.name, "plugin fixture group");
+    assert_eq!(before, revision(&environment).await);
+    let imported = import_account(&environment, &core).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let members = environment
+                .store
+                .admin_ports()
+                .account_groups()
+                .load_account_group_members(std::slice::from_ref(&group_id))
+                .await
+                .unwrap();
+            if members
+                .iter()
+                .any(|member| member.account_id == imported.as_str())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.cancel();
+    task.await.unwrap();
+    runtime.shutdown().await;
+    environment.release_plugin_accounts(&runtime);
+    drop(resources);
+    drop(core);
+    drop(runtime);
+    // 离线新增账号后重新启动真实插件子进程；稳定资源键必须复用原分组与 Key
+    let offline = environment.account(None).await;
+    std::fs::write(&marker, "").unwrap();
+    let (runtime, core, resources, stop, task) = start(&environment, "restoration").await;
+    let restored = wait_done(&marker, 0, "restoration").await;
+    assert_eq!(restored["group"], first["group"]);
+    assert_eq!(restored["key"], first["key"]);
+    let members = environment
+        .store
+        .admin_ports()
+        .account_groups()
+        .load_account_group_members(std::slice::from_ref(&group_id))
+        .await
+        .unwrap();
+    assert!(members.iter().any(|m| m.account_id == offline.as_str()));
+    let store = environment.store.admin_ports().plugins();
+    let snapshot = store.load_instances().await.unwrap();
+    let mut instance = snapshot.instances[0].clone();
+    instance.enabled = false;
+    let disabled = store
+        .save_instance(instance, snapshot.config_revision, &mutation())
+        .await
+        .unwrap();
+    core.snapshot_control()
+        .publish_committed(
+            gateway_core::routing::ConfigRevision::new(disabled.config_revision.get()).unwrap(),
+        )
+        .await;
+    assert!(
+        resources
+            .change_members(
+                &owner,
+                GroupMembersChange {
+                    resource_key: "pool".into(),
+                    add: vec![],
+                    remove: vec![account.as_str().to_owned()]
+                },
+                &mutation()
+            )
+            .await
+            .is_err()
+    );
+    stop.cancel();
+    task.await.unwrap();
+    runtime.shutdown().await;
+    environment.release_plugin_accounts(&runtime);
+    drop(resources);
+    drop(core);
+    drop(runtime);
+    environment.close().await;
+}
+
+#[tokio::test]
+async fn resource_transactions_enforce_ownership_current_revision_and_idempotent_membership() {
+    let Some(environment) = Environment::create().await else {
+        return;
+    };
+    environment.install_plugin(json!({})).await;
+    let (runtime, core) = environment.runtime().await;
+    let resources = gateway_admin::initialize_plugin_resources(
+        environment.store.admin_ports().plugin_resources(),
+        core.snapshot_control(),
+    );
+    let owner = owner(&environment).await;
+    let account = environment.account(None).await;
+    let concurrent_context = mutation();
+    let (left, right) = tokio::join!(
+        resources.ensure_group(
+            &owner,
+            "one".into(),
+            group("plugin one"),
+            &concurrent_context
+        ),
+        resources.ensure_group(
+            &owner,
+            "one".into(),
+            group("concurrent name"),
+            &concurrent_context
+        )
+    );
+    let one = left.unwrap();
+    assert_eq!(one, right.unwrap());
+    let other = environment.account_group_with_account(&account).await;
+    assert!(
+        resources
+            .ensure_group(
+                &owner,
+                "collision".into(),
+                group(&format!("fixture {}", other.as_str())),
+                &mutation()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        resources
+            .ensure_key(&owner, "key".into(), vec![], key(), &mutation())
+            .await
+            .is_err()
+    );
+    assert!(
+        resources
+            .ensure_key(
+                &owner,
+                "key".into(),
+                vec![other.as_str().to_owned()],
+                key(),
+                &mutation()
+            )
+            .await
+            .is_err()
+    );
+    let created = resources
+        .ensure_key(&owner, "key".into(), vec!["one".into()], key(), &mutation())
+        .await
+        .unwrap();
+    assert_eq!(created.name, "managed key");
+    assert_eq!(
+        created,
+        resources
+            .ensure_key(&owner, "key".into(), vec!["one".into()], key(), &mutation())
+            .await
+            .unwrap()
+    );
+    let change = || GroupMembersChange {
+        resource_key: "one".into(),
+        add: vec![account.as_str().to_owned()],
+        remove: vec![],
+    };
+    assert_eq!(
+        resources
+            .change_members(&owner, change(), &mutation())
+            .await
+            .unwrap()
+            .added,
+        1
+    );
+    let before = revision(&environment).await;
+    assert_eq!(
+        resources
+            .change_members(&owner, change(), &mutation())
+            .await
+            .unwrap()
+            .added,
+        0
+    );
+    assert_eq!(revision(&environment).await, before);
+    let result = resources
+        .change_members(
+            &owner,
+            GroupMembersChange {
+                resource_key: "one".into(),
+                add: vec![],
+                remove: vec![account.as_str().to_owned()],
+            },
+            &mutation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.removed, 1);
+    let members = environment
+        .store
+        .admin_ports()
+        .account_groups()
+        .load_account_group_members(&[
+            other.clone(),
+            gateway_core::routing::AccountGroupId::new(one.id).unwrap(),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].group_id, other);
+    let store = environment.store.admin_ports().plugins();
+    let snapshot = store.load_instances().await.unwrap();
+    let mut instance = snapshot.instances[0].clone();
+    instance.name = "new configuration revision".into();
+    store
+        .save_instance(instance, snapshot.config_revision, &mutation())
+        .await
+        .unwrap();
+    assert!(
+        resources
+            .ensure_group(&owner, "stale".into(), group("stale"), &mutation())
+            .await
+            .is_err()
+    );
+    runtime.shutdown().await;
+    environment.release_plugin_accounts(&runtime);
+    drop(resources);
+    drop(core);
+    drop(runtime);
+    environment.close().await;
+}
+
+#[tokio::test]
+async fn unrelated_publications_preserve_inflight_maintenance_and_replacement_waits_for_cancel() {
+    let (cache, store, runtime) =
+        super::setup_with_contributions(Contributions::from([crate::support::contribution(
+            Capability::Maintenance,
+            vec![Stage::Maintenance],
+            vec![],
+            vec![],
+        )]))
+        .await;
+    let runtime = Arc::new(runtime);
+    let markers = tempfile::tempdir().unwrap();
+    let mut instances = store.snapshot.lock().unwrap().clone();
+    let template = instances.instances[0].clone();
+    instances.instances = ["a", "b"]
+        .into_iter()
+        .map(|id| {
+            let mut instance = template.clone();
+            instance.id = id.into();
+            instance.configuration = json!({
+                "maintenance_marker":markers.path().join(id),
+                "execution_cancelled_marker":markers.path().join(id),
+                "maintenance_wait_marker":markers.path().join(format!("release-{id}")),
+                "call_context_marker":markers.path().join(format!("context-{id}")),
+                "call_budgets_ms":{"maintenance":600_000},
+            });
+            instance
+        })
+        .collect();
+    let snapshots = RuntimeSnapshotHandle::default();
+    publish(&runtime, &snapshots, instances.clone()).await;
+    let WorkerContribution::Registration(registration) =
+        runtime.maintenance_worker(snapshots.clone()).unwrap()
+    else {
+        panic!("maintenance worker registration")
+    };
+    let WorkerRunnable::Daemon { task, .. } = registration.runnable else {
+        panic!("maintenance daemon")
+    };
+    let stop = CancellationToken::new();
+    let running = tokio::spawn({
+        let stop = stop.clone();
+        async move { task.run(WorkerDaemonContext::new(stop)).await.unwrap() }
+    });
+    let a = markers.path().join("a");
+    let b = markers.path().join("b");
+    assert_eq!(wait_records(&a, 1).await[0]["phase"], "start");
+    assert_eq!(wait_records(&b, 1).await[0]["phase"], "start");
+    let contexts = records(&markers.path().join("context-a"));
+    let maintenance = contexts
+        .iter()
+        .find(|entry| entry["method"] == "plugin.reconcile")
+        .expect("maintenance call context");
+    assert_eq!(maintenance["context"]["timeout_ms"], 600_000);
+
+    instances.config_revision = Revision::new(2).unwrap();
+    instances.instances[1].revision = instances.config_revision;
+    publish(&runtime, &snapshots, instances.clone()).await;
+    let changed = wait_records(&b, 3).await;
+    assert!(
+        changed[1].get("call_id").is_some(),
+        "旧维护必须先完成取消确认"
+    );
+    assert_eq!(changed[2]["phase"], "start");
+    assert_eq!(records(&a).len(), 1, "无关实例发布不得重启 A 的在途维护");
+
+    instances.config_revision = Revision::new(3).unwrap();
+    instances.instances[1].revision = instances.config_revision;
+    instances.instances[1].enabled = false;
+    publish(&runtime, &snapshots, instances.clone()).await;
+    assert!(wait_records(&b, 4).await[3].get("call_id").is_some());
+    instances.config_revision = Revision::new(4).unwrap();
+    instances.instances[1].revision = instances.config_revision;
+    instances.instances[1].enabled = true;
+    publish(&runtime, &snapshots, instances.clone()).await;
+    assert_eq!(wait_records(&b, 5).await[4]["phase"], "start");
+    assert_eq!(records(&a).len(), 1, "停用与恢复 B 不得取消 A");
+
+    // 多次发布通知合并为一次后续对账，首轮仍使用原调用 ID 完成
+    std::fs::write(markers.path().join("release-a"), []).unwrap();
+    let completed = wait_records(&a, 4).await;
+    assert_eq!(completed[1]["phase"], "done");
+    assert_eq!(completed[1]["id"], completed[0]["id"]);
+    assert_eq!(completed[2]["phase"], "start");
+    assert_eq!(completed[3]["phase"], "done");
+    assert_ne!(completed[2]["id"], completed[0]["id"]);
+    assert_eq!(completed.len(), 4);
+
+    stop.cancel();
+    running.await.unwrap();
+    assert!(wait_records(&b, 6).await[5].get("call_id").is_some());
+    snapshots.suspend();
+    runtime.shutdown().await;
+    super::wait_until_empty(cache.path()).await;
+}

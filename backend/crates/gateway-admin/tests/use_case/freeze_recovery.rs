@@ -1,0 +1,443 @@
+//! 账号保护恢复编排：到期探测、快照参数与失败顺延
+
+use gateway_core::engine::probe::AccountProbeTarget;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration as TimeDelta, Utc};
+use gateway_admin::model::MutationContext;
+use gateway_admin::model::accounts::{AccountFreeze, AccountRuntimeSnapshot};
+use gateway_admin::model::settings::{
+    AdminApiKey, AdminApiKeyMutation, ReplaceRuntimeSettings, RuntimeSettings,
+};
+use gateway_admin::ports::store::{
+    AccountRuntimeStore, AccountStore, AdminStoreError, AdminStoreResult, SettingsStore,
+};
+use gateway_core::engine::probe::{
+    AccountProbe, AccountProbeError, AccountProbeRequest, AccountProbeResult,
+};
+use gateway_core::lifecycle::CancellationToken;
+use gateway_core::task::{
+    ScheduledTask, WorkerContribution, WorkerCycleContext, WorkerId, WorkerKind, WorkerRunnable,
+};
+
+use super::AdminHarness;
+use super::accounts::{FakeAccountStore, FakeProviderAdmin, account_record, events, revision};
+
+fn runtime_settings(enabled: bool, probe_enabled: bool) -> RuntimeSettings {
+    RuntimeSettings {
+        request_profiles: Default::default(),
+        config_revision: revision(1),
+        model_mappings: Default::default(),
+        rotation_strategy: gateway_admin::model::settings::RotationStrategy::Smart,
+        updated_at: Utc::now(),
+        values: gateway_admin::model::settings::RuntimeSettingsValues {
+            codex_privacy_policy: Default::default(),
+            request_location_enabled: false,
+            request_location: Default::default(),
+            refresh_margin_seconds: 300,
+            refresh_concurrency: 2,
+            max_concurrent_per_account: 5,
+            max_waiting_per_key: 0,
+            max_waiting_per_account: 0,
+            key_queue_timeout_seconds: 30,
+            account_queue_timeout_seconds: 30,
+            switch_account_on_queue_failure: false,
+            max_retry_after_seconds: 240,
+            openai_guardian_reserved_concurrency: 0,
+            openai_account_affinity: gateway_core::account::AccountAffinity::Relaxed,
+            max_account_rotations: 3,
+            openai_session_affinity_ttl_hours: 24,
+            responses_max_decompressed_body_bytes: 64 * 1024 * 1024,
+            smart_scheduling: gateway_core::account::SmartSchedulingConfig::default(),
+            min_codex_desktop_version: None,
+            min_codex_cli_version: None,
+            usage_retention_days: 31,
+            ops_event_retention_days: 30,
+            audit_retention_days: 90,
+            account_error_protection: gateway_core::account::AccountErrorProtection {
+                enabled,
+                probe_enabled,
+                probe_model: Some("gpt-5.5".to_owned()),
+                rules: vec![gateway_core::account::AccountErrorRule {
+                    id: "sample".into(),
+                    name: "示例".into(),
+                    conditions: vec![gateway_core::account::AccountErrorCondition {
+                        field: gateway_core::account::AccountErrorField::Code,
+                        operator: gateway_core::account::AccountErrorOperator::Equals,
+                        values: vec![Some("custom_failure".into())],
+                        ignore_case: false,
+                    }],
+                }],
+                ..Default::default()
+            },
+            account_warmup_enabled: false,
+            account_warmup_schedule_time: "08:00".to_owned(),
+            account_warmup_model: None,
+            reset_credit_default_enabled: false,
+            reset_credit_lead_minutes: 10,
+            reset_credit_max_weekly_remaining_percent: None,
+        },
+    }
+}
+
+struct FreezeSettingsStore {
+    settings: RuntimeSettings,
+}
+
+#[async_trait]
+impl SettingsStore for FreezeSettingsStore {
+    async fn load_pricing(&self) -> AdminStoreResult<gateway_admin::model::pricing::StoredPricing> {
+        Ok(Default::default())
+    }
+    async fn sync_pricing(
+        &self,
+        _: gateway_admin::model::pricing::PricingSyncChanges,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing sync")
+    }
+    async fn update_pricing(
+        &self,
+        _: gateway_admin::model::pricing::UpdatePricing,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        panic!("unexpected pricing update")
+    }
+    async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
+        Ok(self.settings.clone())
+    }
+
+    async fn admin_api_key_exists(&self) -> AdminStoreResult<bool> {
+        Ok(false)
+    }
+
+    async fn replace_runtime_settings(
+        &self,
+        _: ReplaceRuntimeSettings,
+        _: &MutationContext,
+    ) -> AdminStoreResult<RuntimeSettings> {
+        Err(store_unavailable())
+    }
+
+    async fn replace_admin_api_key(
+        &self,
+        _: AdminApiKey,
+        _: &MutationContext,
+    ) -> AdminStoreResult<AdminApiKeyMutation> {
+        Err(store_unavailable())
+    }
+
+    async fn delete_admin_api_key(
+        &self,
+        _: &MutationContext,
+    ) -> AdminStoreResult<AdminApiKeyMutation> {
+        Err(store_unavailable())
+    }
+}
+
+fn store_unavailable() -> AdminStoreError {
+    AdminStoreError::new(
+        gateway_admin::ports::store::AdminStoreErrorKind::Unavailable,
+        "freeze recovery test",
+        "unused",
+    )
+}
+
+/// 记录解冻与顺延调用，冻结快照由测试预置
+struct FreezeRuntimeStore {
+    freezes: BTreeMap<String, AccountFreeze>,
+    cleared: Mutex<Vec<String>>,
+    extended: Mutex<Vec<(String, DateTime<Utc>)>>,
+}
+
+impl FreezeRuntimeStore {
+    fn new(freezes: BTreeMap<String, AccountFreeze>) -> Arc<Self> {
+        Arc::new(Self {
+            freezes,
+            cleared: Mutex::new(Vec::new()),
+            extended: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn cleared(&self) -> Vec<String> {
+        self.cleared.lock().expect("cleared lock").clone()
+    }
+
+    fn extended(&self) -> Vec<(String, DateTime<Utc>)> {
+        self.extended.lock().expect("extended lock").clone()
+    }
+}
+
+#[async_trait]
+impl AccountRuntimeStore for FreezeRuntimeStore {
+    async fn account_concurrency(
+        &self,
+        _: &str,
+        _: u64,
+        _: u32,
+    ) -> AdminStoreResult<gateway_admin::model::accounts::AccountConcurrencyPage> {
+        Err(gateway_admin::ports::store::AdminStoreError::new(
+            gateway_admin::ports::store::AdminStoreErrorKind::Unavailable,
+            "account concurrency",
+            "not configured in this fixture",
+        ))
+    }
+
+    async fn active_rate_limits(&self) -> AdminStoreResult<AccountRuntimeSnapshot> {
+        Ok(AccountRuntimeSnapshot::default())
+    }
+
+    async fn account_runtime(
+        &self,
+        _account_ids: &[String],
+    ) -> AdminStoreResult<AccountRuntimeSnapshot> {
+        Ok(AccountRuntimeSnapshot::default())
+    }
+
+    async fn active_freezes(&self) -> AdminStoreResult<BTreeMap<String, AccountFreeze>> {
+        Ok(self.freezes.clone())
+    }
+
+    async fn finish_freeze(
+        &self,
+        account_id: &str,
+        expected: &AccountFreeze,
+        postpone_until: Option<DateTime<Utc>>,
+    ) -> AdminStoreResult<bool> {
+        assert_eq!(self.freezes.get(account_id), Some(expected));
+        if let Some(until) = postpone_until {
+            self.extended
+                .lock()
+                .expect("extended")
+                .push((account_id.to_owned(), until));
+        } else {
+            self.cleared
+                .lock()
+                .expect("cleared")
+                .push(account_id.to_owned());
+        }
+        Ok(true)
+    }
+}
+
+struct SuccessfulProbe;
+
+impl AccountProbe for SuccessfulProbe {
+    fn probe(
+        &self,
+        _: AccountProbeRequest,
+        _: Option<Arc<gateway_core::routing::RuntimeSnapshot>>,
+    ) -> futures::future::BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
+        Box::pin(async {
+            Ok(AccountProbeResult {
+                completed_text: true,
+                text: vec!["OK".to_owned()],
+            })
+        })
+    }
+}
+
+struct FailingProbe;
+
+impl AccountProbe for FailingProbe {
+    fn probe(
+        &self,
+        request: AccountProbeRequest,
+        _: Option<Arc<gateway_core::routing::RuntimeSnapshot>>,
+    ) -> futures::future::BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
+        assert!(matches!(
+            request.target,
+            AccountProbeTarget::FreezeRecovery(_)
+        ));
+        assert_eq!(request.upstream_model.as_str(), "snapshot-model");
+        Box::pin(async {
+            Err(AccountProbeError::new(
+                gateway_core::error::GatewayError::new(
+                    gateway_core::error::GatewayErrorKind::RateLimited,
+                    "still overloaded",
+                ),
+                gateway_core::engine::probe::AccountProbeErrorSource::Upstream,
+                Some(gateway_core::upstream::UpstreamSendState::NotSent),
+                None,
+            ))
+        })
+    }
+}
+
+async fn recovery_task(
+    settings: RuntimeSettings,
+    runtime: Arc<FreezeRuntimeStore>,
+    probe: Arc<dyn AccountProbe>,
+) -> (Box<dyn ScheduledTask>, Arc<FakeAccountStore>) {
+    recovery_task_with_store(settings, runtime, probe).await
+}
+
+async fn recovery_task_with_store(
+    settings: RuntimeSettings,
+    runtime: Arc<FreezeRuntimeStore>,
+    probe: Arc<dyn AccountProbe>,
+) -> (Box<dyn ScheduledTask>, Arc<FakeAccountStore>) {
+    let store = FakeAccountStore::new("openai", events());
+    let bundle = AdminHarness::new()
+        .accounts(Arc::clone(&store) as Arc<dyn AccountStore>)
+        .account_runtime(Arc::clone(&runtime) as Arc<dyn AccountRuntimeStore>)
+        .settings(Arc::new(FreezeSettingsStore {
+            settings: settings.clone(),
+        }))
+        .provider(FakeProviderAdmin::new("openai", events()))
+        .probe(probe)
+        .build_bundle()
+        .await;
+    let task = freeze_worker(bundle);
+    (task, store)
+}
+
+fn freeze_worker(mut bundle: gateway_admin::AdminBundle) -> Box<dyn ScheduledTask> {
+    bundle
+        .take_worker_contributions()
+        .into_iter()
+        .find_map(|contribution| {
+            let WorkerContribution::Registration(registration) = contribution else {
+                return None;
+            };
+            if registration.id.kind() != WorkerKind::AccountFreezeRecovery {
+                return None;
+            }
+            match registration.runnable {
+                WorkerRunnable::Scheduled { task, .. } => Some(task),
+                WorkerRunnable::Daemon { .. } => None,
+            }
+        })
+        .expect("registered freeze recovery worker")
+}
+
+async fn run_cycle(task: &dyn ScheduledTask) {
+    let worker = WorkerId::try_new(WorkerKind::AccountFreezeRecovery, "test").expect("worker id");
+    let context = WorkerCycleContext::new(worker, None, CancellationToken::new());
+    task.run_cycle(context)
+        .await
+        .expect("freeze recovery cycle");
+}
+
+fn freeze_until(until: DateTime<Utc>) -> BTreeMap<String, AccountFreeze> {
+    BTreeMap::from([(
+        "acct_test".to_owned(),
+        AccountFreeze {
+            duration_seconds: None,
+            probe_model: None,
+            protection_rules: Vec::new(),
+            credential_revision: revision(1),
+            until,
+            generation: "freeze-generation".to_owned(),
+            requires_probe: true,
+        },
+    )])
+}
+
+fn freeze_due() -> BTreeMap<String, AccountFreeze> {
+    freeze_until(Utc::now() - TimeDelta::seconds(1))
+}
+
+#[tokio::test]
+async fn probe_success_clears_freeze() {
+    let runtime = FreezeRuntimeStore::new(freeze_due());
+    let (task, _store) = recovery_task(
+        runtime_settings(true, true),
+        Arc::clone(&runtime),
+        Arc::new(SuccessfulProbe),
+    )
+    .await;
+
+    run_cycle(task.as_ref()).await;
+
+    assert_eq!(runtime.cleared(), vec!["acct_test".to_owned()]);
+    assert!(runtime.extended().is_empty());
+}
+
+#[tokio::test]
+async fn probe_failure_postpones_using_the_freeze_snapshot() {
+    let mut freezes = freeze_due();
+    freezes.get_mut("acct_test").unwrap().duration_seconds = Some(300);
+    freezes.get_mut("acct_test").unwrap().probe_model = Some("snapshot-model".into());
+    let runtime = FreezeRuntimeStore::new(freezes);
+    let (task, _store) = recovery_task(
+        runtime_settings(true, true),
+        Arc::clone(&runtime),
+        Arc::new(FailingProbe),
+    )
+    .await;
+
+    run_cycle(task.as_ref()).await;
+
+    assert!(runtime.cleared().is_empty());
+    let extended = runtime.extended();
+    assert_eq!(extended.len(), 1);
+    let (account_id, until) = &extended[0];
+    assert_eq!(account_id, "acct_test");
+    let remaining = until.timestamp_millis() - Utc::now().timestamp_millis();
+    assert!(
+        remaining > 290_000 && remaining <= 300_000,
+        "postponed freeze should use the frozen 5-minute duration, got {remaining}ms"
+    );
+}
+
+#[tokio::test]
+async fn disabled_policy_releases_due_freeze_without_probing() {
+    let runtime = FreezeRuntimeStore::new(freeze_due());
+    let (task, _store) = recovery_task(
+        runtime_settings(false, true),
+        Arc::clone(&runtime),
+        Arc::new(SuccessfulProbe),
+    )
+    .await;
+
+    run_cycle(task.as_ref()).await;
+
+    assert_eq!(runtime.cleared(), vec!["acct_test".to_owned()]);
+    assert!(runtime.extended().is_empty());
+}
+
+/// 到期时间还早（超过探测提前量）的冻结不发起探测
+#[tokio::test]
+async fn probe_skips_freezes_far_from_expiry() {
+    let runtime = FreezeRuntimeStore::new(freeze_until(Utc::now() + TimeDelta::hours(1)));
+    let (task, _store) = recovery_task(
+        runtime_settings(true, true),
+        Arc::clone(&runtime),
+        Arc::new(SuccessfulProbe),
+    )
+    .await;
+
+    run_cycle(task.as_ref()).await;
+
+    assert!(runtime.cleared().is_empty());
+    assert!(runtime.extended().is_empty());
+}
+
+/// 停用账号不参与探测恢复
+#[tokio::test]
+async fn disabled_accounts_are_skipped() {
+    let runtime = FreezeRuntimeStore::new(freeze_due());
+    let mut record = account_record("openai");
+    record.enabled = false;
+    let store = FakeAccountStore::with_account(record, events());
+    let bundle = AdminHarness::new()
+        .accounts(Arc::clone(&store) as Arc<dyn AccountStore>)
+        .account_runtime(Arc::clone(&runtime) as Arc<dyn AccountRuntimeStore>)
+        .settings(Arc::new(FreezeSettingsStore {
+            settings: runtime_settings(true, true),
+        }))
+        .provider(FakeProviderAdmin::new("openai", events()))
+        .probe(Arc::new(SuccessfulProbe))
+        .build_bundle()
+        .await;
+    let task = freeze_worker(bundle);
+
+    run_cycle(task.as_ref()).await;
+
+    assert!(runtime.cleared().is_empty());
+    assert!(runtime.extended().is_empty());
+    assert!(store.update_commands().is_empty());
+}

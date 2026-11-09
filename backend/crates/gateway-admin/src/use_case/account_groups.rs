@@ -1,0 +1,279 @@
+//! 账号分组的查询、配置与运行态容量聚合用例
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::SystemTime,
+};
+
+use async_trait::async_trait;
+use gateway_core::{
+    account::{AccountStatus, resolve_account_status},
+    routing::AccountGroupId,
+    runtime::SnapshotControl,
+};
+use uuid::Uuid;
+
+use crate::{
+    model::{
+        AdminError, MutationContext,
+        account_groups::{
+            AccountGroupAccountSummary, AccountGroupCapacity, AccountGroupListQuery,
+            AccountGroupMemberFact, AccountGroupMutation, AccountGroupOptionsPage,
+            AccountGroupPage, AccountGroupRecord, CreateAccountGroup, DeleteAccountGroup,
+            NewAccountGroup, SetAccountGroupEnabled, UpdateAccountGroup,
+        },
+    },
+    ports::store::{AccountGroupStore, AccountRuntimeStore},
+};
+
+use super::{map_store_error, publish_committed};
+
+/// 面向 API 的账号分组管理服务
+#[async_trait]
+pub trait AccountGroupService: Send + Sync {
+    async fn list(&self, query: AccountGroupListQuery) -> Result<AccountGroupPage, AdminError>;
+    async fn list_options(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> Result<AccountGroupOptionsPage, AdminError>;
+    async fn create(
+        &self,
+        context: &MutationContext,
+        command: CreateAccountGroup,
+    ) -> Result<AccountGroupMutation, AdminError>;
+    async fn update(
+        &self,
+        context: &MutationContext,
+        command: UpdateAccountGroup,
+    ) -> Result<AccountGroupMutation, AdminError>;
+    async fn set_enabled(
+        &self,
+        context: &MutationContext,
+        command: SetAccountGroupEnabled,
+    ) -> Result<AccountGroupMutation, AdminError>;
+    async fn delete(
+        &self,
+        context: &MutationContext,
+        command: DeleteAccountGroup,
+    ) -> Result<AccountGroupMutation, AdminError>;
+}
+
+pub(crate) struct DefaultAccountGroupService {
+    upstream_info: Option<Arc<dyn crate::ports::peer::PeerUpstreamService>>,
+    store: Arc<dyn AccountGroupStore>,
+    runtime: Arc<dyn AccountRuntimeStore>,
+    snapshot: Arc<dyn SnapshotControl>,
+}
+
+impl DefaultAccountGroupService {
+    #[must_use]
+    pub(crate) fn new(
+        upstream_info: Option<Arc<dyn crate::ports::peer::PeerUpstreamService>>,
+        store: Arc<dyn AccountGroupStore>,
+        runtime: Arc<dyn AccountRuntimeStore>,
+        snapshot: Arc<dyn SnapshotControl>,
+    ) -> Self {
+        Self {
+            upstream_info,
+            store,
+            runtime,
+            snapshot,
+        }
+    }
+
+    async fn enrich_records(&self, records: &mut [AccountGroupRecord]) -> Result<(), AdminError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let group_ids = records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        let members = self
+            .store
+            .load_account_group_members(&group_ids)
+            .await
+            .map_err(|error| map_store_error(error, "account group members"))?;
+        let account_ids = members
+            .iter()
+            .map(|member| member.account_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let runtime = match self.runtime.account_runtime(&account_ids).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                tracing::warn!(error = %error, "account group runtime projection is unavailable");
+                Default::default()
+            }
+        };
+        project_group_runtime(records, &members, &runtime, self.upstream_info.as_deref());
+        Ok(())
+    }
+
+    async fn publish(
+        &self,
+        result: Result<AccountGroupMutation, crate::ports::store::AdminStoreError>,
+    ) -> Result<AccountGroupMutation, AdminError> {
+        let mut result = result.map_err(|error| map_store_error(error, "account group"))?;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        if let Some(record) = result.record.as_mut()
+            && let Err(error) = self.enrich_records(std::slice::from_mut(record)).await
+        {
+            tracing::warn!(group_id = %result.id.as_str(), error = %error, "committed account group runtime projection is unavailable");
+            // record 可缺省；不要用未完成的容量投影冒充有效展示数据。
+            result.record = None;
+        }
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl AccountGroupService for DefaultAccountGroupService {
+    async fn list(&self, query: AccountGroupListQuery) -> Result<AccountGroupPage, AdminError> {
+        let mut page = self
+            .store
+            .list_account_groups(query)
+            .await
+            .map_err(|error| map_store_error(error, "account group"))?;
+        self.enrich_records(&mut page.items).await?;
+        Ok(page)
+    }
+
+    async fn list_options(
+        &self,
+        query: AccountGroupListQuery,
+    ) -> Result<AccountGroupOptionsPage, AdminError> {
+        self.store
+            .list_account_group_options(query)
+            .await
+            .map_err(|error| map_store_error(error, "account group options"))
+    }
+
+    async fn create(
+        &self,
+        context: &MutationContext,
+        command: CreateAccountGroup,
+    ) -> Result<AccountGroupMutation, AdminError> {
+        crate::model::account_groups::validate_group_fields(
+            &command.name,
+            command.description.as_deref(),
+        )
+        .map_err(|_| AdminError::invalid("账号组请求不合法"))?;
+        let id = AccountGroupId::new(format!("grp_{}", Uuid::now_v7().simple()))
+            .map_err(|_| AdminError::internal("创建账号组 ID 失败"))?;
+        self.publish(
+            self.store
+                .create_account_group(
+                    NewAccountGroup {
+                        allow_image_generation: command.allow_image_generation,
+                        id,
+                        name: command.name,
+                        description: command.description,
+                        fast_mode: command.fast_mode,
+                        color: command.color,
+                    },
+                    context,
+                )
+                .await,
+        )
+        .await
+    }
+
+    async fn update(
+        &self,
+        context: &MutationContext,
+        command: UpdateAccountGroup,
+    ) -> Result<AccountGroupMutation, AdminError> {
+        crate::model::account_groups::validate_group_fields(
+            &command.name,
+            command.description.as_deref(),
+        )
+        .map_err(|_| AdminError::invalid("账号组请求不合法"))?;
+        self.publish(self.store.update_account_group(command, context).await)
+            .await
+    }
+
+    async fn set_enabled(
+        &self,
+        context: &MutationContext,
+        command: SetAccountGroupEnabled,
+    ) -> Result<AccountGroupMutation, AdminError> {
+        self.publish(self.store.set_account_group_enabled(command, context).await)
+            .await
+    }
+
+    async fn delete(
+        &self,
+        context: &MutationContext,
+        command: DeleteAccountGroup,
+    ) -> Result<AccountGroupMutation, AdminError> {
+        self.publish(self.store.delete_account_group(command, context).await)
+            .await
+    }
+}
+
+fn project_group_runtime(
+    records: &mut [AccountGroupRecord],
+    members: &[AccountGroupMemberFact],
+    runtime: &crate::model::accounts::AccountRuntimeSnapshot,
+    upstream: Option<&dyn crate::ports::peer::PeerUpstreamService>,
+) {
+    let now = SystemTime::now();
+    let mut status_by_account = BTreeMap::new();
+    let mut slots_by_account = BTreeMap::new();
+    let mut accounts_by_group = BTreeMap::<&str, Vec<&str>>::new();
+    for member in members {
+        let mut status = member.status.clone();
+        status.cooldown = runtime.cooldown.get(&member.account_id).copied();
+        status_by_account
+            .entry(member.account_id.as_str())
+            .or_insert_with(|| resolve_account_status(&status, now).status);
+        slots_by_account
+            .entry(member.account_id.as_str())
+            .or_insert_with(|| {
+                member
+                    .inherited_version
+                    .as_ref()
+                    .and_then(|version| upstream?.observed_concurrency_limit(version, now))
+                    .map(|limit| u64::from(limit.get()))
+                    .or(member.total_slots)
+            });
+        accounts_by_group
+            .entry(member.group_id.as_str())
+            .or_default()
+            .push(member.account_id.as_str());
+    }
+    for record in records {
+        let account_ids = accounts_by_group
+            .get(record.id.as_str())
+            .map_or(&[][..], Vec::as_slice);
+        let available_ids = account_ids
+            .iter()
+            .copied()
+            .filter(|account_id| status_by_account.get(account_id) == Some(&AccountStatus::Normal))
+            .collect::<Vec<_>>();
+        let total = u64::try_from(account_ids.len()).unwrap_or(u64::MAX);
+        let available = u64::try_from(available_ids.len()).unwrap_or(u64::MAX);
+        record.account_summary = AccountGroupAccountSummary {
+            available,
+            limited: total.saturating_sub(available),
+            total,
+        };
+        record.capacity = AccountGroupCapacity {
+            used_slots: if available_ids.is_empty() {
+                Some(0)
+            } else {
+                runtime.in_flight.as_ref().map(|in_flight| {
+                    available_ids.iter().fold(0_u64, |sum, account_id| {
+                        sum.saturating_add(in_flight.get(*account_id).copied().unwrap_or(0))
+                    })
+                })
+            },
+            total_slots: available_ids.iter().try_fold(0_u64, |sum, account_id| {
+                Some(sum.saturating_add(slots_by_account.get(*account_id).copied().flatten()?))
+            }),
+        };
+    }
+}

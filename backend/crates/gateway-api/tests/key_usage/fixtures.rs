@@ -1,0 +1,163 @@
+//! Key 用量查询测试共用的请求、费用与错误记录样本
+
+use crate::{admin::AdminTestFixture, support::key_fixture};
+use chrono::{Duration, Utc};
+use gateway_admin::model::{
+    client_keys::ClientKeyRecord,
+    observability::{
+        AttemptMetrics, CostCoverage, CurrencyCost, DecimalAmount, Granularity, RequestMetricPoint,
+        RequestMetrics, TimeRange, UsageBilling, UsageListRecord, UsageOverview,
+    },
+};
+use gateway_core::{
+    engine::budget::{ClientBudgetLimits, ClientBudgetStatus},
+    policy::{ClientApiKeyId, RateLimits},
+};
+
+pub(super) async fn fixture() -> AdminTestFixture {
+    let fixture = key_fixture().await;
+    let now = Utc::now();
+    *fixture.client_key.lock().unwrap() = Some(ClientKeyRecord {
+        peer_sharing: Default::default(),
+        request_profile_overrides: Default::default(),
+        id: ClientApiKeyId::new("key-42").unwrap(),
+        name: "Development".to_owned(),
+        label: Some("private-sentinel".to_owned()),
+        prefix: "cpr_live".to_owned(),
+        groups: Vec::new(),
+        provider_kinds: Vec::new(),
+        enabled: true,
+        limits: RateLimits::unlimited(),
+        budget: ClientBudgetStatus {
+            limits: ClientBudgetLimits {
+                daily_usd: "1".parse().unwrap(),
+                weekly_usd: "5".parse().unwrap(),
+            },
+            daily_used_usd: "0.640001".parse().unwrap(),
+            weekly_used_usd: "2.35".parse().unwrap(),
+            daily_resets_at: Some((now + Duration::days(1)).into()),
+            weekly_resets_at: Some((now + Duration::days(7)).into()),
+        },
+        last_used_at: Some(now),
+        created_at: now,
+        updated_at: now,
+    });
+    let metrics = RequestMetrics {
+        request_count: 2,
+        success_count: 1,
+        failure_count: 1,
+        input_tokens: 1000,
+        output_tokens: 100,
+        cached_input_tokens: 900,
+        reasoning_output_tokens: 40,
+        total_tokens: 1100,
+        ..Default::default()
+    };
+    let coverage = CostCoverage {
+        calculated_count: 1,
+        unavailable_count: 1,
+        ..Default::default()
+    };
+    let costs = vec![CurrencyCost {
+        currency: "USD".to_owned(),
+        amount: "0.123456".parse::<DecimalAmount>().unwrap(),
+    }];
+    {
+        let mut observations = fixture.observations.lock().unwrap();
+        observations.summary = Some(UsageOverview {
+            analytics: Default::default(),
+            range: TimeRange {
+                start: now - Duration::hours(1),
+                end: now,
+            },
+            requests: metrics.clone(),
+            attempts: AttemptMetrics {
+                costs: costs.clone(),
+                cost_coverage: coverage.clone(),
+                ..Default::default()
+            },
+            providers: Vec::new(),
+        });
+        observations.trend = Some(vec![RequestMetricPoint {
+            bucket_start: now,
+            granularity: Granularity::FifteenMinutes,
+            metrics,
+            costs,
+            cost_coverage: coverage,
+        }]);
+    }
+    fixture.usage_records.lock().unwrap().push(usage_record());
+    fixture
+}
+
+fn usage_record() -> UsageListRecord {
+    UsageListRecord {
+        provider_account_upstream_peer: None,
+        error_code: None,
+        error_message: None,
+        error_kind: None,
+        websocket_close_code: None,
+        continuation_unavailable_reason: None,
+        upstream_connection_exit_reason: None,
+        recovered: false,
+        client_status_code: None,
+        outcome: gateway_admin::model::observability::RequestOutcome::Succeeded,
+        client_api_key_name: Some("Production".to_owned()),
+        id: "req-visible".to_owned(),
+        endpoint: "/v1/responses".to_owned(),
+        client_transport: "http_sse".to_owned(),
+        requested_model_id: Some("coding".to_owned()),
+        provider_kind: Some("private-sentinel".to_owned()),
+        provider_account_ref: Some("private-sentinel".to_owned()),
+        provider_account_name: Some("private-sentinel".to_owned()),
+        provider_account_email: Some("private-sentinel".to_owned()),
+        provider_account_notes: Some("private-sentinel".to_owned()),
+        provider_account_plan_type: Some("private-sentinel".to_owned()),
+        provider_account_plan_type_display: Some("private-sentinel".to_owned()),
+        provider_account_authentication_kind: Some("private-sentinel".to_owned()),
+        upstream_model_id: Some("private-sentinel".to_owned()),
+        upstream_transport: Some("websocket".to_owned()),
+        service_tier: Some("private-sentinel".to_owned()),
+        input_tokens: Some(1000),
+        output_tokens: Some(100),
+        cached_input_tokens: Some(900),
+        cache_write_input_tokens: Some(0),
+        reasoning_output_tokens: Some(40),
+        image_input_tokens: None,
+        image_output_tokens: None,
+        total_tokens: Some(1100),
+        cost_source: "calculated".to_owned(),
+        cost_amount: Some("0.123456".parse::<DecimalAmount>().unwrap()),
+        cost_currency: Some("USD".to_owned()),
+        billing: Some(UsageBilling::Total {
+            source: "provider_reported".to_owned(),
+            total: CurrencyCost {
+                currency: "USD".to_owned(),
+                amount: "0.123456".parse().unwrap(),
+            },
+        }),
+        transport_decision_wait_ms: None,
+        connect_ms: None,
+        headers_ms: None,
+        first_event_ms: Some(100),
+        first_reasoning_ms: Some(210),
+        first_text_ms: Some(600),
+        first_token_ms: Some(210),
+        provider_processing_ms: None,
+        upstream_response_ms: Some(1_000),
+        upstream_api_overhead_ms: None,
+        upstream_engine_ms: Some(2.450638),
+        latency_ms: Some(1250),
+        admission_decision_ms: None,
+        account_selection_wait_ms: None,
+        capacity_used_slots: Some(17),
+        capacity_total_slots: Some(50),
+        client_ip: Some("192.0.2.42".to_owned()),
+        user_agent: Some("key-usage-test/1.0".to_owned()),
+        reasoning_effort: Some("xhigh".to_owned()),
+        reasoning_preset: Some("private-sentinel".to_owned()),
+        subagent_kind: Some("private-sentinel".to_owned()),
+        compact: false,
+        started_at: Utc::now(),
+    }
+}
