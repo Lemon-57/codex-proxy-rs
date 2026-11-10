@@ -235,31 +235,18 @@ pub struct UpdateAccountRequest {
 }
 
 impl UpdateAccountRequest {
-    fn parse_manual_start(&self) -> Result<Option<Option<DateTime<Utc>>>, WireValidationError> {
-        self.manual_starts_at
-            .as_deref()
-            .map(|value| {
-                if value.is_empty() {
-                    return Ok(None);
-                }
-                DateTime::parse_from_rfc3339(value)
-                    .map(|value| Some(value.to_utc()))
-                    .map_err(|_| WireValidationError::new("manualStartsAt"))
-            })
-            .transpose()
-    }
-    fn parse_manual_expiration(
-        &self,
+    fn parse_manual_time(
+        value: Option<&str>,
+        field: &'static str,
     ) -> Result<Option<Option<DateTime<Utc>>>, WireValidationError> {
-        self.manual_expires_at
-            .as_deref()
+        value
             .map(|value| {
                 if value.is_empty() {
                     return Ok(None);
                 }
                 DateTime::parse_from_rfc3339(value)
                     .map(|value| Some(value.to_utc()))
-                    .map_err(|_| WireValidationError::new("manualExpiresAt"))
+                    .map_err(|_| WireValidationError::new(field))
             })
             .transpose()
     }
@@ -280,8 +267,8 @@ impl UpdateAccountRequest {
         {
             return Err(WireValidationError::new("supplier"));
         }
-        self.parse_manual_start()?;
-        self.parse_manual_expiration()?;
+        Self::parse_manual_time(self.manual_starts_at.as_deref(), "manualStartsAt")?;
+        Self::parse_manual_time(self.manual_expires_at.as_deref(), "manualExpiresAt")?;
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
         validate_wire_group_ids(&self.group_ids)?;
@@ -292,8 +279,10 @@ impl UpdateAccountRequest {
         self,
     ) -> Result<(UpdateAccount, Option<ProviderDocument>), WireValidationError> {
         self.validate()?;
-        let manual_starts_at = self.parse_manual_start()?;
-        let manual_expires_at = self.parse_manual_expiration()?;
+        let manual_starts_at =
+            Self::parse_manual_time(self.manual_starts_at.as_deref(), "manualStartsAt")?;
+        let manual_expires_at =
+            Self::parse_manual_time(self.manual_expires_at.as_deref(), "manualExpiresAt")?;
         let connection = self
             .connection
             .map(AccountConnectionUpdateRequest::into_document);
