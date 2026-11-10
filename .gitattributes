@@ -1,3 +1,5 @@
 # SQLx migration checksums are byte-sensitive; keep migration inputs portable across hosts.
 backend/migrations/*.sql text eol=lf
 backend/migrations/.frozen-sha256 text eol=lf
+# 该冻结迁移已按 CRLF 校验并部署，保留现有字节，不能经检出归一化改变 checksum
+backend/migrations/0042_queue_timeouts_quota_credits_and_installation_seed.sql -text
