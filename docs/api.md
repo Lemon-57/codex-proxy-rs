@@ -1161,10 +1161,10 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 字符，允许换行和制表符，保存时去除首尾空白，空字符串清空备注。备注独立于上游身份，导入时未显式提供备注、
 重新授权、凭据刷新及批量调度更新均保留已有备注
 
-`supplier` 和 `manualExpiresAt` 为人工维护的供应商和到期时间，与授权备注 `notes`、令牌有效期独立保存，
-仅用于记录，不改变启停和调度。列表和详情返回这两项及后端生成的 `manualExpiresAtDisplay`，未填写为 `null`。
+`supplier`、`manualStartsAt` 和 `manualExpiresAt` 为人工维护的供应商、开始时间和到期时间，与授权备注 `notes`、令牌有效期独立保存，
+仅用于记录，不改变启停和调度。列表和详情返回这三项及后端生成的 `manualStartsAtDisplay`、`manualExpiresAtDisplay`，未填写为 `null`。
 `/api/admin/accounts/update` 省略或传 `null` 保留原值，空字符串清空对应字段。`supplier` 最多 100 个 Unicode 字符，
-不接受控制字符，保存时去除首尾空白；`manualExpiresAt` 接受带时区的 RFC 3339 时间。导入、重新授权和批量调度更新保留人工信息
+不接受控制字符，保存时去除首尾空白；`manualStartsAt`、`manualExpiresAt` 接受带时区的 RFC 3339 时间。导入、重新授权和批量调度更新保留人工信息
 
 列表查询支持 `planType` 按订阅原始类型精确匹配，忽略大小写；`api` 对应 API Key 账号，`unknown` 对应未提供套餐的账号，空值表示不过滤，筛选在分页前执行，可与其他条件组合
 

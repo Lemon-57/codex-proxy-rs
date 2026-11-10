@@ -115,6 +115,7 @@ pub enum AccountGroupFilter {
 pub struct AccountRecord {
     pub auto_use_quota_credits: bool,
     pub supplier: Option<String>,
+    pub manual_starts_at: Option<DateTime<Utc>>,
     pub manual_expires_at: Option<DateTime<Utc>>,
     pub id: String,
     pub provider_kind: ProviderKind,
@@ -233,6 +234,7 @@ pub struct AccountCapacity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAccount {
     pub supplier: Option<String>,
+    pub manual_starts_at: Option<Option<DateTime<Utc>>>,
     pub manual_expires_at: Option<Option<DateTime<Utc>>>,
     pub account_id: String,
     /// 缺省保留名称，空字符串清除名称并使用邮箱展示

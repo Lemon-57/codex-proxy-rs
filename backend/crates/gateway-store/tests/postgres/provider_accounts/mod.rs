@@ -471,6 +471,7 @@ async fn profile_changes_survive_inflight_background_and_manual_token_refresh() 
         .update_account(
             UpdateAccount {
                 supplier: None,
+                manual_starts_at: None,
                 manual_expires_at: None,
                 account_id: id.to_string(),
                 name: Some("renamed team".to_owned()),
@@ -1244,6 +1245,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
         .update_account(
             UpdateAccount {
                 supplier: None,
+                manual_starts_at: None,
                 manual_expires_at: None,
                 name: None,
                 notes: None,
@@ -1328,6 +1330,7 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
     };
     let command = UpdateAccount {
         supplier: None,
+        manual_starts_at: None,
         manual_expires_at: None,
         name: None,
         notes: None,
@@ -1410,6 +1413,7 @@ async fn account_rename_preserves_facts_and_is_searchable() {
     };
     let command = UpdateAccount {
         supplier: None,
+        manual_starts_at: None,
         manual_expires_at: None,
         account_id: "acct_rename".to_owned(),
         name: Some("  研发团队  ".to_owned()),
@@ -1523,6 +1527,11 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         name: None,
         account_id: "acct_notes".to_owned(),
         supplier: Some("手工备注".to_owned()),
+        manual_starts_at: Some(Some(
+            chrono::DateTime::parse_from_rfc3339("2026-12-01T23:59:00+08:00")
+                .unwrap()
+                .to_utc(),
+        )),
         manual_expires_at: Some(Some(
             chrono::DateTime::parse_from_rfc3339("2026-12-31T23:59:00+08:00")
                 .unwrap()
@@ -1548,6 +1557,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         .account;
     assert_eq!(record.notes.as_deref(), Some("团队备用\n下月续费"));
     assert_eq!(record.supplier, command.supplier);
+    assert_eq!(record.manual_starts_at, command.manual_starts_at.flatten());
     assert_eq!(
         record.manual_expires_at,
         command.manual_expires_at.flatten()
@@ -1602,6 +1612,10 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
     assert_eq!(records[0].notes.as_deref(), Some("团队备用\n下月续费"));
     assert_eq!(records[0].supplier, command.supplier);
     assert_eq!(
+        records[0].manual_starts_at,
+        command.manual_starts_at.flatten()
+    );
+    assert_eq!(
         records[0].manual_expires_at,
         command.manual_expires_at.flatten()
     );
@@ -1647,6 +1661,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
             UpdateAccount {
                 notes: Some(" \n\t ".to_owned()),
                 supplier: Some(String::new()),
+                manual_starts_at: Some(None),
                 manual_expires_at: Some(None),
                 ..command
             },
@@ -1661,8 +1676,13 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         .unwrap()
         .account;
     assert_eq!(
-        (cleared.notes, cleared.supplier, cleared.manual_expires_at),
-        (None, None, None)
+        (
+            cleared.notes,
+            cleared.supplier,
+            cleared.manual_starts_at,
+            cleared.manual_expires_at
+        ),
+        (None, None, None, None)
     );
     database.close().await;
 }
@@ -1691,6 +1711,7 @@ async fn invalid_account_notes_roll_back_scheduling_revision_and_audit() {
         .update_account(
             UpdateAccount {
                 supplier: None,
+                manual_starts_at: None,
                 manual_expires_at: None,
                 name: None,
                 account_id: "acct_notes".to_owned(),
@@ -2726,6 +2747,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
         .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
             auto_use_quota_credits: None,
             supplier: None,
+            manual_starts_at: None,
             manual_expires_at: None,
             name: None,
             notes: None,
@@ -2797,6 +2819,7 @@ async fn credential_rotation_and_settings_share_one_transaction() {
     .expect("seed group");
     let settings = UpdateAccount {
         supplier: None,
+        manual_starts_at: None,
         manual_expires_at: None,
         name: Some("  团队新名称  ".to_owned()),
         account_id: ACCOUNT_ID.to_owned(),
@@ -3576,6 +3599,7 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
         .update_account(
             UpdateAccount {
                 supplier: None,
+                manual_starts_at: None,
                 manual_expires_at: None,
                 name: None,
                 notes: None,

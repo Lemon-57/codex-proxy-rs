@@ -99,6 +99,7 @@ async fn fixture(sharing: ClientPeerSharing, plaintext: &str) -> (AdminTestFixtu
         account: AccountRecord {
             auto_use_quota_credits: false,
             supplier: None,
+            manual_starts_at: None,
             manual_expires_at: None,
             id: "acct_private_sentinel".into(),
             provider_kind: provider,

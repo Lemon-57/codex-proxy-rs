@@ -126,7 +126,7 @@ impl PgProviderAccountRepository {
         account_ids: Option<&[&str]>,
     ) -> StoreResult<Vec<ProviderAccountSummary>> {
         let mut query = sqlx::QueryBuilder::<Postgres>::new(
-            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_expires_at, email, upstream_user_id,
+            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_starts_at, manual_expires_at, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
@@ -207,7 +207,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
             return Err(invalid("plugin account page limit must be positive"));
         }
         let rows = sqlx::query(
-            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_expires_at, email, upstream_user_id,
+            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_starts_at, manual_expires_at, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
@@ -600,17 +600,20 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                 )
                 .await?;
             }
-            if command.supplier.is_some() || command.manual_expires_at.is_some() {
+            if command.supplier.is_some() || command.manual_starts_at.is_some() || command.manual_expires_at.is_some() {
                 sqlx::query(
                     "update provider_accounts set
                      supplier = case when $2::text is null then supplier else nullif($2, '') end,
-                     manual_expires_at = case when $3 then $4::timestamptz else manual_expires_at end
+                     manual_expires_at = case when $3 then $4::timestamptz else manual_expires_at end,
+                     manual_starts_at = case when $5 then $6::timestamptz else manual_starts_at end
                      where id = any($1::text[])"
                 )
                 .bind(&command.account_ids)
                 .bind(command.supplier.as_deref().map(str::trim))
                 .bind(command.manual_expires_at.is_some())
                 .bind(command.manual_expires_at.flatten())
+                .bind(command.manual_starts_at.is_some())
+                .bind(command.manual_starts_at.flatten())
                 .execute(&mut *transaction)
                 .await
                 .map_err(|source| postgres_unavailable("update manual account details", source))?;
@@ -1289,7 +1292,7 @@ impl PgProviderAccountRepository {
             .map(AccountGroupId::as_str)
             .collect::<Vec<_>>();
         let rows = sqlx::query(
-            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_expires_at, email, upstream_user_id,
+            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_starts_at, manual_expires_at, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,

@@ -804,6 +804,7 @@ async fn supplier_filter_applies_before_pagination_and_treats_wildcards_literall
                     account_id: id.to_owned(),
                     name: None,
                     supplier: Some(supplier.to_owned()),
+                    manual_starts_at: None,
                     manual_expires_at: None,
                     notes: None,
                     enabled: false,

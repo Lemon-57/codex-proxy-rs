@@ -523,11 +523,13 @@ fn single_update_validates_manual_details_independently_of_authorization_notes()
     let baseline = json!({
         "accountId": "acct_manual", "enabled": false, "concurrencyLimit": null,
         "weight": 1, "groupIds": [], "notes": "unchanged authorization data",
-        "supplier": "示例供应商", "manualExpiresAt": "2026-12-31T23:59:00+08:00"
+        "supplier": "示例供应商", "manualStartsAt": "2026-12-01T23:59:00+08:00",
+        "manualExpiresAt": "2026-12-31T23:59:00+08:00"
     });
     for expiration in [json!(null), json!(""), baseline["manualExpiresAt"].clone()] {
         let mut value = baseline.clone();
         value["manualExpiresAt"] = expiration;
+        value["manualStartsAt"] = value["manualExpiresAt"].clone();
         let request: UpdateAccountRequest = serde_json::from_value(value).unwrap();
         request.validate().unwrap();
     }
@@ -536,6 +538,8 @@ fn single_update_validates_manual_details_independently_of_authorization_notes()
         ("supplier", json!("备注\u{0000}")),
         ("manualExpiresAt", json!("2026-02-30T00:00:00Z")),
         ("manualExpiresAt", json!("2026-12-31T23:59:00")),
+        ("manualStartsAt", json!("2026-02-30T00:00:00Z")),
+        ("manualStartsAt", json!("2026-12-01T23:59:00")),
     ] {
         let mut value = baseline.clone();
         value[field] = invalid;

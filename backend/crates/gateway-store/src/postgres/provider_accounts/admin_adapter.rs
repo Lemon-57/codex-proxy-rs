@@ -657,6 +657,9 @@ impl AccountStore for PgAdminAccountStore {
         if command.supplier.is_some() {
             changed_fields.push("supplier".to_owned());
         }
+        if command.manual_starts_at.is_some() {
+            changed_fields.push("manual_starts_at".to_owned());
+        }
         if command.manual_expires_at.is_some() {
             changed_fields.push("manual_expires_at".to_owned());
         }
@@ -674,6 +677,7 @@ impl AccountStore for PgAdminAccountStore {
                 name: command.name,
                 notes: command.notes,
                 supplier: command.supplier,
+                manual_starts_at: command.manual_starts_at,
                 manual_expires_at: command.manual_expires_at,
                 enabled: Some(command.enabled),
                 concurrency_limit: Some(command.concurrency_limit),
@@ -779,6 +783,7 @@ impl AccountStore for PgAdminAccountStore {
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 supplier: None,
+                manual_starts_at: None,
                 manual_expires_at: None,
                 account_ids: command.account_ids,
                 auto_use_quota_credits: command.auto_use_quota_credits,

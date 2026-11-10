@@ -26,6 +26,7 @@ pub(crate) fn admin_account_record(
         name: summary.name,
         notes: summary.notes,
         supplier: summary.supplier,
+        manual_starts_at: summary.manual_starts_at,
         manual_expires_at: summary.manual_expires_at,
         email: summary.email,
         upstream_user_id: summary.upstream_user_id,

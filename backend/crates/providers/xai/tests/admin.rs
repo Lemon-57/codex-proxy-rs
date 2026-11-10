@@ -770,6 +770,7 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
     AccountRecord {
         auto_use_quota_credits: false,
         supplier: None,
+        manual_starts_at: None,
         manual_expires_at: None,
         outbound_proxy_id: None,
         outbound_proxy_enabled: true,

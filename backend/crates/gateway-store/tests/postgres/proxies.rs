@@ -398,6 +398,7 @@ fn success() -> ProxyTestResult {
 fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
     UpdateAccount {
         supplier: None,
+        manual_starts_at: None,
         manual_expires_at: None,
         name: None,
         notes: None,

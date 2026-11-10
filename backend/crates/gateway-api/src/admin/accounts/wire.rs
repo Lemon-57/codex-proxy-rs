@@ -297,7 +297,9 @@ pub struct AccountSummaryView {
 pub struct AccountView {
     pub auto_use_quota_credits: bool,
     pub supplier: Option<String>,
+    pub manual_starts_at: Option<String>,
     pub manual_expires_at: Option<String>,
+    pub manual_starts_at_display: Option<String>,
     pub manual_expires_at_display: Option<String>,
     pub upstream: Option<super::AccountUpstreamInfoView>,
     pub capabilities: AccountCapabilitiesView,
