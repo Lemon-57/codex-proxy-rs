@@ -30,12 +30,7 @@ const props = withDefaults(
 )
 
 const emailText = computed(() => props.account.email?.trim())
-const displayTitle = computed(() => {
-  const label = accountIdentityLabel(props.account)
-  return props.account.authenticationKind !== 'api_key' && label === emailText.value
-    ? label.split('@')[0]
-    : label
-})
+const displayTitle = computed(() => accountIdentityLabel(props.account))
 
 const visibleNotes = computed(() => props.showNotes ? props.account.notes : undefined)
 

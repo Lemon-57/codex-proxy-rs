@@ -48,7 +48,12 @@ export const accountColumns = computed(() => (defineTableColumns<Account>([
   { key: 'usage', label: t('usage.usage'), kind: 'custom', size: '2xl', sortable: true },
   { key: 'groups', label: t('accounts.fields.accountGrouping'), kind: 'status', size: 'sm' },
   { key: 'supplier', label: '供应商', kind: 'custom', size: 'lg' },
-  { key: 'manualStartsAtDisplay', label: '开始时间', kind: 'datetime', emptyText: '' },
+  {
+    key: 'manualStartsAtDisplay',
+    label: '开始时间',
+    kind: 'datetime',
+    emptyText: '',
+  },
   { key: 'manualExpiresAtDisplay', label: '到期时间', kind: 'datetime', emptyText: '' },
   {
     key: 'lastUsedAt',
