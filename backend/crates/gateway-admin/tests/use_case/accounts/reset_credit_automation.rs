@@ -782,6 +782,20 @@ fn advance_retry(store: &FakeAccountStore) {
         .retry_at = Some(Utc::now() - TimeDelta::seconds(1));
 }
 
+fn advance_quota_verification(store: &FakeAccountStore) {
+    store
+        .automations
+        .lock()
+        .unwrap()
+        .get_mut("acct_test")
+        .unwrap()
+        .state
+        .quota_refresh
+        .as_mut()
+        .unwrap()
+        .next_attempt_at = Utc::now() - TimeDelta::seconds(1);
+}
+
 #[tokio::test]
 async fn automation_weekly_threshold_is_optional_inclusive_and_uses_remaining_quota() {
     for (threshold, used, consume) in [
@@ -861,6 +875,7 @@ async fn month_lead_consumes_only_exhausted_weekly_quota_and_covers_long_lived_c
             .accounts(store)
             .settings(Arc::new(StaticSettingsStore {
                 reset_credit_default_enabled: false,
+                reset_credit_on_low_weekly_quota: false,
                 reset_credit_lead_minutes: 43_200,
                 reset_credit_max_weekly_remaining_percent: Some(0),
             }))
@@ -1053,7 +1068,7 @@ async fn exhausted_week_discovers_unseen_long_lived_credit_before_expiry_window(
         .lock()
         .unwrap()
         .insert("acct_test".into(), record);
-    let services = threshold_services(provider.clone(), store.clone(), Some(0)).await;
+    let services = threshold_services(provider.clone(), store.clone(), Some(0), false).await;
     services
         .accounts()
         .reconcile_reset_credit_automation(ProviderAccountId::new("acct_test").unwrap())
@@ -1364,7 +1379,14 @@ async fn early_use_checks_only_known_cards_and_confirms_low_quota_before_spendin
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(no_card.next_run_at, no_card.state.next_discovery_at);
+        assert_eq!(
+            no_card.next_run_at,
+            no_card
+                .state
+                .next_quota_check_at
+                .unwrap()
+                .min(no_card.state.next_discovery_at)
+        );
         store
             .automations
             .lock()
@@ -1397,7 +1419,8 @@ async fn early_use_checks_only_known_cards_and_confirms_low_quota_before_spendin
         let requests = provider.quota_requests();
         assert_eq!(
             requests.iter().filter(|r| !r.refresh).count(),
-            usize::from(enabled)
+            // 消费基线供独立的额度核验任务在重启后继续比较
+            usize::from(enabled) + usize::from(expected)
         );
         assert_eq!(requests.iter().any(|r| r.refresh), expected);
         if enabled && !expected {
@@ -1420,6 +1443,14 @@ async fn early_use_rechecks_live_quota_and_waits_for_a_new_recovery_after_restar
     let store = FakeAccountStore::new("openai", events());
     enable_capability(&provider);
     let expiry = Utc::now() + TimeDelta::days(3);
+    let reset_at = Utc::now() + TimeDelta::days(1);
+    let quota_snapshot = |used| {
+        let mut quota = weekly_quota(used);
+        for window in &mut quota.windows {
+            window.reset_at = Some(reset_at);
+        }
+        quota
+    };
     let mut later = card(expiry + TimeDelta::days(1));
     later.id = "later".into();
     *provider.reset_credits.lock().unwrap() = vec![later, card(expiry)];
@@ -1432,9 +1463,9 @@ async fn early_use_rechecks_live_quota_and_waits_for_a_new_recovery_after_restar
     let services = threshold_services(provider.clone(), store.clone(), Some(10), true).await;
     let high = ProviderQuota {
         observed_at: Some(Utc::now()),
-        ..weekly_quota(15.0)
+        ..quota_snapshot(15.0)
     };
-    provider.set_quota(weekly_quota(90.0));
+    provider.set_quota(quota_snapshot(90.0));
     let (release, gate) = tokio::sync::oneshot::channel();
     *provider.reset_credit_query_gate.lock().unwrap() = Some(gate);
     let (result, ()) = tokio::join!(
@@ -1456,7 +1487,7 @@ async fn early_use_rechecks_live_quota_and_waits_for_a_new_recovery_after_restar
     assert!(provider.reset_credit_commands().is_empty());
 
     advance_retry(&store);
-    provider.set_quota(weekly_quota(95.0));
+    provider.set_quota(quota_snapshot(95.0));
     services
         .accounts()
         .reconcile_reset_credit_automation(id.clone())
@@ -1472,8 +1503,9 @@ async fn early_use_rechecks_live_quota_and_waits_for_a_new_recovery_after_restar
         .retain(|credit| credit.id != "card_1");
 
     let services = threshold_services(provider.clone(), store.clone(), Some(10), true).await;
-    for quota in [weekly_quota(95.0), high, weekly_quota(95.0)] {
+    for quota in [quota_snapshot(95.0), high, quota_snapshot(95.0)] {
         provider.set_quota(quota);
+        advance_quota_verification(&store);
         services
             .accounts()
             .reconcile_reset_credit_automation(id.clone())
@@ -1483,14 +1515,38 @@ async fn early_use_rechecks_live_quota_and_waits_for_a_new_recovery_after_restar
     assert_eq!(provider.reset_credit_commands().len(), 1);
     provider.set_quota(ProviderQuota {
         observed_at: Some(Utc::now()),
-        ..weekly_quota(20.0)
+        ..quota_snapshot(90.0)
+    });
+    advance_quota_verification(&store);
+    services
+        .accounts()
+        .reconcile_reset_credit_automation(id.clone())
+        .await
+        .unwrap();
+    let partial = store
+        .reset_credit_automation("acct_test")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(partial.state.quota_refresh.is_none());
+    assert!(partial.state.awaiting_weekly_recovery_since.is_some());
+    provider.set_quota(quota_snapshot(95.0));
+    services
+        .accounts()
+        .reconcile_reset_credit_automation(id.clone())
+        .await
+        .unwrap();
+    assert_eq!(provider.reset_credit_commands().len(), 1);
+    provider.set_quota(ProviderQuota {
+        observed_at: Some(Utc::now()),
+        ..quota_snapshot(20.0)
     });
     services
         .accounts()
         .reconcile_reset_credit_automation(id.clone())
         .await
         .unwrap();
-    provider.set_quota(weekly_quota(100.0));
+    provider.set_quota(quota_snapshot(100.0));
     services
         .accounts()
         .reconcile_reset_credit_automation(id)
@@ -1539,6 +1595,7 @@ async fn weekly_recovery_is_observed_without_cards_after_a_failed_quota_readback
         observed_at: Some(Utc::now()),
         ..weekly_quota(20.0)
     });
+    advance_quota_verification(&store);
     accounts
         .reconcile_reset_credit_automation(id.clone())
         .await
@@ -1548,7 +1605,14 @@ async fn weekly_recovery_is_observed_without_cards_after_a_failed_quota_readback
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(recovered.next_run_at, recovered.state.next_discovery_at);
+    assert_eq!(
+        recovered.next_run_at,
+        recovered
+            .state
+            .next_quota_check_at
+            .unwrap()
+            .min(recovered.state.next_discovery_at)
+    );
     assert!(!recorded(&events).contains(&"provider.reset_credits"));
     assert_eq!(
         provider
@@ -1556,7 +1620,7 @@ async fn weekly_recovery_is_observed_without_cards_after_a_failed_quota_readback
             .iter()
             .map(|r| r.refresh)
             .collect::<Vec<_>>(),
-        [true, false]
+        [false, true, true]
     );
 
     provider.set_quota(weekly_quota(95.0));

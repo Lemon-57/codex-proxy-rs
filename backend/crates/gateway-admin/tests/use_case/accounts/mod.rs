@@ -1140,6 +1140,7 @@ impl Default for StaticSettingsStore {
     fn default() -> Self {
         Self {
             reset_credit_default_enabled: false,
+            reset_credit_on_low_weekly_quota: false,
             reset_credit_lead_minutes: 10,
             reset_credit_max_weekly_remaining_percent: None,
         }

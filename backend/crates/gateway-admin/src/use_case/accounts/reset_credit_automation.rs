@@ -406,43 +406,59 @@ impl DefaultAccountsService {
         let Some(refresh) = record.state.quota_refresh.clone() else {
             return Ok(());
         };
-        let confirmed = match self.quota(account_id, true).await {
-            Ok(item) if !item.account.quota.is_exhausted() => item
-                .quota
-                .usage_windows()
-                .find(|(_, period)| *period == AccountUsagePeriod::Weekly)
-                .is_some_and(|(window, _)| {
-                    let used = window
-                        .used_percent
-                        .filter(|n| n.is_finite())
-                        .map(|n| (n.clamp(0.0, 100.0) * 100.0).round() as u32);
-                    match (refresh.previous_weekly_used, used) {
-                        (Some(0), Some(0)) => true,
-                        (Some(before), Some(after)) if after < before => true,
-                        (_, Some(after))
-                            if after < 10_000 && refresh.previous_weekly_used.is_none() =>
-                        {
-                            true
+        let trigger = Trigger::from_settings(&self.automation_settings().await?);
+        let response = self.quota(account_id, true).await;
+        let confirmed = match &response {
+            Ok(item)
+                if !item.account.quota.is_exhausted()
+                    && record
+                        .state
+                        .awaiting_weekly_recovery_since
+                        .is_none_or(|since| {
+                            item.quota
+                                .observed_at
+                                .is_none_or(|observed| observed > since)
+                        }) =>
+            {
+                item.quota
+                    .usage_windows()
+                    .find(|(_, period)| *period == AccountUsagePeriod::Weekly)
+                    .is_some_and(|(window, _)| {
+                        let used = window
+                            .used_percent
+                            .filter(|n| n.is_finite())
+                            .map(|n| (n.clamp(0.0, 100.0) * 100.0).round() as u32);
+                        match (refresh.previous_weekly_used, used) {
+                            (Some(0), Some(0)) => true,
+                            (Some(before), Some(after)) if after < before => true,
+                            (_, Some(after))
+                                if after < 10_000 && refresh.previous_weekly_used.is_none() =>
+                            {
+                                true
+                            }
+                            _ => window
+                                .reset_at
+                                .zip(refresh.previous_weekly_reset_at)
+                                .is_some_and(|(after, before)| after > before),
                         }
-                        _ => window
-                            .reset_at
-                            .zip(refresh.previous_weekly_reset_at)
-                            .is_some_and(|(after, before)| after > before),
-                    }
-                }),
+                    })
+            }
             Ok(_) | Err(_) => false,
         };
         if confirmed {
             record.state.quota_refresh = None;
-            record.state.awaiting_weekly_recovery_since = None;
+            if let Some(limit) = trigger.weekly_trigger() {
+                // 额度可用和解除同一次低额度的用卡保护分别核对
+                if let Ok(item) = &response {
+                    observe_weekly_recovery(&mut record.state, &item.quota, limit);
+                }
+            } else {
+                record.state.awaiting_weekly_recovery_since = None;
+            }
         } else if let Some(refresh) = &mut record.state.quota_refresh {
             refresh.next_attempt_at = Utc::now() + chrono::Duration::seconds(30);
         }
-        reschedule(
-            record,
-            Trigger::from_settings(&self.automation_settings().await?),
-            Utc::now(),
-        );
+        reschedule(record, trigger, Utc::now());
         self.save_automation(record, None).await
     }
 
