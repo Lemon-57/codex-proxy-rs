@@ -30,7 +30,7 @@ pub(crate) async fn load_admin_account_page(
     let supplier_pattern = query
         .supplier
         .as_deref()
-        .map(|value| crate::postgres::literal_contains_pattern(value));
+        .map(|value| crate::postgres::literal_contains_pattern(&value.to_lowercase()));
     let plan_type = query.plan_type.clone();
     let status = query.status.map(|status| status.as_str().to_owned());
     let (group_mode, group_id) = match query.group_filter.as_ref() {

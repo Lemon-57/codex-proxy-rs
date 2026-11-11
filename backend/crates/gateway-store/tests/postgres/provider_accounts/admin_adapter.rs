@@ -285,7 +285,7 @@ async fn account_capacity_should_resolve_limits_for_list_and_detail() {
 }
 
 #[tokio::test]
-async fn account_search_matches_only_name_and_email_literal_substrings() {
+async fn account_search_matches_name_email_and_upstream_identity_literal_substrings() {
     let Some(database) = TestDatabase::create("account_contains_search").await else {
         return;
     };
@@ -309,8 +309,8 @@ async fn account_search_matches_only_name_and_email_literal_substrings() {
         ("%", 1),
         (r"\", 1),
         ("searchable", 0),
-        ("user-needle", 0),
-        ("account-marker", 0),
+        ("user-needle", 1),
+        ("account-marker", 1),
         ("Ops_100_", 0),
         ("missing", 0),
     ] {
