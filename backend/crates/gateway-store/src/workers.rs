@@ -1,0 +1,498 @@
+//! Worker 贡献、调度定义与健康探针
+
+use super::*;
+use gateway_core::task::DaemonTask;
+use gateway_core::task::WorkerDaemonContext;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+const COMMAND_DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
+
+pub(crate) struct CommandStoreWriters {
+    pub(crate) execution: postgres::ExecutionObservationWriter<postgres::PgExecutionStore>,
+    pub(crate) client_key_usage: postgres::PgClientApiKeyUsageWriter,
+    pub(crate) admission_release: redis::ClientAdmissionReleaseWriter,
+    pub(crate) budget: postgres::ClientBudgetWriter,
+}
+
+/// 短生命周期 CLI 只运行数据面必需的四个写泵，不注册恢复、保留或维护 Worker
+pub struct CommandStoreDrain {
+    cancellation: gateway_core::lifecycle::CancellationToken,
+    tasks: Vec<tokio::task::JoinHandle<Result<(), WorkerTaskError>>>,
+    execution_idle: postgres::ExecutionBufferIdle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("command store writes could not be drained")]
+pub struct CommandStoreDrainError;
+
+impl CommandStoreWriters {
+    pub(crate) fn start(self) -> CommandStoreDrain {
+        let cancellation = gateway_core::lifecycle::CancellationToken::new();
+        let Self {
+            execution,
+            client_key_usage,
+            admission_release,
+            budget,
+        } = self;
+        let execution_idle = execution.idle();
+        let tasks = vec![
+            spawn_command_writer(execution, cancellation.child_token()),
+            spawn_command_writer(client_key_usage, cancellation.child_token()),
+            spawn_command_writer(admission_release, cancellation.child_token()),
+            spawn_command_writer(budget, cancellation.child_token()),
+        ];
+        CommandStoreDrain {
+            cancellation,
+            tasks,
+            execution_idle,
+        }
+    }
+}
+
+fn spawn_command_writer<T>(
+    writer: T,
+    cancellation: gateway_core::lifecycle::CancellationToken,
+) -> tokio::task::JoinHandle<Result<(), WorkerTaskError>>
+where
+    T: DaemonTask + Send + 'static,
+{
+    tokio::spawn(async move { writer.run(WorkerDaemonContext::new(cancellation)).await })
+}
+
+impl CommandStoreDrain {
+    pub(crate) async fn shutdown(mut self) -> Result<(), CommandStoreDrainError> {
+        let deadline = std::time::Instant::now() + COMMAND_DRAIN_TIMEOUT;
+        // CLI 调用方已结束数据面会话；先让已接收的 execution 写入在正常 writer
+        // 路径完成，避免立即取消后落入更短的常驻进程关闭丢弃窗口
+        let mut failed = !self.execution_idle.wait_until(deadline).await;
+        self.cancellation.cancel();
+        for mut task in self.tasks.drain(..) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                task.abort();
+                failed = true;
+                continue;
+            }
+            match tokio::time::timeout(remaining, &mut task).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(_))) | Ok(Err(_)) => failed = true,
+                Err(_) => {
+                    task.abort();
+                    failed = true;
+                }
+            }
+        }
+        if failed {
+            Err(CommandStoreDrainError)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for CommandStoreDrain {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+pub(crate) fn store_worker_contributions(
+    execution: Arc<postgres::PgExecutionStore>,
+    execution_writer: postgres::ExecutionObservationWriter<postgres::PgExecutionStore>,
+    client_key_usage_writer: postgres::PgClientApiKeyUsageWriter,
+    admission_release_writer: redis::ClientAdmissionReleaseWriter,
+    budget_writer: postgres::ClientBudgetWriter,
+    lease_cleanup: impl DaemonTask + 'static,
+) -> StoreResult<Vec<WorkerContribution>> {
+    let stale_id = WorkerId::try_new(WorkerKind::StaleModelRequestRecovery, "postgres")
+        .map_err(worker_definition_error)?;
+    let ops_flush_id =
+        WorkerId::try_new(WorkerKind::OpsFlush, "postgres").map_err(worker_definition_error)?;
+    let client_key_usage_flush_id =
+        WorkerId::try_new(WorkerKind::OpsFlush, "postgres_client_key_usage")
+            .map_err(worker_definition_error)?;
+    let admission_flush_id = WorkerId::try_new(WorkerKind::OpsFlush, "redis_admission")
+        .map_err(worker_definition_error)?;
+    let budget_flush_id = WorkerId::try_new(WorkerKind::OpsFlush, "postgres_client_budget")
+        .map_err(worker_definition_error)?;
+    let lease_cleanup_id = WorkerId::try_new(WorkerKind::OpsFlush, "redis_account_leases")
+        .map_err(worker_definition_error)?;
+    let ops_flush_restart =
+        DaemonRestartPolicy::try_new(Duration::from_secs(1), Duration::from_secs(60))
+            .map_err(worker_definition_error)?;
+    Ok(vec![
+        WorkerContribution::Registration(
+            WorkerRegistration::try_new(
+                lease_cleanup_id,
+                WorkerRunnable::Daemon {
+                    restart: ops_flush_restart,
+                    task: Box::new(lease_cleanup),
+                },
+            )
+            .map_err(worker_definition_error)?,
+        ),
+        WorkerContribution::Registration(
+            WorkerRegistration::try_new(
+                budget_flush_id,
+                WorkerRunnable::Daemon {
+                    restart: ops_flush_restart,
+                    task: Box::new(budget_writer),
+                },
+            )
+            .map_err(worker_definition_error)?,
+        ),
+        WorkerContribution::Registration(scheduled_worker(
+            stale_id,
+            Duration::from_secs(30),
+            Box::new(StaleModelRequestRecoveryTask { execution }),
+        )?),
+        WorkerContribution::Registration(
+            WorkerRegistration::try_new(
+                ops_flush_id,
+                WorkerRunnable::Daemon {
+                    restart: ops_flush_restart,
+                    task: Box::new(execution_writer),
+                },
+            )
+            .map_err(worker_definition_error)?,
+        ),
+        WorkerContribution::Registration(
+            WorkerRegistration::try_new(
+                client_key_usage_flush_id,
+                WorkerRunnable::Daemon {
+                    restart: ops_flush_restart,
+                    task: Box::new(client_key_usage_writer),
+                },
+            )
+            .map_err(worker_definition_error)?,
+        ),
+        WorkerContribution::Registration(
+            WorkerRegistration::try_new(
+                admission_flush_id,
+                WorkerRunnable::Daemon {
+                    restart: ops_flush_restart,
+                    task: Box::new(admission_release_writer),
+                },
+            )
+            .map_err(worker_definition_error)?,
+        ),
+    ])
+}
+
+pub(crate) fn scheduled_worker(
+    id: WorkerId,
+    interval: Duration,
+    task: Box<dyn ScheduledTask>,
+) -> StoreResult<WorkerRegistration> {
+    let schedule = WorkerSchedule::try_new(
+        interval,
+        Duration::from_secs(1),
+        Duration::from_secs(60),
+        Duration::from_secs(15 * 60),
+        Duration::from_secs(5 * 60),
+    )
+    .map_err(worker_definition_error)?;
+    let lease = WorkerLeaseRequest::try_new(id.clone(), schedule.leader_lease_ttl())
+        .map_err(worker_definition_error)?;
+    WorkerRegistration::try_new(
+        id,
+        WorkerRunnable::Scheduled {
+            schedule,
+            lease: Some(lease),
+            task,
+        },
+    )
+    .map_err(worker_definition_error)
+}
+
+pub(crate) fn worker_definition_error(
+    error: gateway_core::task::WorkerDefinitionError,
+) -> StoreError {
+    StoreError::InvalidData {
+        source: None,
+        entity: "store worker plan",
+        message: error.to_string(),
+    }
+}
+
+pub(crate) struct StaleModelRequestRecoveryTask {
+    execution: Arc<postgres::PgExecutionStore>,
+}
+
+impl ScheduledTask for StaleModelRequestRecoveryTask {
+    fn run_cycle(
+        &self,
+        _context: WorkerCycleContext,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move {
+            gateway_core::engine::ExecutionStore::recover_expired(
+                self.execution.as_ref(),
+                SystemTime::now(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|source| {
+                WorkerTaskError::safe("stale request recovery failed").with_source(source)
+            })
+        })
+    }
+}
+
+pub struct PostgresHealthProbe {
+    pool: sqlx::PgPool,
+    max_connections: u32,
+}
+
+impl PostgresHealthProbe {
+    #[must_use]
+    pub const fn new(pool: sqlx::PgPool, max_connections: u32) -> Self {
+        Self {
+            pool,
+            max_connections,
+        }
+    }
+
+    async fn check_once(&self) -> HealthState {
+        let deadline = tokio::time::Instant::now() + POSTGRES_HEALTH_ATTEMPT_TIMEOUT;
+        let mut connection = match tokio::time::timeout_at(deadline, self.pool.acquire()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(_)) => {
+                return HealthState::Unhealthy("PostgreSQL is unavailable".to_owned());
+            }
+            Err(_) => {
+                return postgres_acquire_timeout_state(
+                    self.pool.size(),
+                    self.pool.num_idle(),
+                    self.max_connections,
+                );
+            }
+        };
+        match tokio::time::timeout_at(
+            deadline,
+            sqlx::query_scalar::<_, i32>("select 1").fetch_one(&mut *connection),
+        )
+        .await
+        {
+            Ok(Ok(1)) => HealthState::Healthy,
+            Ok(Ok(_)) => HealthState::Unhealthy("PostgreSQL health result is invalid".to_owned()),
+            Ok(Err(_)) => HealthState::Unhealthy("PostgreSQL is unavailable".to_owned()),
+            Err(_) => HealthState::Unhealthy("PostgreSQL health query timed out".to_owned()),
+        }
+    }
+}
+
+impl HealthProbe for PostgresHealthProbe {
+    fn name(&self) -> &'static str {
+        "postgres"
+    }
+
+    fn required_for_readiness(&self) -> bool {
+        true
+    }
+
+    fn check(&self) -> futures::future::BoxFuture<'_, HealthState> {
+        Box::pin(health_state_with_one_retry(
+            || self.check_once(),
+            POSTGRES_HEALTH_RETRY_DELAY,
+        ))
+    }
+}
+
+async fn health_state_with_one_retry<F, Fut>(mut check: F, retry_delay: Duration) -> HealthState
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = HealthState>,
+{
+    let first = check().await;
+    if first == HealthState::Healthy {
+        return first;
+    }
+    tokio::time::sleep(retry_delay).await;
+    check().await
+}
+
+fn postgres_acquire_timeout_state(
+    pool_size: u32,
+    idle_connections: usize,
+    max_connections: u32,
+) -> HealthState {
+    if pool_size >= max_connections && idle_connections == 0 {
+        HealthState::Degraded(format!(
+            "PostgreSQL pool is saturated ({pool_size}/{max_connections} connections in use)"
+        ))
+    } else {
+        HealthState::Unhealthy("PostgreSQL connection acquisition timed out".to_owned())
+    }
+}
+
+pub(crate) struct RedisHealthProbe {
+    pub(crate) connection: ::redis::aio::ConnectionManager,
+}
+impl HealthProbe for RedisHealthProbe {
+    fn name(&self) -> &'static str {
+        "redis"
+    }
+
+    fn required_for_readiness(&self) -> bool {
+        true
+    }
+
+    fn check(&self) -> futures::future::BoxFuture<'_, HealthState> {
+        Box::pin(async move {
+            let mut connection = self.connection.clone();
+            match ::redis::cmd("PING")
+                .query_async::<String>(&mut connection)
+                .await
+            {
+                Ok(response) if response == "PONG" => HealthState::Healthy,
+                Ok(_) => HealthState::Unhealthy("Redis health result is invalid".to_owned()),
+                Err(_) => HealthState::Unhealthy("Redis is unavailable".to_owned()),
+            }
+        })
+    }
+}
+
+/// 每轮有界推进队列和历史回填；取消时丢弃未提交事务，待下轮重新领取
+pub(crate) fn request_analytics_worker(
+    repository: postgres::PgRequestAnalyticsRepository,
+) -> StoreResult<WorkerContribution> {
+    let id = WorkerId::try_new(WorkerKind::RequestAnalytics, "postgres")
+        .map_err(worker_definition_error)?;
+    Ok(WorkerContribution::Registration(scheduled_worker(
+        id,
+        Duration::from_secs(5),
+        Box::new(RequestAnalyticsTask {
+            repository,
+            cycle: RequestAnalyticsCycle::default(),
+        }),
+    )?))
+}
+
+struct RequestAnalyticsTask {
+    repository: postgres::PgRequestAnalyticsRepository,
+    cycle: RequestAnalyticsCycle,
+}
+
+impl ScheduledTask for RequestAnalyticsTask {
+    fn run_cycle(
+        &self,
+        context: WorkerCycleContext,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move {
+            tokio::select! {
+                () = context.cancellation().cancelled() => Ok(()),
+                result = self.cycle.run(&self.repository) => result.map(|_| ()).map_err(|source| {
+                    WorkerTaskError::safe("request analytics maintenance failed").with_source(source)
+                }),
+            }
+        })
+    }
+}
+
+/// 统计消费周期预算，跨轮保留批量上限以便超时后的下一轮提交进展
+pub struct RequestAnalyticsCycle {
+    batch_size: AtomicU32,
+}
+
+impl Default for RequestAnalyticsCycle {
+    fn default() -> Self {
+        Self {
+            batch_size: AtomicU32::new(1_000),
+        }
+    }
+}
+
+impl RequestAnalyticsCycle {
+    /// 生产与隔离压测共用的推进路径；各批独立提交并归还观测槽位
+    pub async fn run(
+        &self,
+        repository: &postgres::PgRequestAnalyticsRepository,
+    ) -> StoreResult<postgres::AnalyticsMaintenance> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut total = postgres::AnalyticsMaintenance::default();
+        loop {
+            let batch_size = self.batch_size.load(Ordering::Relaxed);
+            let started = tokio::time::Instant::now();
+            let result =
+                match tokio::time::timeout_at(deadline, repository.maintain(batch_size)).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        if analytics_maintenance_timed_out(&error) {
+                            self.reduce_batch_size(batch_size);
+                        }
+                        return Err(error);
+                    }
+                    Err(source) => {
+                        if total.projected_requests == 0
+                            && total.backfilled_requests == 0
+                            && total.rebuilt_buckets == 0
+                            && total.advanced_buckets == 0
+                            && !total.reset_progress
+                        {
+                            // 只在整轮没有返回进展时退让，避免尾批剩余时间短导致持续缩批
+                            self.reduce_batch_size(batch_size);
+                            return Err(StoreError::Unavailable {
+                                backend: StoreBackend::PostgreSql,
+                                message: "request analytics cycle timed out without progress"
+                                    .to_owned(),
+                                source: Some(gateway_core::error::ErrorSource::new(source)),
+                            });
+                        }
+                        return Ok(total);
+                    }
+                };
+            let idle = result.projected_requests == 0
+                && result.backfilled_requests == 0
+                && result.rebuilt_buckets == 0
+                && result.advanced_buckets == 0
+                && !result.reset_progress;
+            total.projected_requests += result.projected_requests;
+            total.backfilled_requests += result.backfilled_requests;
+            total.rebuilt_buckets += result.rebuilt_buckets;
+            total.advanced_buckets += result.advanced_buckets;
+            total.reset_progress |= result.reset_progress;
+            // 满批快速完成才恢复吞吐，空结果也可能只是其他实例持有维护锁
+            if (result.projected_requests >= u64::from(batch_size)
+                || result.backfilled_requests >= u64::from(batch_size))
+                && started.elapsed() < Duration::from_secs(2)
+            {
+                self.batch_size
+                    .store((batch_size * 2).min(1_000), Ordering::Relaxed);
+            }
+            if idle {
+                return Ok(total);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(total);
+            }
+        }
+    }
+
+    fn reduce_batch_size(&self, batch_size: u32) {
+        let next_batch_size = (batch_size / 2).max(1);
+        self.batch_size.store(next_batch_size, Ordering::Relaxed);
+        tracing::warn!(
+            batch_size,
+            next_batch_size,
+            "request analytics batch timed out"
+        );
+    }
+}
+
+fn analytics_maintenance_timed_out(error: &StoreError) -> bool {
+    let StoreError::Unavailable {
+        source: Some(source),
+        ..
+    } = error
+    else {
+        return false;
+    };
+    source.is::<tokio::time::error::Elapsed>()
+        || source
+            .downcast_ref::<sqlx::Error>()
+            .and_then(sqlx::Error::as_database_error)
+            .is_some_and(|error| error.code().as_deref() == Some("57014"))
+}

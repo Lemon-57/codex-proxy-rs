@@ -1,0 +1,291 @@
+import type { InstalledPlugin } from '../utils/catalog'
+import type { PluginInstallMode, PluginInstallSelection } from '../utils/model'
+import type { PluginUpdateSelection } from './usePluginUpdateCheck'
+import type { PluginArtifact, PluginArtifactMutationResponse, PluginInstance, PluginRelease, PluginUpdateSourceBinding, QueryPluginReleaseRequest, VerifiedPluginArtifact } from '@/api'
+import { isEqual } from 'es-toolkit'
+import { onScopeDispose, shallowRef, watch } from 'vue'
+import { acceptPluginArtifact, getPluginUpdateSources, installRemotePlugin, queryPluginRelease, updatePluginSource, uploadPluginArtifact, verifyRemotePlugin, verifyUploadedPlugin } from '@/api'
+import { useAsyncAction } from '@/composables/useAsyncAction'
+import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
+import { notifyPluginError } from '../utils/actions'
+import { pluginInstallSelectionKey } from '../utils/model'
+
+interface InstallationContext {
+  onInstalled: (result: PluginArtifactMutationResponse, switchTarget?: PluginInstance) => Promise<void>
+  onSourceSaved: (source: PluginUpdateSourceBinding) => void
+}
+
+export function usePluginInstallation({ onInstalled, onSourceSaved }: InstallationContext) {
+  const showInstall = shallowRef(false)
+  const installMode = shallowRef<PluginInstallMode>('upload')
+  const updateSource = shallowRef<PluginUpdateSourceBinding | null>(null)
+  const updateSelection = shallowRef<PluginUpdateSelection | null>(null)
+  const acceptanceArtifact = shallowRef<PluginArtifact | null>(null)
+  const release = shallowRef<PluginRelease | null>(null)
+  const action = useAsyncAction({
+    errorText: false,
+    onError: error => notifyPluginError(t('plugins.installation.pluginInstallationFailed'), error),
+  })
+  const installing = action.loading
+  const queryingRelease = shallowRef(false)
+  const verifyingArtifact = shallowRef(false)
+  const verifiedArtifact = shallowRef<{ requestKey: string | File, artifact: VerifiedPluginArtifact } | null>(null)
+
+  let releaseController: AbortController | undefined
+  let verificationController: AbortController | undefined
+
+  function openInstall(mode: PluginInstallMode) {
+    resetArtifactVerification()
+    resetReleaseQuery()
+    installMode.value = mode
+    updateSource.value = null
+    updateSelection.value = null
+    acceptanceArtifact.value = null
+    release.value = null
+    showInstall.value = true
+  }
+
+  function openAcceptance(artifact: PluginArtifact) {
+    resetArtifactVerification()
+    resetReleaseQuery()
+    updateSource.value = null
+    updateSelection.value = null
+    acceptanceArtifact.value = artifact
+    showInstall.value = true
+  }
+
+  function openVersionInstall(plugin: InstalledPlugin) {
+    const source = plugin.source
+    if (!source || source.source.kind === 'builtin') {
+      ZNotification.warning({
+        message: t('plugins.installation.noSource'),
+      })
+      return
+    }
+    openInstall(source.source.kind)
+    updateSource.value = source
+  }
+
+  function changeInstallMode(mode: PluginInstallMode) {
+    resetArtifactVerification()
+    resetReleaseQuery()
+    installMode.value = mode
+  }
+
+  function openCheckedUpdate(selection: PluginUpdateSelection) {
+    const kind = selection.binding.source.kind
+    if (kind !== 'github' && kind !== 'url')
+      return
+    openInstall(kind)
+    updateSource.value = selection.binding
+    updateSelection.value = selection
+  }
+
+  async function saveInstallSource(source: PluginUpdateSourceBinding) {
+    const previous = updateSource.value
+    if (!previous || previous.pluginId !== source.pluginId)
+      return false
+    const result = await action.run(async () => {
+      const current = (await getPluginUpdateSources({ silent: true })).find(value => value.pluginId === source.pluginId)
+      if (!isEqual(current, previous))
+        throw new Error(t('plugins.installation.sourceChanged'))
+      await updatePluginSource(source, { silent: true })
+      updateSource.value = source
+      onSourceSaved(source)
+      return true
+    }, {
+      onError: error => notifyPluginError(t('plugins.installation.sourceSaveFailed'), error),
+    })
+    return result === true
+  }
+
+  function resetReleaseQuery() {
+    releaseController?.abort()
+    releaseController = undefined
+    queryingRelease.value = false
+    release.value = null
+  }
+
+  async function queryRelease(request: QueryPluginReleaseRequest) {
+    releaseController?.abort()
+    const controller = new AbortController()
+    releaseController = controller
+    queryingRelease.value = true
+    release.value = null
+    try {
+      const result = await queryPluginRelease(request, { signal: controller.signal, silent: true })
+      if (releaseController === controller)
+        release.value = result
+    }
+    catch (error) {
+      if (releaseController === controller)
+        notifyPluginError(t('plugins.installation.githubReleaseQueryFailed'), error)
+    }
+    finally {
+      if (releaseController === controller) {
+        releaseController = undefined
+        queryingRelease.value = false
+      }
+    }
+  }
+
+  async function installArtifact(request: PluginInstallSelection) {
+    const verified = verifiedArtifact.value
+    if (!verified || verified.requestKey !== pluginInstallSelectionKey(request)) {
+      ZNotification.warning({
+        message: t('plugins.installation.verificationRequired'),
+      })
+      return
+    }
+    const result = await action.run(async () => {
+      const { pluginId, version, sha256 } = verified.artifact.metadata
+      if (request instanceof File) {
+        return uploadPluginArtifact(request, sha256, { silent: true })
+      }
+      else {
+        return installRemotePlugin({
+          pluginId,
+          version,
+          credentialIds: request.credentialIds,
+          outboundProxyId: request.outboundProxyId,
+          location: { ...request.location, sha256 },
+        }, { silent: true })
+      }
+    })
+    if (!result)
+      return
+    showInstall.value = false
+    ZNotification.success({
+      message: result.configurationRequired
+        ? t('plugins.installation.installedNeedsConfiguration')
+        : result.defaultInstanceId
+          ? t('plugins.installation.preparing')
+          : t('plugins.installation.pluginVersionInstalled'),
+    })
+    await onInstalled(result)
+  }
+
+  async function installUpdate(selection: PluginUpdateSelection) {
+    const { artifact, request, instance, binding } = selection
+    if (!artifact || !request || !instance)
+      return false
+    const completed = await action.run(async () => {
+      const latest = (await getPluginUpdateSources({ silent: true })).find(value => value.pluginId === binding.pluginId)
+      if (!isEqual(binding, latest))
+        throw new Error(t('plugins.installation.updateSourceChanged'))
+      const { pluginId, version, sha256 } = artifact.metadata
+      const result = await installRemotePlugin({
+        pluginId,
+        version,
+        credentialIds: request.credentialIds,
+        outboundProxyId: request.outboundProxyId,
+        location: { ...request.location, sha256 },
+      }, { silent: true })
+      // 使用检查时的实例 revision，避免下载期间的设置变更被升级覆盖。
+      await onInstalled(result, instance)
+      return true
+    }, {
+      onError: error => notifyPluginError(t('plugins.installation.pluginUpgradeFailed'), error),
+    })
+    return completed === true
+  }
+
+  async function acceptArtifact(artifact: PluginArtifact) {
+    if (acceptanceArtifact.value?.metadata.sha256 !== artifact.metadata.sha256) {
+      ZNotification.warning({
+        message: t('plugins.installation.versionRequired'),
+      })
+      return
+    }
+    const result = await action.run(() => acceptPluginArtifact({ sha256: artifact.metadata.sha256 }, { silent: true }))
+    if (!result)
+      return
+    showInstall.value = false
+    ZNotification.success({
+      message: result.configurationRequired
+        ? t('plugins.installation.installedNeedsConfiguration')
+        : result.defaultInstanceId
+          ? t('plugins.installation.preparing')
+          : t('plugins.installation.pluginVersionInstalled'),
+    })
+    await onInstalled(result)
+  }
+
+  function resetArtifactVerification() {
+    verificationController?.abort()
+    verificationController = undefined
+    verifiedArtifact.value = null
+    verifyingArtifact.value = false
+  }
+
+  async function verifyArtifact(request: PluginInstallSelection) {
+    resetArtifactVerification()
+    const controller = new AbortController()
+    verificationController = controller
+    verifyingArtifact.value = true
+    try {
+      const options = { signal: controller.signal, silent: true }
+      const artifact = request instanceof File
+        ? await verifyUploadedPlugin(request, options)
+        : await verifyRemotePlugin(request, options)
+      if (updateSource.value && artifact.metadata.pluginId !== updateSource.value.pluginId)
+        throw new Error(t('plugins.installation.packageMismatch'))
+      if (verificationController === controller) {
+        verifiedArtifact.value = {
+          requestKey: pluginInstallSelectionKey(request),
+          artifact,
+        }
+      }
+    }
+    catch (error) {
+      if (verificationController === controller)
+        notifyPluginError(t('plugins.installation.verificationFailed'), error)
+    }
+    finally {
+      if (verificationController === controller) {
+        verificationController = undefined
+        verifyingArtifact.value = false
+      }
+    }
+  }
+
+  watch(showInstall, (open) => {
+    if (!open)
+      cancelQueries()
+  }, { flush: 'sync' })
+
+  function cancelQueries() {
+    releaseController?.abort()
+    verificationController?.abort()
+    releaseController = undefined
+    verificationController = undefined
+  }
+
+  onScopeDispose(cancelQueries)
+  return {
+    showInstall,
+    installMode,
+    updateSource,
+    updateSelection,
+    openCheckedUpdate,
+    acceptanceArtifact,
+    openAcceptance,
+    openVersionInstall,
+    changeInstallMode,
+    saveInstallSource,
+    release,
+    installing,
+    queryingRelease,
+    verifiedArtifact,
+    verifyingArtifact,
+    verifyArtifact,
+    resetArtifactVerification,
+    openInstall,
+    resetReleaseQuery,
+    queryRelease,
+    installArtifact,
+    installUpdate,
+    acceptArtifact,
+  }
+}

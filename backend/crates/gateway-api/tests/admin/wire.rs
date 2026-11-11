@@ -1,0 +1,220 @@
+//! 验证管理响应封装、分页结构与公开错误码保持稳定
+
+mod error {
+    use gateway_api::admin::AdminErrorCode;
+
+    #[test]
+    fn error_codes_should_keep_all_published_numeric_values() {
+        let actual = [
+            AdminErrorCode::MALFORMED_JSON,
+            AdminErrorCode::BAD_REQUEST,
+            AdminErrorCode::INVALID_TIME_RANGE,
+            AdminErrorCode::INVALID_MODEL_SOURCE,
+            AdminErrorCode::SESSION_REQUIRED,
+            AdminErrorCode::INVALID_CREDENTIALS,
+            AdminErrorCode::INVALID_API_KEY,
+            AdminErrorCode::NOT_FOUND,
+            AdminErrorCode::CONFLICT,
+            AdminErrorCode::TOO_MANY_LOGIN_ATTEMPTS,
+            AdminErrorCode::RATE_LIMITED,
+            AdminErrorCode::SETTINGS_PERSIST,
+            AdminErrorCode::INTERNAL,
+            AdminErrorCode::USAGE_RECORD_ACCOUNTS,
+            AdminErrorCode::BAD_GATEWAY,
+            AdminErrorCode::UPSTREAM_RESULT_UNKNOWN,
+            AdminErrorCode::SERVICE_UNAVAILABLE,
+        ]
+        .map(AdminErrorCode::value);
+
+        assert_eq!(
+            actual,
+            [
+                40000, 40001, 40002, 40003, 40101, 40102, 40103, 40401, 40901, 42901, 42902, 50000,
+                50001, 50002, 50201, 50202, 50301,
+            ]
+        );
+    }
+}
+
+mod response {
+    use axum::{
+        body::to_bytes,
+        http::StatusCode,
+        response::{IntoResponse, Response},
+    };
+    use gateway_api::admin::{AdminEnvelope, AdminError, AdminPageData, AdminResponse, PageMeta};
+    use serde_json::json;
+
+    #[test]
+    fn page_envelope_should_keep_items_and_page_nested_under_data() {
+        let data = AdminPageData::new(
+            vec![json!({ "id": "resource_1" })],
+            PageMeta::new(2, 10, 21, 3),
+        );
+        let value = serde_json::to_value(AdminEnvelope::ok(data))
+            .expect("admin page envelope should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "code": 200,
+                "message": "OK",
+                "data": {
+                    "items": [{ "id": "resource_1" }],
+                    "page": {
+                        "page": 2,
+                        "pageSize": 10,
+                        "total": 21,
+                        "totalPages": 3
+                    }
+                }
+            })
+        );
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read admin response body");
+        serde_json::from_slice(&body).expect("parse admin response body")
+    }
+
+    #[tokio::test]
+    async fn admin_response_should_keep_http_status_independent_from_envelope_code() {
+        let response: Response = AdminResponse::new(
+            StatusCode::CREATED,
+            AdminEnvelope::ok(json!({ "id": "resource_created" })),
+        )
+        .into_response();
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CREATED,
+                json!({
+                    "code": 200,
+                    "message": "OK",
+                    "data": { "id": "resource_created" }
+                })
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_admin_api_key_should_keep_its_published_wire_contract() {
+        let response = AdminError::invalid_admin_api_key().into_response();
+        let status = response.status();
+        let body = response_json(response).await;
+
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::UNAUTHORIZED,
+                json!({
+                    "code": 40103,
+                    "message": "管理 API Key 无效",
+                    "data": null
+                })
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_error_variants_should_use_stable_http_and_null_data_contract() {
+        let cases = [
+            (
+                AdminError::bad_request("bad input"),
+                StatusCode::BAD_REQUEST,
+                40001,
+            ),
+            (
+                AdminError::session_required(),
+                StatusCode::UNAUTHORIZED,
+                40101,
+            ),
+            (
+                AdminError::invalid_credentials(),
+                StatusCode::UNAUTHORIZED,
+                40102,
+            ),
+            (
+                AdminError::too_many_login_attempts(),
+                StatusCode::TOO_MANY_REQUESTS,
+                42901,
+            ),
+            (
+                AdminError::rate_limited(),
+                StatusCode::TOO_MANY_REQUESTS,
+                42902,
+            ),
+            (
+                AdminError::conflict("conflict"),
+                StatusCode::CONFLICT,
+                40901,
+            ),
+            (
+                AdminError::not_found("missing"),
+                StatusCode::NOT_FOUND,
+                40401,
+            ),
+            (
+                AdminError::internal(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                50001,
+            ),
+            (AdminError::bad_gateway(), StatusCode::BAD_GATEWAY, 50201),
+            (
+                AdminError::upstream_result_unknown(),
+                StatusCode::BAD_GATEWAY,
+                50202,
+            ),
+            (
+                AdminError::service_unavailable(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                50301,
+            ),
+        ];
+
+        for (error, expected_status, expected_code) in cases {
+            let response = error.into_response();
+            let status = response.status();
+            let body = response_json(response).await;
+
+            assert_eq!(status, expected_status);
+            assert_eq!(body["code"], expected_code);
+            assert!(body["message"].is_string());
+            assert!(body["data"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_and_login_rate_limits_should_keep_distinct_wire_contracts() {
+        let generic = AdminError::rate_limited().into_response();
+        assert_eq!(generic.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(generic.headers().get("retry-after").is_none());
+        assert_eq!(
+            response_json(generic).await,
+            json!({
+                "code": 42902,
+                "message": "请求过于频繁，请稍后重试",
+                "data": null
+            })
+        );
+
+        let login = AdminError::too_many_login_attempts()
+            .with_retry_after(17)
+            .into_response();
+        assert_eq!(login.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(login.headers()["retry-after"], "17");
+        assert_eq!(
+            response_json(login).await,
+            json!({
+                "code": 42901,
+                "message": "登录尝试过多，请稍后重试",
+                "data": null
+            })
+        );
+    }
+}

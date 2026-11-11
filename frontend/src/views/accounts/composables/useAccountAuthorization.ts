@@ -1,0 +1,143 @@
+import type { AccountImportSettings, AccountOAuthStartResponse } from '@/api'
+import { computed, onScopeDispose, shallowRef } from 'vue'
+import { completeAccountOAuth, startAccountOAuth } from '@/api'
+import { ApiError } from '@/api/request'
+import { t } from '@/i18n'
+import { notification as ZNotification } from '@/utils/notification'
+import { errorMessage } from '@/utils/operation'
+
+type Status = 'idle' | 'starting' | 'waiting' | 'expired' | 'completing'
+
+export interface AccountAuthorizationView {
+  flow: AccountOAuthStartResponse | null
+  status: Status
+}
+
+interface AuthorizationRequest {
+  start: Parameters<typeof startAccountOAuth>[0]
+  settings?: AccountImportSettings
+}
+
+export function useAccountAuthorization(onComplete: () => Promise<void>) {
+  const flow = shallowRef<AccountOAuthStartResponse | null>(null)
+  const status = shallowRef<Status>('idle')
+  const callback = shallowRef('')
+  const busy = computed(() => status.value === 'starting' || status.value === 'completing')
+  const view = computed<AccountAuthorizationView>(() => ({
+    flow: flow.value,
+    status: status.value,
+  }))
+  let context: { provider: string, settings?: AccountImportSettings } | undefined
+  let controller: AbortController | undefined
+  let expiryTimer: ReturnType<typeof setTimeout> | undefined
+
+  function clearTimers() {
+    clearTimeout(expiryTimer)
+    expiryTimer = undefined
+  }
+
+  function cancel() {
+    controller?.abort()
+    controller = undefined
+    clearTimers()
+    context = undefined
+  }
+
+  function reset() {
+    cancel()
+    flow.value = null
+    status.value = 'idle'
+    callback.value = ''
+  }
+
+  function expired() {
+    return !flow.value || Date.parse(flow.value.expiresAt) <= Date.now()
+  }
+
+  async function start(request: AuthorizationRequest) {
+    reset()
+    const current = new AbortController()
+    controller = current
+    status.value = 'starting'
+    try {
+      const result = await startAccountOAuth(request.start, { signal: current.signal })
+      if (current.signal.aborted)
+        return
+      const expiresAt = Date.parse(result.expiresAt)
+      if (!Number.isFinite(expiresAt))
+        throw new RangeError(t('accounts.onboarding.invalidExpiry'))
+      context = { provider: request.start.provider, settings: request.settings }
+      flow.value = result
+      status.value = expired()
+        ? 'expired'
+        : 'waiting'
+      expiryTimer = setTimeout(() => {
+        // 不取消正在确认的提交，过期后仍接收服务端已经提交的结果。
+        if (status.value !== 'completing') {
+          status.value = 'expired'
+          ZNotification.warning({
+            message: t('accounts.onboarding.authorizationExpired'),
+          })
+        }
+      }, Math.max(0, Math.min(expiresAt - Date.now(), 2_147_483_647)))
+    }
+    catch (cause) {
+      if (!current.signal.aborted) {
+        status.value = 'idle'
+        if (!(cause instanceof ApiError)) {
+          ZNotification.error({
+            message: errorMessage(cause, t('accounts.onboarding.linkFailed')),
+          })
+        }
+      }
+    }
+  }
+
+  async function complete() {
+    const current = controller
+    const currentFlow = flow.value
+    if (!current || !currentFlow || !context || busy.value)
+      return
+    if (!callback.value.trim()) {
+      ZNotification.warning({
+        message: t('accounts.onboarding.callbackRequired'),
+      })
+      return
+    }
+    status.value = 'completing'
+    try {
+      await completeAccountOAuth({
+        ...context,
+        flowId: currentFlow.flowId,
+        callbackUrl: callback.value.trim(),
+      }, { signal: current.signal })
+      if (!current.signal.aborted) {
+        clearTimers()
+        await onComplete()
+      }
+    }
+    catch (cause) {
+      if (!current.signal.aborted) {
+        status.value = expired()
+          ? 'expired'
+          : 'waiting'
+        if (!(cause instanceof ApiError)) {
+          ZNotification.error({
+            message: errorMessage(cause, t('accounts.onboarding.authorizationFailed')),
+          })
+        }
+      }
+    }
+  }
+
+  onScopeDispose(reset)
+  return {
+    view,
+    callback,
+    busy,
+    start,
+    complete,
+    cancel,
+    reset,
+  }
+}

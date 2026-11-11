@@ -1,0 +1,103 @@
+//! 验证插件路由和账号调度决策的类型合同与附加字段透传边界
+
+use gateway_plugin_sdk::call::policy::{
+    AccountScheduleCandidate, AccountScheduleDecision, AccountScheduleRequest, ModelRouteDecision,
+    ModelRouteRequest, PolicyHeader,
+};
+use serde_json::json;
+
+#[test]
+fn route_and_scheduler_decisions_ignore_unused_fields() {
+    let route = ModelRouteRequest {
+        request_id: "req_policy".into(),
+        operation: "generate".into(),
+        protocol: "openai".into(),
+        model: "public-model".into(),
+        available_providers: vec!["openai".into()],
+        headers: vec![PolicyHeader {
+            name: "x-feature".into(),
+            value_base64: "b24=".into(),
+        }],
+    };
+    assert_eq!(
+        serde_json::from_value::<ModelRouteRequest>(serde_json::to_value(&route).unwrap()).unwrap(),
+        route
+    );
+    assert_eq!(
+        serde_json::to_value(ModelRouteDecision::Route {
+            provider: Some("openai".into()),
+            model: None,
+        })
+        .unwrap(),
+        json!({"decision":"route","provider":"openai"})
+    );
+    assert_eq!(
+        serde_json::from_value::<ModelRouteDecision>(
+            json!({"decision":"route","provider":"openai","unexpected":true})
+        )
+        .unwrap(),
+        ModelRouteDecision::Route {
+            provider: Some("openai".into()),
+            model: None,
+        }
+    );
+
+    let schedule = AccountScheduleRequest {
+        request_id: "req_policy".into(),
+        attempt_index: 2,
+        provider: "openai".into(),
+        model: Some("gpt-5".into()),
+        candidates: vec![AccountScheduleCandidate {
+            account_id: "acct_candidate".into(),
+            available: true,
+            weight: 10,
+            in_flight: 1,
+            maximum_concurrency: 4,
+            last_started_at_ms: None,
+            quota_reset_at_ms: None,
+            quota_remaining_rank: Some(9_000),
+            failure_rate_basis_points: None,
+            first_output_latency_ms: Some(20),
+        }],
+    };
+    assert_eq!(
+        serde_json::from_value::<AccountScheduleRequest>(serde_json::to_value(&schedule).unwrap())
+            .unwrap(),
+        schedule
+    );
+    assert_eq!(
+        serde_json::to_value(AccountScheduleDecision::Pick {
+            account_id: "acct_candidate".into(),
+        })
+        .unwrap(),
+        json!({"decision":"pick","account_id":"acct_candidate"})
+    );
+}
+
+#[test]
+fn filtered_delegation_has_an_explicit_exclusion_list() {
+    let decision = AccountScheduleDecision::DelegateFiltered {
+        exclude_account_ids: vec!["acct_candidate".into()],
+    };
+    let wire = json!({"decision":"delegate_filtered","exclude_account_ids":["acct_candidate"]});
+    assert_eq!(serde_json::to_value(&decision).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<AccountScheduleDecision>(wire).unwrap(),
+        decision
+    );
+    for invalid in [
+        json!({"decision":"delegate_filtered"}),
+        json!({"decision":"delegate_filtered","exclude_account_ids":null}),
+    ] {
+        assert!(serde_json::from_value::<AccountScheduleDecision>(invalid).is_err());
+    }
+    assert_eq!(
+        serde_json::from_value::<AccountScheduleDecision>(
+            json!({"decision":"delegate_filtered","exclude_account_ids":[],"threshold":90})
+        )
+        .unwrap(),
+        AccountScheduleDecision::DelegateFiltered {
+            exclude_account_ids: vec![]
+        }
+    );
+}

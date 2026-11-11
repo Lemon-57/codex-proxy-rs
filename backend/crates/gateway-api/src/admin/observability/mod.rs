@@ -1,0 +1,28 @@
+//! Dashboard、用量与诊断查询的 wire 映射和固定路由
+
+use std::collections::BTreeMap;
+
+use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use chrono::{DateTime, Utc};
+use gateway_admin::model::observability::{
+    self as domain, ObservabilityPageSize as DomainPageSize,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::presenter::{format_compact_number, format_decimal_currency, format_number};
+use super::{
+    AdminAuth, AdminEnvelope, AdminError, AdminQuery, AdminResponse, WireValidationError,
+    wire::map_admin_service_error,
+};
+
+mod export;
+mod presenter;
+mod query;
+mod routes;
+mod wire;
+
+pub(crate) use presenter::*;
+pub use query::*;
+pub use routes::*;
+pub use wire::*;

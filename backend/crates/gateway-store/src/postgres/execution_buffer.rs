@@ -1,0 +1,991 @@
+//! 数据面执行观测的非阻塞 PostgreSQL 写入队列
+
+use std::mem::size_of;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
+
+use async_trait::async_trait;
+use futures::future::try_join_all;
+use gateway_core::diagnostics::{OperationalDiagnostics, OperationalFailure};
+use gateway_core::engine::{
+    AttemptRecord, EntryRejection, ExecutionStore, IntermediateFailure, ModelRequestFinalization,
+    ModelRequestId, NewModelRequest, ProbeFailure, RecoveryReport,
+};
+use gateway_core::error::{ProviderError, StoreError};
+use gateway_core::task::{DaemonTask, WorkerDaemonContext, WorkerTaskError};
+use gateway_core::upstream::UpstreamSendState;
+use tokio::sync::{Mutex, Notify, mpsc};
+
+const DEFAULT_QUEUE_CAPACITY: usize = 4_096;
+const DEFAULT_QUEUE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
+const PERSISTENCE_LANES: usize = 4;
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 执行观测缓冲区的进程内累计状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionBufferStats {
+    /// 尚未完成落库的队列项和当前写入项数量
+    pub queued_items: usize,
+    /// 尚未完成落库的观测对象估算字节数
+    pub queued_bytes: usize,
+    /// 进程启动后成功入队的累计数量
+    pub enqueued_total: u64,
+    /// 因队列、字节预算或关闭排空超时丢弃的累计数量
+    pub dropped_total: u64,
+    /// 已成功写入底层 Store 的累计数量
+    pub persisted_total: u64,
+    /// 底层 Store 返回失败的累计数量
+    pub write_failure_total: u64,
+}
+
+struct ExecutionBufferState {
+    regular_item_capacity: usize,
+    regular_byte_capacity: usize,
+    queued_items: AtomicUsize,
+    queued_bytes: AtomicUsize,
+    enqueued_total: AtomicU64,
+    dropped_total: AtomicU64,
+    persisted_total: AtomicU64,
+    write_failure_total: AtomicU64,
+    idle: Notify,
+}
+
+impl ExecutionBufferState {
+    fn new(regular_item_capacity: NonZeroUsize, regular_byte_capacity: NonZeroUsize) -> Self {
+        Self {
+            regular_item_capacity: regular_item_capacity.get(),
+            regular_byte_capacity: regular_byte_capacity.get(),
+            queued_items: AtomicUsize::new(0),
+            queued_bytes: AtomicUsize::new(0),
+            enqueued_total: AtomicU64::new(0),
+            dropped_total: AtomicU64::new(0),
+            persisted_total: AtomicU64::new(0),
+            write_failure_total: AtomicU64::new(0),
+            idle: Notify::new(),
+        }
+    }
+
+    fn reserve(&self, bytes: usize, critical: bool) -> Result<(), ReservationFailure> {
+        // 常规额度之外保留四分之一给失败与请求生命周期，普通进度更新不能消耗
+        let item_limit = self.regular_item_capacity.saturating_add(if critical {
+            self.regular_item_capacity / 4
+        } else {
+            0
+        });
+        let byte_limit = self.regular_byte_capacity.saturating_add(if critical {
+            self.regular_byte_capacity / 4
+        } else {
+            0
+        });
+        self.queued_items
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1).filter(|next| *next <= item_limit)
+            })
+            .map_err(|_| ReservationFailure::ItemCapacity)?;
+        let bytes_reserved = self
+            .queued_bytes
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|next| *next <= byte_limit)
+            })
+            .is_ok();
+        if !bytes_reserved {
+            self.release_item();
+            return Err(ReservationFailure::ByteCapacity);
+        }
+        Ok(())
+    }
+
+    fn release(&self, bytes: usize) {
+        self.queued_bytes.fetch_sub(bytes, Ordering::AcqRel);
+        self.release_item();
+    }
+
+    fn release_item(&self) {
+        if self.queued_items.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle.notify_waiters();
+        }
+    }
+
+    fn record_enqueued(&self) {
+        saturating_increment(&self.enqueued_total, 1);
+    }
+
+    fn record_dropped(&self, count: usize) {
+        saturating_increment(
+            &self.dropped_total,
+            u64::try_from(count).unwrap_or(u64::MAX),
+        );
+    }
+
+    fn record_persisted(&self) {
+        saturating_increment(&self.persisted_total, 1);
+    }
+
+    fn record_write_failure(&self) {
+        saturating_increment(&self.write_failure_total, 1);
+    }
+
+    fn snapshot(&self) -> ExecutionBufferStats {
+        ExecutionBufferStats {
+            queued_items: self.queued_items.load(Ordering::Acquire),
+            queued_bytes: self.queued_bytes.load(Ordering::Acquire),
+            enqueued_total: self.enqueued_total.load(Ordering::Acquire),
+            dropped_total: self.dropped_total.load(Ordering::Acquire),
+            persisted_total: self.persisted_total.load(Ordering::Acquire),
+            write_failure_total: self.write_failure_total.load(Ordering::Acquire),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReservationFailure {
+    ItemCapacity,
+    ByteCapacity,
+}
+
+impl ReservationFailure {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::ItemCapacity => "item_capacity",
+            Self::ByteCapacity => "byte_capacity",
+        }
+    }
+}
+
+fn saturating_increment(counter: &AtomicU64, increment: u64) {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(increment))
+    });
+}
+
+/// 将数据面观测写入转换为有界、非阻塞的进程内命令
+///
+/// 队列满、worker 尚未启动或已经退出时只丢弃观测并记录告警；协议数据面不会
+/// 等待 PostgreSQL，也不会看到 Store 错误
+/// 启动恢复仍直接访问底层 Store
+pub struct BufferedExecutionStore<S: ?Sized> {
+    inner: Arc<S>,
+    // lane transport 本身没有独立容量；所有发送只能经 `enqueue` 的全局 item/byte
+    // 预留进入，`QueuedExecutionObservation::drop` 负责归还，不能增加旁路发送入口
+    senders: Box<[mpsc::UnboundedSender<QueuedExecutionObservation>]>,
+    next_unkeyed_lane: AtomicUsize,
+    state: Arc<ExecutionBufferState>,
+}
+
+impl<S: ?Sized> BufferedExecutionStore<S> {
+    #[must_use]
+    pub fn new(inner: Arc<S>) -> (Self, ExecutionObservationWriter<S>) {
+        Self::with_capacity(
+            inner,
+            NonZeroUsize::new(DEFAULT_QUEUE_CAPACITY).expect("queue capacity is non-zero"),
+        )
+    }
+
+    #[must_use]
+    pub fn with_capacity(
+        inner: Arc<S>,
+        capacity: NonZeroUsize,
+    ) -> (Self, ExecutionObservationWriter<S>) {
+        Self::with_limits(
+            inner,
+            capacity,
+            NonZeroUsize::new(DEFAULT_QUEUE_BYTE_CAPACITY)
+                .expect("queue byte capacity is non-zero"),
+        )
+    }
+
+    /// 参数限制常规接收额度；失败与生命周期记录可使用额外四分之一预留
+    #[must_use]
+    pub fn with_limits(
+        inner: Arc<S>,
+        capacity: NonZeroUsize,
+        regular_byte_capacity: NonZeroUsize,
+    ) -> (Self, ExecutionObservationWriter<S>) {
+        let lane_count = PERSISTENCE_LANES.min(capacity.get());
+        let (senders, receivers): (Vec<_>, Vec<_>) =
+            (0..lane_count).map(|_| mpsc::unbounded_channel()).unzip();
+        let state = Arc::new(ExecutionBufferState::new(capacity, regular_byte_capacity));
+        (
+            Self {
+                inner: Arc::clone(&inner),
+                senders: senders.into_boxed_slice(),
+                next_unkeyed_lane: AtomicUsize::new(0),
+                state: Arc::clone(&state),
+            },
+            ExecutionObservationWriter {
+                inner,
+                receivers: receivers.into_iter().map(Mutex::new).collect(),
+                state,
+            },
+        )
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> ExecutionBufferStats {
+        self.state.snapshot()
+    }
+
+    fn enqueue(&self, write: ExecutionObservationWrite) {
+        let estimated_bytes = write
+            .estimated_bytes()
+            .saturating_add(write.request_id().map_or(0, str::len))
+            .max(1);
+        if let Err(failure) = self.state.reserve(estimated_bytes, write.is_critical()) {
+            self.state.record_dropped(1);
+            let stats = self.state.snapshot();
+            if !stats.dropped_total.is_power_of_two() {
+                return;
+            }
+            tracing::warn!(
+                operation = write.operation(),
+                request_id = ?write.request_id(),
+                reason = failure.reason(),
+                estimated_bytes,
+                regular_item_capacity = self.state.regular_item_capacity,
+                regular_byte_capacity = self.state.regular_byte_capacity,
+                queued_items = stats.queued_items,
+                queued_bytes = stats.queued_bytes,
+                dropped_total = stats.dropped_total,
+                "执行观测队列容量不足，已丢弃本次写入"
+            );
+            return;
+        }
+        let queued =
+            QueuedExecutionObservation::new(write, estimated_bytes, Arc::clone(&self.state));
+        let lane = self.lane(queued.request_id());
+        match self.senders[lane].send(queued) {
+            Ok(()) => self.state.record_enqueued(),
+            Err(error) => {
+                let queued = error.0;
+                let operation = queued.operation();
+                let request_id = queued.request_id().map(ToOwned::to_owned);
+                drop(queued);
+                self.state.record_dropped(1);
+                let stats = self.state.snapshot();
+                if !stats.dropped_total.is_power_of_two() {
+                    return;
+                }
+                tracing::warn!(
+                    operation,
+                    request_id = ?request_id,
+                    reason = "closed",
+                    lane,
+                    queued_items = stats.queued_items,
+                    queued_bytes = stats.queued_bytes,
+                    dropped_total = stats.dropped_total,
+                    "执行观测队列不可用，已丢弃本次写入"
+                );
+            }
+        }
+    }
+
+    fn lane(&self, request_id: Option<&str>) -> usize {
+        request_id.map_or_else(
+            || self.next_unkeyed_lane.fetch_add(1, Ordering::Relaxed) % self.senders.len(),
+            |request_id| request_lane(request_id, self.senders.len()),
+        )
+    }
+}
+
+fn request_lane(request_id: &str, lane_count: usize) -> usize {
+    // request ID 由 Core 生成，不含用户选择的散列输入；固定散列只用于进程内顺序亲和
+    let hash = request_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    usize::try_from(hash % u64::try_from(lane_count).unwrap_or(u64::MAX)).unwrap_or(0)
+}
+
+#[async_trait]
+impl<S: Send + Sync + ?Sized> OperationalDiagnostics for BufferedExecutionStore<S> {
+    async fn record_failure(&self, failure: OperationalFailure) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::OperationalFailure(Box::new(
+            failure,
+        )));
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<S> ExecutionStore for BufferedExecutionStore<S>
+where
+    S: ExecutionStore + OperationalDiagnostics + ?Sized,
+{
+    fn maintain_request(
+        &self,
+        request_id: &ModelRequestId,
+        deadline: gateway_core::lifecycle::Deadline,
+    ) -> Box<dyn gateway_core::lifecycle::LeaseGuard> {
+        self.inner.maintain_request(request_id, deadline)
+    }
+
+    async fn create_model_request(&self, request: NewModelRequest) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::Create(Box::new(request)));
+        Ok(())
+    }
+
+    async fn record_attempt(&self, attempt: AttemptRecord) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::Attempt(Box::new(attempt)));
+        Ok(())
+    }
+
+    async fn create_model_request_with_attempt(
+        &self,
+        request: NewModelRequest,
+        attempt: AttemptRecord,
+    ) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::CreateWithAttempt(Box::new((
+            request, attempt,
+        ))));
+        Ok(())
+    }
+
+    async fn mark_send_state(
+        &self,
+        request_id: &ModelRequestId,
+        state: UpstreamSendState,
+    ) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::MarkSendState {
+            request_id: request_id.clone(),
+            state,
+        });
+        Ok(())
+    }
+
+    async fn mark_downstream_committed(
+        &self,
+        request_id: &ModelRequestId,
+        committed_at: SystemTime,
+        client_status_code: Option<u16>,
+    ) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::MarkDownstreamCommitted {
+            request_id: request_id.clone(),
+            committed_at,
+            client_status_code,
+        });
+        Ok(())
+    }
+
+    async fn record_client_status(
+        &self,
+        request_id: &ModelRequestId,
+        client_status_code: u16,
+    ) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::RecordClientStatus {
+            request_id: request_id.clone(),
+            client_status_code,
+        });
+        Ok(())
+    }
+
+    async fn record_intermediate_failure(
+        &self,
+        failure: IntermediateFailure,
+    ) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::IntermediateFailure(Box::new(
+            failure,
+        )));
+        Ok(())
+    }
+
+    async fn record_entry_rejection(&self, rejection: EntryRejection) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::EntryRejection(Box::new(
+            rejection,
+        )));
+        Ok(())
+    }
+
+    async fn record_probe_failure(&self, failure: ProbeFailure) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::ProbeFailure(Box::new(failure)));
+        Ok(())
+    }
+
+    async fn finalize_model_request(
+        &self,
+        finalization: ModelRequestFinalization,
+    ) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::Finalize(Box::new(finalization)));
+        Ok(())
+    }
+
+    async fn recover_expired(&self, now: SystemTime) -> Result<RecoveryReport, StoreError> {
+        self.inner.recover_expired(now).await
+    }
+}
+
+/// 由 Host 监督的固定并行写泵；同一 request ID 固定落在一个 lane 并按入队顺序落库
+///
+/// lane transport 共享 Store 的全局 item/byte 预留，正在写入的项目同样计入总上限
+pub struct ExecutionObservationWriter<S: ?Sized> {
+    inner: Arc<S>,
+    receivers: Box<[Mutex<mpsc::UnboundedReceiver<QueuedExecutionObservation>>]>,
+    state: Arc<ExecutionBufferState>,
+}
+
+pub(crate) struct ExecutionBufferIdle {
+    state: Arc<ExecutionBufferState>,
+}
+
+impl<S: ?Sized> ExecutionObservationWriter<S> {
+    #[must_use]
+    pub fn stats(&self) -> ExecutionBufferStats {
+        self.state.snapshot()
+    }
+
+    /// 等待所有已接收写入结束一次持久化尝试
+    ///
+    /// 队列计数包含正在写入的项目；失败沿用现有 fail-open 计数且不会由本方法重试
+    /// 返回 `false` 表示到达截止时间时仍有排队或正在写入的项目
+    pub async fn wait_until_idle(&self, deadline: Instant) -> bool {
+        self.idle().wait_until(deadline).await
+    }
+
+    pub(crate) fn idle(&self) -> ExecutionBufferIdle {
+        ExecutionBufferIdle {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+impl ExecutionBufferIdle {
+    /// 等待所有已接收写入结束一次持久化尝试；队列计数包含正在写入的项目，
+    /// 写入失败沿用现有 fail-open 计数且不在关闭路径重试
+    pub(crate) async fn wait_until(&self, deadline: Instant) -> bool {
+        loop {
+            if self.state.queued_items.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            let idle = self.state.idle.notified();
+            tokio::pin!(idle);
+            let _ = idle.as_mut().enable();
+            // 在订阅前后各检查一次，覆盖最后一个写入恰好在注册等待时结束的竞态
+            if self.state.queued_items.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero()
+                || tokio::time::timeout(remaining, idle.as_mut())
+                    .await
+                    .is_err()
+            {
+                return false;
+            }
+        }
+    }
+}
+
+impl<S> DaemonTask for ExecutionObservationWriter<S>
+where
+    S: ExecutionStore + OperationalDiagnostics + ?Sized,
+{
+    fn run(
+        &self,
+        context: WorkerDaemonContext,
+    ) -> futures::future::BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move {
+            let shutdown_deadline = OnceLock::new();
+            try_join_all(self.receivers.iter().enumerate().map(|(lane, receiver)| {
+                run_lane(
+                    lane,
+                    receiver,
+                    self.inner.as_ref(),
+                    self.state.as_ref(),
+                    context.clone(),
+                    &shutdown_deadline,
+                )
+            }))
+            .await?;
+            Ok(())
+        })
+    }
+}
+
+async fn run_lane<S>(
+    lane: usize,
+    receiver: &Mutex<mpsc::UnboundedReceiver<QueuedExecutionObservation>>,
+    store: &S,
+    state: &ExecutionBufferState,
+    context: WorkerDaemonContext,
+    shutdown_deadline: &OnceLock<Instant>,
+) -> Result<(), WorkerTaskError>
+where
+    S: ExecutionStore + OperationalDiagnostics + ?Sized,
+{
+    let cancellation = context.cancellation();
+    let mut receiver = receiver.lock().await;
+    loop {
+        let queued = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                drain_on_shutdown(
+                    lane,
+                    &mut receiver,
+                    store,
+                    state,
+                    shared_shutdown_deadline(shutdown_deadline),
+                ).await;
+                return Ok(());
+            },
+            queued = receiver.recv() => queued,
+        };
+        let Some(queued) = queued else {
+            return Err(WorkerTaskError::safe(
+                "execution observation queue lane closed",
+            ));
+        };
+        let operation = queued.operation();
+        let request_id = queued.request_id().map(ToOwned::to_owned);
+        let mut persistence = Box::pin(persist_queued(queued, store));
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                let deadline = shared_shutdown_deadline(shutdown_deadline);
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero()
+                    || tokio::time::timeout(remaining, &mut persistence).await.is_err()
+                {
+                    state.record_dropped(1);
+                    let stats = state.snapshot();
+                    tracing::warn!(
+                        operation,
+                        request_id = ?request_id,
+                        lane,
+                        dropped_total = stats.dropped_total,
+                        drain_timeout_ms = u64::try_from(SHUTDOWN_DRAIN_TIMEOUT.as_millis())
+                            .unwrap_or(u64::MAX),
+                        "执行观测队列关闭时当前写入未在期限内完成，已停止等待"
+                    );
+                }
+                drain_on_shutdown(lane, &mut receiver, store, state, deadline).await;
+                return Ok(());
+            },
+            succeeded = &mut persistence => {
+                if succeeded {
+                    context.succeeded();
+                }
+            },
+        }
+    }
+}
+
+fn shared_shutdown_deadline(deadline: &OnceLock<Instant>) -> Instant {
+    *deadline.get_or_init(|| Instant::now() + SHUTDOWN_DRAIN_TIMEOUT)
+}
+
+async fn persist_queued<S>(mut queued: QueuedExecutionObservation, store: &S) -> bool
+where
+    S: ExecutionStore + OperationalDiagnostics + ?Sized,
+{
+    let operation = queued.operation();
+    let request_id = queued.request_id().map(ToOwned::to_owned);
+    let state = Arc::clone(&queued.state);
+    let Some(write) = queued.take_write() else {
+        state.record_write_failure();
+        tracing::error!(
+            operation,
+            request_id = ?request_id,
+            "执行观测队列内部状态无效，已丢弃本次写入"
+        );
+        return false;
+    };
+    // Store 写入没有统一幂等键；超时可能表示已提交，不能在这里盲目重试并
+    // 制造重复 ops_events
+    // 失败会被计数并丢弃，数据面始终不等待补偿
+    match write.persist(store).await {
+        Ok(()) => {
+            state.record_persisted();
+            true
+        }
+        Err(error) => {
+            state.record_write_failure();
+            let stats = state.snapshot();
+            if !stats.write_failure_total.is_power_of_two() {
+                return false;
+            }
+            tracing::warn!(
+                operation,
+                request_id = ?request_id,
+                error_kind = ?error.kind(),
+                write_failure_total = stats.write_failure_total,
+                "执行观测写入失败，数据面不受影响"
+            );
+            false
+        }
+    }
+}
+
+async fn drain_on_shutdown<S>(
+    lane: usize,
+    receiver: &mut mpsc::UnboundedReceiver<QueuedExecutionObservation>,
+    store: &S,
+    state: &ExecutionBufferState,
+    deadline: Instant,
+) where
+    S: ExecutionStore + OperationalDiagnostics + ?Sized,
+{
+    receiver.close();
+    let queued_at_shutdown = receiver.len();
+    let mut dropped = 0_usize;
+
+    while let Some(queued) = receiver.recv().await {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drop(queued);
+            dropped = dropped.saturating_add(1);
+            break;
+        }
+        if tokio::time::timeout(remaining, persist_queued(queued, store))
+            .await
+            .is_err()
+        {
+            dropped = dropped.saturating_add(1);
+            break;
+        }
+    }
+    while let Ok(queued) = receiver.try_recv() {
+        drop(queued);
+        dropped = dropped.saturating_add(1);
+    }
+
+    if dropped > 0 {
+        state.record_dropped(dropped);
+        let stats = state.snapshot();
+        tracing::warn!(
+            lane,
+            queued_at_shutdown,
+            dropped,
+            dropped_total = stats.dropped_total,
+            drain_timeout_ms =
+                u64::try_from(SHUTDOWN_DRAIN_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+            "执行观测队列关闭排空超时，剩余写入已丢弃"
+        );
+    } else if queued_at_shutdown > 0 {
+        tracing::info!(lane, queued_at_shutdown, "执行观测队列已在关闭前排空");
+    }
+}
+
+struct QueuedExecutionObservation {
+    write: Option<ExecutionObservationWrite>,
+    operation: &'static str,
+    request_id: Option<String>,
+    estimated_bytes: usize,
+    state: Arc<ExecutionBufferState>,
+}
+
+impl QueuedExecutionObservation {
+    fn new(
+        write: ExecutionObservationWrite,
+        estimated_bytes: usize,
+        state: Arc<ExecutionBufferState>,
+    ) -> Self {
+        let operation = write.operation();
+        let request_id = write.request_id().map(ToOwned::to_owned);
+        Self {
+            write: Some(write),
+            operation,
+            request_id,
+            estimated_bytes,
+            state,
+        }
+    }
+
+    fn operation(&self) -> &'static str {
+        self.operation
+    }
+
+    fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    fn take_write(&mut self) -> Option<ExecutionObservationWrite> {
+        self.write.take()
+    }
+}
+
+impl Drop for QueuedExecutionObservation {
+    fn drop(&mut self) {
+        self.state.release(self.estimated_bytes);
+    }
+}
+
+enum ExecutionObservationWrite {
+    Create(Box<NewModelRequest>),
+    Attempt(Box<AttemptRecord>),
+    CreateWithAttempt(Box<(NewModelRequest, AttemptRecord)>),
+    MarkSendState {
+        request_id: ModelRequestId,
+        state: UpstreamSendState,
+    },
+    MarkDownstreamCommitted {
+        request_id: ModelRequestId,
+        committed_at: SystemTime,
+        client_status_code: Option<u16>,
+    },
+    RecordClientStatus {
+        request_id: ModelRequestId,
+        client_status_code: u16,
+    },
+    IntermediateFailure(Box<IntermediateFailure>),
+    ProbeFailure(Box<ProbeFailure>),
+    EntryRejection(Box<EntryRejection>),
+    OperationalFailure(Box<OperationalFailure>),
+    Finalize(Box<ModelRequestFinalization>),
+}
+
+impl ExecutionObservationWrite {
+    const fn is_critical(&self) -> bool {
+        !matches!(
+            self,
+            Self::MarkSendState { .. }
+                | Self::MarkDownstreamCommitted { .. }
+                | Self::RecordClientStatus { .. }
+        )
+    }
+
+    const fn operation(&self) -> &'static str {
+        match self {
+            Self::Create(_) => "create_model_request",
+            Self::Attempt(_) => "record_attempt",
+            Self::CreateWithAttempt(_) => "create_model_request_with_attempt",
+            Self::MarkSendState { .. } => "mark_send_state",
+            Self::MarkDownstreamCommitted { .. } => "mark_downstream_committed",
+            Self::RecordClientStatus { .. } => "record_client_status",
+            Self::IntermediateFailure(_) => "record_intermediate_failure",
+            Self::ProbeFailure(_) => "record_probe_failure",
+            Self::EntryRejection(_) => "record_entry_rejection",
+            Self::OperationalFailure(_) => "record_operational_failure",
+            Self::Finalize(_) => "finalize_model_request",
+        }
+    }
+
+    fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::Create(request) => Some(request.id.as_str()),
+            Self::Attempt(attempt) => Some(attempt.request_id.as_str()),
+            Self::CreateWithAttempt(write) => Some(write.0.id.as_str()),
+            Self::MarkSendState { request_id, .. }
+            | Self::MarkDownstreamCommitted { request_id, .. }
+            | Self::RecordClientStatus { request_id, .. } => Some(request_id.as_str()),
+            Self::IntermediateFailure(failure) => Some(failure.request_id.as_str()),
+            Self::ProbeFailure(_) | Self::EntryRejection(_) => None,
+            Self::OperationalFailure(failure) => failure.correlation_id.as_deref(),
+            Self::Finalize(finalization) => Some(finalization.request_id.as_str()),
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>().saturating_add(match self {
+            Self::Create(request) => new_request_bytes(request),
+            Self::Attempt(attempt) => attempt_bytes(attempt),
+            Self::CreateWithAttempt(write) => {
+                new_request_bytes(&write.0).saturating_add(attempt_bytes(&write.1))
+            }
+            Self::MarkSendState { request_id, .. }
+            | Self::MarkDownstreamCommitted { request_id, .. }
+            | Self::RecordClientStatus { request_id, .. } => request_id.as_str().len(),
+            Self::IntermediateFailure(failure) => text_bytes([
+                Some(failure.request_id.as_str()),
+                Some(failure.provider_kind.as_str()),
+                failure.account_id.as_ref().map(|value| value.as_str()),
+                failure
+                    .upstream_model_id
+                    .as_ref()
+                    .map(|model| model.as_str()),
+                failure.upstream_request_id.as_deref(),
+            ])
+            .saturating_add(account_snapshot_bytes(failure.account_snapshot.as_ref()))
+            .saturating_add(provider_error_bytes(&failure.error)),
+            Self::EntryRejection(rejection) => text_bytes([
+                Some(rejection.request_id.as_str()),
+                Some(rejection.client_key_id.as_str()),
+                Some(rejection.error.client_message()),
+                rejection.error.client_error_code(),
+                rejection.error.client_error_type(),
+            ])
+            .saturating_add(size_of::<EntryRejection>())
+            .saturating_add(gateway_core::error::ErrorSource::estimated_chain_bytes(
+                std::error::Error::source(&rejection.error),
+            )),
+            Self::ProbeFailure(failure) => text_bytes([
+                Some(failure.provider_kind.as_str()),
+                Some(failure.account_id.as_str()),
+                Some(failure.upstream_model_id.as_str()),
+            ])
+            .saturating_add(provider_error_bytes(&failure.error)),
+            Self::OperationalFailure(failure) => size_of::<OperationalFailure>()
+                .saturating_add(account_snapshot_bytes(failure.account_snapshot.as_ref()))
+                .saturating_add(text_bytes([
+                    Some(failure.message.as_str()),
+                    failure.correlation_id.as_deref(),
+                    failure.provider_kind.as_ref().map(|kind| kind.as_str()),
+                    failure.account_id.as_ref().map(|id| id.as_str()),
+                    failure.upstream_code.as_ref().map(|code| code.as_str()),
+                    failure.details.as_ref().map(|details| details.as_str()),
+                ])),
+            Self::Finalize(finalization) => {
+                let error_bytes = finalization.error.as_ref().map_or(0, |error| {
+                    text_bytes([
+                        Some(error.client_message()),
+                        error.client_error_code(),
+                        error.client_error_type(),
+                    ])
+                    .saturating_add(
+                        gateway_core::error::ErrorSource::estimated_chain_bytes(
+                            std::error::Error::source(error),
+                        ),
+                    )
+                });
+                text_bytes([
+                    Some(finalization.request_id.as_str()),
+                    finalization.client_response_id.as_deref(),
+                    finalization.upstream_request_id.as_deref(),
+                    finalization.upstream_response_id.as_deref(),
+                    finalization.upstream_transport.as_deref(),
+                    finalization.http_version.as_deref(),
+                    finalization.websocket_pool.as_deref(),
+                    finalization.service_tier.as_deref(),
+                    finalization.provider_metadata_json.as_deref(),
+                    finalization.diagnostic_trace_json.as_deref(),
+                    finalization.provider_error_code.as_deref(),
+                    finalization.error_details.as_deref(),
+                ])
+                .saturating_add(error_bytes)
+                .saturating_add(size_of::<ModelRequestFinalization>())
+            }
+        })
+    }
+
+    async fn persist<S>(self, store: &S) -> Result<(), StoreError>
+    where
+        S: ExecutionStore + OperationalDiagnostics + ?Sized,
+    {
+        match self {
+            Self::OperationalFailure(failure) => store.record_failure(*failure).await,
+            Self::Create(request) => store.create_model_request(*request).await,
+            Self::Attempt(attempt) => store.record_attempt(*attempt).await,
+            Self::CreateWithAttempt(write) => {
+                let (request, attempt) = *write;
+                store
+                    .create_model_request_with_attempt(request, attempt)
+                    .await
+            }
+            Self::MarkSendState { request_id, state } => {
+                store.mark_send_state(&request_id, state).await
+            }
+            Self::MarkDownstreamCommitted {
+                request_id,
+                committed_at,
+                client_status_code,
+            } => {
+                store
+                    .mark_downstream_committed(&request_id, committed_at, client_status_code)
+                    .await
+            }
+            Self::RecordClientStatus {
+                request_id,
+                client_status_code,
+            } => {
+                store
+                    .record_client_status(&request_id, client_status_code)
+                    .await
+            }
+            Self::IntermediateFailure(failure) => store.record_intermediate_failure(*failure).await,
+            Self::ProbeFailure(failure) => store.record_probe_failure(*failure).await,
+            Self::EntryRejection(rejection) => store.record_entry_rejection(*rejection).await,
+            Self::Finalize(finalization) => store.finalize_model_request(*finalization).await,
+        }
+    }
+}
+
+fn new_request_bytes(request: &NewModelRequest) -> usize {
+    size_of::<NewModelRequest>().saturating_add(text_bytes([
+        Some(request.id.as_str()),
+        request.client_api_key_name_snapshot.as_deref(),
+        Some(request.client_api_key_ref.as_str()),
+        Some(request.protocol.as_str()),
+        Some(request.endpoint.as_str()),
+        Some(request.client_transport.as_str()),
+        request.requested_model.as_ref().map(|model| model.as_str()),
+        request.user_agent.as_deref(),
+        request.reasoning_effort.as_deref(),
+        request.reasoning_preset.as_deref(),
+        request.request_kind.as_deref(),
+        request.subagent_kind.as_deref(),
+    ]))
+}
+
+fn attempt_bytes(attempt: &AttemptRecord) -> usize {
+    size_of::<AttemptRecord>()
+        .saturating_add(account_snapshot_bytes(attempt.account_snapshot.as_ref()))
+        .saturating_add(text_bytes([
+            Some(attempt.request_id.as_str()),
+            Some(attempt.provider_kind.as_str()),
+            attempt
+                .provider_account_ref
+                .as_ref()
+                .map(|value| value.as_str()),
+            attempt
+                .upstream_model_id
+                .as_ref()
+                .map(|model| model.as_str()),
+            Some(attempt.upstream_transport.as_str()),
+            attempt.http_version.as_deref(),
+        ]))
+}
+
+fn account_snapshot_bytes(
+    snapshot: Option<&gateway_core::account::AccountHistorySnapshot>,
+) -> usize {
+    snapshot.map_or(0, |snapshot| {
+        text_bytes([
+            Some(snapshot.name.as_str()),
+            snapshot.email.as_deref(),
+            Some(snapshot.authentication_kind.as_str()),
+            snapshot.plan_type_snapshot.as_deref(),
+            snapshot.notes_snapshot.as_deref(),
+        ])
+    })
+}
+
+fn provider_error_bytes(error: &ProviderError) -> usize {
+    use std::error::Error as _;
+
+    let mut bytes = text_bytes([
+        error.upstream_code().map(|value| value.as_str()),
+        error.upstream_request_id().map(|value| value.as_str()),
+        error.diagnostic().map(|value| value.as_str()),
+        error.raw_upstream_error().map(|value| value.as_str()),
+    ]);
+    if let Some(client_error) = error.client_visible_upstream_error() {
+        bytes = bytes.saturating_add(text_bytes([
+            Some(client_error.message()),
+            client_error.code(),
+            client_error.error_type(),
+        ]));
+    }
+    if let Some(response) = error.client_visible_upstream_response() {
+        bytes = bytes
+            .saturating_add(response.body().len())
+            .saturating_add(response.content_type().map_or(0, <[u8]>::len));
+        for header in response.headers() {
+            bytes = bytes
+                .saturating_add(header.name().len())
+                .saturating_add(header.value().len());
+        }
+    }
+    bytes.saturating_add(gateway_core::error::ErrorSource::estimated_chain_bytes(
+        error.source(),
+    ))
+}
+
+fn text_bytes<const N: usize>(values: [Option<&str>; N]) -> usize {
+    values
+        .into_iter()
+        .flatten()
+        .fold(0, |total, value| total.saturating_add(value.len()))
+}

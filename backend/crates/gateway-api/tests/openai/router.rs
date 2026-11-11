@@ -1,0 +1,181 @@
+//! 验证 OpenAI 路由暴露范围、请求体限制与跨域行为
+
+use axum::{
+    body::Body,
+    http::{Method, Request, StatusCode},
+};
+use tower::ServiceExt;
+
+use super::api_router_with_origins;
+use super::models::ModelsExecution;
+
+const LARGE_BODY_BYTES: usize = 17 * 1024 * 1024;
+
+#[tokio::test]
+async fn browser_origin_controls_http_admin_sessions_without_configuration() {
+    use axum::body::to_bytes;
+    use serde_json::{Value, json};
+    let app = api_router_with_origins(ModelsExecution::new(), Vec::new())
+        .await
+        .layer(axum::Extension(axum::extract::ConnectInfo(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 41000)),
+        )));
+    for (origins, secure) in [
+        (vec!["http://admin.example.test"], false),
+        (vec!["http://192.0.2.1:8080"], false),
+        (vec!["http://[::1]:8080"], false),
+        (vec!["https://admin.example.test"], true),
+        (vec![], true),
+        (vec!["null"], true),
+        (vec!["invalid-origin"], true),
+        (vec!["http://admin.example.test/path"], true),
+        (vec!["http://admin.example.test?https"], true),
+        (vec!["http://user@admin.example.test"], true),
+        (
+            vec!["http://admin.example.test", "https://admin.example.test"],
+            true,
+        ),
+    ] {
+        let request = |path: &str| {
+            let mut builder = Request::post(path)
+                .header("content-type", "application/json")
+                .header("x-forwarded-proto", "http")
+                .header("forwarded", "proto=http");
+            for origin in &origins {
+                builder = builder.header("origin", *origin);
+            }
+            builder
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                request("/api/auth/login")
+                    .body(Body::from(
+                        json!({"mode": "admin", "username": "admin_1", "password": "strong-admin-password"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()["set-cookie"].to_str().unwrap();
+        let session = cookie.split(';').next().unwrap().to_owned();
+        let attrs: Vec<_> = cookie.split(';').map(str::trim).collect();
+        assert_eq!(attrs.contains(&"Secure"), secure);
+        for attribute in ["Path=/", "HttpOnly", "SameSite=Lax"] {
+            assert!(attrs.contains(&attribute));
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/auth/status")
+                    .header("cookie", &session)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["data"]["authenticated"], true);
+
+        let response = app
+            .clone()
+            .oneshot(
+                request("/api/auth/logout")
+                    .header("cookie", &session)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()["set-cookie"].to_str().unwrap();
+        assert!(cookie.starts_with("cpr_session=;"));
+        let attrs: Vec<_> = cookie.split(';').map(str::trim).collect();
+        assert_eq!(attrs.contains(&"Secure"), secure);
+        for attribute in ["Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"] {
+            assert!(attrs.contains(&attribute));
+        }
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/auth/status")
+                    .header("cookie", &session)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["data"]["authenticated"], false);
+    }
+}
+
+#[tokio::test]
+async fn large_responses_bodies_should_reach_authentication() {
+    let router = api_router_with_origins(ModelsExecution::new(), Vec::new()).await;
+    let response = router
+        .oneshot(
+            Request::post("/v1/responses")
+                .body(Body::from(vec![b'a'; LARGE_BODY_BYTES]))
+                .expect("build large request"),
+        )
+        .await
+        .expect("route large request");
+
+    // 请求进入处理器后应因缺少凭据而被拒绝
+    // 若提前施加正文大小限制，则会在认证前返回 413
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn configured_cors_origin_assembles_router_and_answers_preflight() {
+    let router = api_router_with_origins(
+        ModelsExecution::new(),
+        vec!["https://app.example.com".into()],
+    )
+    .await;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/v1/models")
+                .header("origin", "https://app.example.com")
+                .header("access-control-request-method", "GET")
+                .header("access-control-request-headers", "authorization")
+                .body(Body::empty())
+                .expect("build preflight request"),
+        )
+        .await
+        .expect("route preflight request");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("https://app.example.com")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-credentials")
+            .and_then(|value| value.to_str().ok()),
+        Some("true")
+    );
+    let allow_headers = response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .expect("allow-headers present");
+    assert!(allow_headers.contains("authorization"));
+    assert!(allow_headers.contains("x-api-key"));
+    assert!(allow_headers.contains("x-request-id"));
+}

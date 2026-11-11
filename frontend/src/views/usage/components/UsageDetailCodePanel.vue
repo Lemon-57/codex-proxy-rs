@@ -1,0 +1,25 @@
+<script setup lang="ts">
+import { ZScrollbar } from '@codex-proxy/ui'
+
+// 详情弹窗的代码面板：标题 + 滚动区内的预格式化文本。
+defineProps<{
+  title: string
+  maxHeight: string
+  content: string
+}>()
+
+const panelTitleClass = 'm-0 text-z-sm leading-none font-heavy text-z-text-secondary'
+const codeBlockClass
+  = 'm-0 whitespace-pre-wrap wrap-break-word font-mono text-z-sm leading-[1.65] text-z-text'
+</script>
+
+<template>
+  <h3 class="mb-3" :class="panelTitleClass">
+    {{ title }}
+  </h3>
+  <ZScrollbar :max-height="maxHeight">
+    <div class="rounded-z bg-z-bg-container px-3 py-2.5">
+      <pre :class="codeBlockClass"><code>{{ content }}</code></pre>
+    </div>
+  </ZScrollbar>
+</template>

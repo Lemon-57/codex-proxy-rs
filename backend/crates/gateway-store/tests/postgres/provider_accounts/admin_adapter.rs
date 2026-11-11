@@ -1,0 +1,994 @@
+//! 验证管理账号查询的容量投影、分页筛选与授权提交
+
+use super::*;
+
+#[tokio::test]
+async fn import_name_only_overrides_a_single_account_and_keeps_batch_names() {
+    use gateway_admin::model::accounts::AccountImportSettings;
+
+    let Some(database) = TestDatabase::create("import_account_name").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    for (index, (name, expected)) in [
+        (Some("  自定义账号  "), vec!["自定义账号"]),
+        (None, vec!["导入名称 0"]),
+        (Some("  "), vec!["导入名称 0"]),
+        (Some("批量不改名"), vec!["导入名称 0", "导入名称 1"]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let records = (0..expected.len())
+            .map(|item| {
+                let id = format!("acct_name_{index}_{item}");
+                let mut record = account(&id, &id);
+                record.name = format!("导入名称 {item}");
+                record
+            })
+            .collect::<Vec<_>>();
+        let result = repository
+            .import_provider_accounts(ImportProviderAccounts {
+                outbound_proxy: None,
+                settings: Some(AccountImportSettings {
+                    name: name.map(str::to_owned),
+                    notes: None,
+                    model_access: Default::default(),
+                    enabled: true,
+                    concurrency_limit: None,
+                    weight: gateway_core::account::AccountWeight::DEFAULT,
+                    group_ids: vec![],
+                }),
+                scope: ProviderAccountAdminScope {
+                    provider_kind: "openai".to_owned(),
+                },
+                accounts: records,
+                audit: audit(
+                    &format!("audit_name_{index}"),
+                    "import",
+                    "provider_accounts",
+                ),
+            })
+            .await
+            .unwrap();
+        for (id, name) in result.account_ids.iter().zip(expected) {
+            assert_eq!(
+                repository
+                    .load_provider_account(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .summary
+                    .name,
+                name
+            );
+        }
+    }
+    database.close().await;
+}
+
+#[tokio::test]
+async fn scoped_account_reads_follow_current_enabled_groups_without_losing_admin_details() {
+    let Some(database) = TestDatabase::create("account_group_scope").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    for id in ["acct_first", "acct_second", "acct_outside"] {
+        repository
+            .insert_provider_account(account(id, id))
+            .await
+            .unwrap();
+    }
+    let active = AccountGroupId::new(format!("grp_{}", "1".repeat(32))).unwrap();
+    let disabled = AccountGroupId::new(format!("grp_{}", "2".repeat(32))).unwrap();
+    sqlx::query(
+        "insert into account_groups (id, name, color, enabled, created_at, updated_at)
+         values ($1, 'Visible group', '#2563EBFF', true, now(), now()),
+                ($2, 'Disabled group', '#2563EBFF', false, now(), now())",
+    )
+    .bind(active.as_str())
+    .bind(disabled.as_str())
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into account_group_accounts (account_group_id, provider_account_id, created_at)
+         values ($1, 'acct_first', now()), ($1, 'acct_outside', now()),
+                ($2, 'acct_first', now()), ($2, 'acct_second', now())",
+    )
+    .bind(active.as_str())
+    .bind(disabled.as_str())
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let store = admin_account_store(&database.pool);
+    let ids = ["acct_first", "acct_second"].map(|id| ProviderAccountId::new(id).unwrap());
+    assert!(
+        store
+            .load_accounts_in_enabled_groups(&ids, &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .load_accounts_in_enabled_groups(&ids, std::slice::from_ref(&disabled))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let accounts = store
+        .load_accounts_in_enabled_groups(&ids, &[active.clone(), disabled])
+        .await
+        .unwrap();
+    assert_eq!(
+        accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>(),
+        ["acct_first"]
+    );
+    assert!(accounts[0].groups.is_empty());
+    let detail = store
+        .load_account("acct_first", AccountRuntimeSnapshot::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.account.groups.len(), 2);
+    assert!(
+        detail
+            .account
+            .groups
+            .iter()
+            .any(|group| group.id == active && group.name == "Visible group")
+    );
+
+    sqlx::query("update account_groups set enabled = false where id = $1")
+        .bind(active.as_str())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .load_accounts_in_enabled_groups(&ids, std::slice::from_ref(&active))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("update account_groups set enabled = true where id = $1")
+        .bind(active.as_str())
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    sqlx::query("update account_group_accounts set provider_account_id = 'acct_second' where account_group_id = $1 and provider_account_id = 'acct_first'")
+        .bind(active.as_str()).execute(&database.pool).await.unwrap();
+    let accounts = store
+        .load_accounts_in_enabled_groups(&ids, &[active])
+        .await
+        .unwrap();
+    assert_eq!(
+        accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>(),
+        ["acct_second"]
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn lightweight_account_reads_do_not_require_capacity_settings() {
+    let Some(database) = TestDatabase::create("account_existence").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    repository
+        .insert_provider_account(account("acct_exists", "user-exists"))
+        .await
+        .unwrap();
+    sqlx::query("delete from runtime_settings")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let store = admin_account_store(&database.pool);
+    assert!(store.account_exists("acct_exists").await.unwrap());
+    assert!(!store.account_exists("acct_missing").await.unwrap());
+    assert_eq!(
+        store
+            .load_account_record(&ProviderAccountId::new("acct_exists").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "acct_exists"
+    );
+    assert!(
+        store
+            .load_account_record(&ProviderAccountId::new("acct_missing").unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn account_capacity_should_resolve_limits_for_list_and_detail() {
+    let Some(database) = TestDatabase::create("account_capacity").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let store = admin_account_store(&database.pool);
+    let mut limited = account("acct_override", "user-override");
+    limited.concurrency_limit = gateway_core::account::AccountConcurrencyLimit::new(3);
+    for record in [account("acct_inherited", "user-inherited"), limited] {
+        repository.insert_provider_account(record).await.unwrap();
+    }
+    for default_limit in [10_i64, 0] {
+        sqlx::query("update runtime_settings set max_concurrent_per_account = $1 where id = 1")
+            .bind(default_limit)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        for counts in [
+            None,
+            Some(BTreeMap::from([("acct_override".to_owned(), 2)])),
+        ] {
+            let runtime = AccountRuntimeSnapshot {
+                protection_rules: std::collections::BTreeMap::new(),
+                in_flight: counts,
+                ..Default::default()
+            };
+            let page = store
+                .list_accounts(
+                    AccountListQuery {
+                        supplier: None,
+                        plan_type: None,
+                        page: 1,
+                        page_size: PageSize::new(20).unwrap(),
+                        provider_kind: None,
+                        group_filter: None,
+                        search: None,
+                        status: None,
+                        sort: None,
+                    },
+                    runtime.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.items.len(), 2);
+            for item in page.items {
+                let inherited = item.account.id == "acct_inherited";
+                let expected_limit = if inherited {
+                    (default_limit > 0).then_some(10)
+                } else {
+                    Some(3)
+                };
+                assert_eq!(item.capacity.total_slots, expected_limit);
+                assert_eq!(
+                    item.capacity.used_slots,
+                    runtime
+                        .in_flight
+                        .as_ref()
+                        .map(|_| if inherited { 0 } else { 2 })
+                );
+                let detail = store
+                    .load_account(&item.account.id, runtime.clone())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(detail.capacity, item.capacity);
+            }
+        }
+    }
+    database.close().await;
+}
+
+#[tokio::test]
+async fn account_search_matches_only_name_and_email_literal_substrings() {
+    let Some(database) = TestDatabase::create("account_contains_search").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let mut record = account("acct_searchable", "upstream-user-needle");
+    record.name = r"Team\Ops_100%".to_owned();
+    record.email = Some("maker@example.invalid".to_owned());
+    record.upstream_account_id = Some("upstream-account-marker".to_owned());
+    repository.insert_provider_account(record).await.unwrap();
+    let mut other = account("acct_other", "user-other");
+    other.email = None;
+    repository.insert_provider_account(other).await.unwrap();
+    let store = admin_account_store(&database.pool);
+    for (search, expected) in [
+        ("ma", 1),
+        ("ak", 1),
+        ("EXAMPLE", 1),
+        ("invalid", 1),
+        (r"\OPS_", 1),
+        ("_100%", 1),
+        ("%", 1),
+        (r"\", 1),
+        ("searchable", 0),
+        ("user-needle", 0),
+        ("account-marker", 0),
+        ("Ops_100_", 0),
+        ("missing", 0),
+    ] {
+        let page = store
+            .list_accounts(
+                AccountListQuery {
+                    supplier: None,
+                    plan_type: None,
+                    page: 1,
+                    page_size: PageSize::new(10).unwrap(),
+                    provider_kind: None,
+                    group_filter: None,
+                    search: Some(search.to_owned()),
+                    status: None,
+                    sort: None,
+                },
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total, expected, "search: {search}");
+        assert_eq!(page.items.len() as u64, expected, "search: {search}");
+        if expected == 1 {
+            assert_eq!(page.items[0].account.id, "acct_searchable");
+        }
+    }
+    database.close().await;
+}
+
+#[tokio::test]
+async fn provider_filter_applies_before_pagination_even_on_an_empty_page() {
+    let Some(database) = TestDatabase::create("account_provider_filters").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    for (index, provider) in ["openai", "xai", "xai"].into_iter().enumerate() {
+        let mut record = account(
+            &format!("acct_filter_{index}"),
+            &format!("user-filter-{index}"),
+        );
+        record.provider_kind = provider.into();
+        repository.insert_provider_account(record).await.unwrap();
+    }
+    let query = AccountListQuery {
+        supplier: None,
+        plan_type: None,
+        page: 2,
+        page_size: PageSize::new(1).unwrap(),
+        provider_kind: Some(ProviderKind::new("openai").unwrap()),
+        group_filter: None,
+        search: None,
+        status: None,
+        sort: None,
+    };
+    let store = admin_account_store(&database.pool);
+    let page = store
+        .list_accounts(query.clone(), Default::default())
+        .await
+        .unwrap();
+    assert!(page.items.is_empty());
+    let literal = store
+        .list_accounts(
+            AccountListQuery {
+                page: 1,
+                provider_kind: Some(ProviderKind::new("all").unwrap()),
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert!(literal.items.is_empty());
+    assert_eq!(literal.total, 0);
+    sqlx::query("delete from provider_accounts")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let empty = store
+        .list_accounts(query, Default::default())
+        .await
+        .unwrap();
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.total, 0);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn plugin_account_provider_filter_is_optional_and_applied_before_cursor_pagination() {
+    let Some(database) = TestDatabase::create("plugin_account_scope").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    for id in ["acct_plugin_a", "acct_plugin_b", "acct_plugin_c"] {
+        repository
+            .insert_provider_account(account(id, &format!("user-{id}")))
+            .await
+            .unwrap();
+    }
+    let mut other_provider = account("acct_plugin_other", "user-other");
+    other_provider.provider_kind = "xai".to_owned();
+    repository
+        .insert_provider_account(other_provider)
+        .await
+        .unwrap();
+    let store = admin_account_store(&database.pool);
+    let first = store
+        .list_plugin_accounts(PluginAccountListQuery {
+            provider_kind: Some(ProviderKind::new("openai").unwrap()),
+            cursor: None,
+            limit: PageSize::new(1).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        first
+            .accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>(),
+        ["acct_plugin_a"]
+    );
+    assert_eq!(
+        first.next_cursor.as_ref().map(ProviderAccountId::as_str),
+        Some("acct_plugin_a")
+    );
+
+    let second = store
+        .list_plugin_accounts(PluginAccountListQuery {
+            provider_kind: Some(ProviderKind::new("openai").unwrap()),
+            cursor: first.next_cursor,
+            limit: PageSize::new(1).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        second
+            .accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>(),
+        ["acct_plugin_b"]
+    );
+    assert_eq!(
+        second.next_cursor.as_ref().map(ProviderAccountId::as_str),
+        Some("acct_plugin_b")
+    );
+
+    // 未指定 Provider 时按全局账号 ID 跨 Provider 分页，Provider 归属来自持久记录
+    let all = store
+        .list_plugin_accounts(PluginAccountListQuery {
+            provider_kind: None,
+            cursor: None,
+            limit: PageSize::new(16).unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        all.accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "acct_plugin_a",
+            "acct_plugin_b",
+            "acct_plugin_c",
+            "acct_plugin_other"
+        ]
+    );
+    assert!(all.next_cursor.is_none());
+
+    database.close().await;
+}
+
+pub(super) fn credential(id: &str, user: &str) -> PreparedCredentialCreate {
+    PreparedCredentialCreate {
+        account_id: ProviderAccountId::new(id).unwrap(),
+        provider_kind: ProviderKind::new("openai").unwrap(),
+        name: "login account".into(),
+        email: None,
+        upstream_user_id: Some(user.into()),
+        upstream_account_id: None,
+        plan_type: None,
+        authentication_kind: "oauth".into(),
+        provider_material: ProviderDocument::new(OpaqueProviderData::new(
+            json!({"access_token":"test-only"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )),
+        has_refresh_token: false,
+        access_token_expires_at: None,
+        next_refresh_at: None,
+        enabled: true,
+        credential_state: CredentialState::Ready,
+        credential_observed_at: Utc::now(),
+        outbound_proxy: None,
+        model_access: None,
+    }
+}
+
+pub(super) fn command(
+    credential: PreparedCredentialCreate,
+) -> (AuthorizationCommit, MutationContext) {
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "authorization-account".into(),
+    };
+    (
+        AuthorizationCommit {
+            key: gateway_admin::model::provider_credentials::AuthorizationReceiptKey::new(
+                ProviderKind::new("openai").unwrap(),
+                &uuid::Uuid::new_v4().to_string(),
+                &context,
+            )
+            .unwrap(),
+            settings: None,
+            pending: PendingAuthorizationMutation::new(
+                ProviderKind::new("openai").unwrap(),
+                AuthorizationMutationTarget::Create {
+                    name: "login".into(),
+                },
+                AuthorizationOwnerBinding::from_context(&context),
+            ),
+            credential: AuthorizationCredentialCommit::Create(Box::new(credential)),
+        },
+        context,
+    )
+}
+
+#[tokio::test]
+async fn authorization_returns_authoritative_account_id_and_revision() {
+    let Some(database) = TestDatabase::create("authorization_account").await else {
+        return;
+    };
+    let store = admin_account_store(&database.pool);
+    let (first, context) = command(credential("acct_existing", "user-one"));
+    store.commit_authorization(first, &context).await.unwrap();
+    let (authorization, context) = command(credential("acct_candidate", "user-one"));
+    let result = store
+        .commit_authorization(authorization, &context)
+        .await
+        .unwrap()
+        .result;
+    assert_eq!(result.account_id.as_str(), "acct_existing");
+    assert_eq!(result.credential_revision.unwrap().get(), 2);
+    assert_eq!(
+        result.config_revision.get(),
+        current_revision(&database.pool).await as u64
+    );
+    let accounts: i64 = sqlx::query_scalar("select count(*) from provider_accounts")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(accounts, 1);
+    let audit: i64 =
+        sqlx::query_scalar("select count(*) from admin_audit_events where action = 'authorize'")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(audit, 2, "两次授权各写入一次审计");
+    database.close().await;
+}
+
+#[tokio::test]
+async fn authorization_conflict_preserves_accounts_revision_and_audit() {
+    let Some(database) = TestDatabase::create("authorization_conflict").await else {
+        return;
+    };
+    let store = admin_account_store(&database.pool);
+    let (seed, context) = command(credential("acct_existing", "user-one"));
+    store.commit_authorization(seed, &context).await.unwrap();
+    let before = current_revision(&database.pool).await;
+    let (authorization, context) = command(credential("acct_existing", "different-user"));
+    assert!(
+        store
+            .commit_authorization(authorization, &context)
+            .await
+            .is_err()
+    );
+    let accounts: Vec<String> = sqlx::query_scalar("select id from provider_accounts order by id")
+        .fetch_all(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(accounts, ["acct_existing"]);
+    assert_eq!(current_revision(&database.pool).await, before);
+    let audit: i64 =
+        sqlx::query_scalar("select count(*) from admin_audit_events where action = 'authorize'")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(audit, 1);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn reset_credit_automation_persists_pending_checks_cas_and_follows_account_lifecycle() {
+    use gateway_admin::{
+        model::reset_credit_automation::*,
+        ports::reset_credit_automation::ResetCreditAutomationStore as _,
+    };
+    let Some(database) = TestDatabase::create("reset_credit_automation").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    repository
+        .insert_provider_account(account("acct_automation", "user-automation"))
+        .await
+        .unwrap();
+    let store = admin_account_store(&database.pool);
+    let now: chrono::DateTime<Utc> = sqlx::query_scalar("select now()")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    let mut record = ResetCreditAutomation {
+        account_id: "acct_automation".into(),
+        enabled: true,
+        revision: 0,
+        next_run_at: now + TimeDelta::hours(2),
+        state: ResetCreditAutomationState {
+            inherits_default: false,
+            next_quota_check_at: None,
+            quota_refresh: None,
+            next_discovery_at: now + TimeDelta::days(1),
+            credits: vec![],
+            pending: Some(PendingResetCredit {
+                credit: PlannedResetCredit {
+                    id: "card_1".into(),
+                    expires_at: now + TimeDelta::minutes(5),
+                },
+                redeem_request_id: uuid::Uuid::new_v4().to_string(),
+            }),
+            retry_at: Some(now + TimeDelta::seconds(30)),
+            failures: 1,
+            last_result: Some("pending".into()),
+        },
+    };
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "automation-test".into(),
+    };
+    record.revision = store
+        .save_reset_credit_automation(&record, Some(&context))
+        .await
+        .unwrap();
+    let loaded = store
+        .reset_credit_automation(&record.account_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.state, record.state);
+    assert_eq!(loaded.enabled, record.enabled);
+    use gateway_store::postgres::{PgRuntimeSettingsRepository, RuntimeSettingsRepository as _};
+    let settings = PgRuntimeSettingsRepository::new(database.pool.clone());
+    assert_eq!(
+        settings
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .values
+            .reset_credit_lead_minutes,
+        10
+    );
+    let mut update = super::super::runtime_settings::settings_with_margin(3600);
+    settings
+        .update_runtime_settings(update.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .reset_credit_automation(&record.account_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        loaded,
+        "unrelated settings must not replan"
+    );
+    update.values.reset_credit_lead_minutes = 20;
+    settings.update_runtime_settings(update).await.unwrap();
+    // 重规划使用数据库时钟，立即到期的断言与后续查询保持相同时间源
+    let replanned_at: chrono::DateTime<Utc> = sqlx::query_scalar("select now()")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    let replanned = store
+        .reset_credit_automation(&record.account_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        replanned.state, record.state,
+        "replan preserves pending idempotency key"
+    );
+    assert!(replanned.revision > record.revision);
+    assert!(replanned.next_run_at <= replanned_at);
+    record = replanned;
+
+    assert_eq!(
+        store
+            .due_reset_credit_automations(replanned_at, 1)
+            .await
+            .unwrap(),
+        [record.account_id.clone()]
+    );
+    repository
+        .update_provider_account(profile(&record.account_id, "updated profile"))
+        .await
+        .unwrap();
+    repository
+        .set_provider_account_enabled(&record.account_id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .reset_credit_automation(&record.account_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        record,
+        "account edits preserve the automation plan"
+    );
+    assert!(
+        store
+            .due_reset_credit_automations(replanned_at, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    repository
+        .set_provider_account_enabled(&record.account_id, true)
+        .await
+        .unwrap();
+    let stale = record.clone();
+    record.enabled = false;
+    record.revision = store
+        .save_reset_credit_automation(&record, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .save_reset_credit_automation(&stale, None)
+            .await
+            .unwrap_err()
+            .kind(),
+        gateway_admin::ports::store::AdminStoreErrorKind::Conflict
+    );
+    assert!(
+        store
+            .due_reset_credit_automations(replanned_at, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("delete from provider_accounts where id = $1")
+        .bind(&record.account_id)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .reset_credit_automation(&record.account_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn supplier_filter_applies_before_pagination_and_treats_wildcards_literally() {
+    let Some(database) = TestDatabase::create("supplier_filter").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let store = admin_account_store(&database.pool);
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "supplier-edit".to_owned(),
+    };
+    for (id, supplier) in [
+        ("acct_s1", "North 100%_A"),
+        ("acct_s2", "North partner"),
+        ("acct_s3", "Other"),
+    ] {
+        repository
+            .insert_provider_account(account(id, id))
+            .await
+            .unwrap();
+        store
+            .update_account(
+                UpdateAccount {
+                    account_id: id.to_owned(),
+                    name: None,
+                    supplier: Some(supplier.to_owned()),
+                    manual_starts_at: None,
+                    manual_expires_at: None,
+                    notes: None,
+                    enabled: false,
+                    concurrency_limit: None,
+                    weight: gateway_core::account::AccountWeight::DEFAULT,
+                    group_ids: vec![],
+                    outbound_proxy: None,
+                    model_access: None,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+    }
+    let query = AccountListQuery {
+        plan_type: None,
+        supplier: Some("north".to_owned()),
+        page: 1,
+        page_size: PageSize::new(1).unwrap(),
+        provider_kind: None,
+        group_filter: None,
+        search: None,
+        status: Some(AccountStatus::Disabled),
+        sort: Some(AccountSort {
+            field: AccountSortField::Email,
+            direction: SortDirection::Asc,
+        }),
+    };
+    let first = store
+        .list_accounts(query.clone(), Default::default())
+        .await
+        .unwrap();
+    let second = store
+        .list_accounts(
+            AccountListQuery {
+                page: 2,
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!((first.total, second.total), (2, 2));
+    assert_eq!(
+        (
+            first.items[0].account.id.as_str(),
+            second.items[0].account.id.as_str()
+        ),
+        ("acct_s1", "acct_s2")
+    );
+    let literal = store
+        .list_accounts(
+            AccountListQuery {
+                supplier: Some("100%_A".to_owned()),
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(literal.total, 1);
+    assert_eq!(literal.items[0].account.id, "acct_s1");
+    let empty = store
+        .list_accounts(
+            AccountListQuery {
+                supplier: Some("absent".to_owned()),
+                ..query
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.total, 0);
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.summary.total, 3);
+    let matching_plan = store
+        .list_accounts(
+            AccountListQuery {
+                plan_type: Some("pro".to_owned()),
+                supplier: Some("north".to_owned()),
+                page: 1,
+                page_size: PageSize::new(1).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: Some(AccountStatus::Disabled),
+                sort: None,
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(matching_plan.total, 2);
+    assert_eq!(matching_plan.items.len(), 1);
+    let absent_plan = store
+        .list_accounts(
+            AccountListQuery {
+                plan_type: Some("plus".to_owned()),
+                supplier: None,
+                page: 1,
+                page_size: PageSize::new(1).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: None,
+                sort: None,
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(absent_plan.total, 0);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn paused_invalid_accounts_are_errors_in_detail_filters_pagination_and_global_counts() {
+    use gateway_core::account::AccountStatus;
+    let Some(database) = TestDatabase::create("paused_invalid_projection").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    for (id, state) in [
+        ("acct_invalid", CredentialState::Invalid),
+        ("acct_expired", CredentialState::Expired),
+        ("acct_paused", CredentialState::Ready),
+    ] {
+        let mut seed = account(id, id);
+        seed.enabled = false;
+        seed.credential_state = state;
+        repository.insert_provider_account(seed).await.unwrap();
+    }
+    let store = admin_account_store(&database.pool);
+    let query = AccountListQuery {
+        plan_type: None,
+        supplier: None,
+        page: 1,
+        page_size: PageSize::new(1).unwrap(),
+        provider_kind: None,
+        group_filter: None,
+        search: None,
+        status: Some(AccountStatus::Error),
+        sort: None,
+    };
+    let errors = store
+        .list_accounts(query.clone(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(errors.total, 1);
+    assert_eq!(errors.summary.error, 1);
+    assert_eq!(errors.summary.disabled, 2);
+    assert_eq!(errors.items[0].account.id, "acct_invalid");
+    assert!(!errors.items[0].account.enabled);
+    assert_eq!(errors.items[0].projection.status, AccountStatus::Error);
+    let detail = store
+        .load_account("acct_invalid", Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.projection, errors.items[0].projection);
+    let empty = store
+        .list_accounts(
+            AccountListQuery {
+                page: 2,
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.total, 1);
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.summary, errors.summary);
+    let disabled = store
+        .list_accounts(
+            AccountListQuery {
+                status: Some(AccountStatus::Disabled),
+                ..query
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disabled.total, 2);
+    assert_eq!(disabled.summary, errors.summary);
+    database.close().await;
+}
