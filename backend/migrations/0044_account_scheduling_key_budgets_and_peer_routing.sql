@@ -10,14 +10,20 @@ alter table runtime_settings
     ),
     add column reset_credit_on_low_weekly_quota boolean not null default false,
     -- 同一部署的实例共用转发标记，启动时读取，不随请求访问数据库
-    add column peer_routing_id uuid not null default gen_random_uuid();
+    add column peer_routing_id uuid;
 
 update runtime_settings set account_warmup_cron =
     case when account_warmup_schedule_time = '' then ''
-    else split_part(account_warmup_schedule_time, ':', 2) || ' ' || split_part(account_warmup_schedule_time, ':', 1) || ' * * *' end;
+    else split_part(account_warmup_schedule_time, ':', 2) || ' ' || split_part(account_warmup_schedule_time, ':', 1) || ' * * *' end,
+    peer_routing_id = gen_random_uuid();
 
 alter table runtime_settings add constraint runtime_settings_warmup_cron_enabled_ck
     check (not account_warmup_enabled or account_warmup_cron <> '');
+
+-- 易变默认值分步登记，避免为增加单例标记重写整张设置表
+alter table runtime_settings
+    alter column peer_routing_id set not null,
+    alter column peer_routing_id set default gen_random_uuid();
 
 alter table provider_accounts
     add column quota_limits jsonb not null default '{}'::jsonb,
