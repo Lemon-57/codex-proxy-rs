@@ -1,0 +1,874 @@
+//! 验证 OpenAI 事件的模型、用量、额度与重试信息提取
+
+use gateway_protocol::openai::events::{
+    RateLimitKeySource, RateLimitWindow, TokenUsage, billable_usage_is_complete, extract_sse_usage,
+    extract_usage, is_codex_quota_header_name, is_rate_limit_header_name,
+    parse_image_rate_limit_headers, parse_rate_limit_headers, parse_rate_limits_event,
+    rate_limits_to_header_pairs, retry_after_seconds_from_body, upstream_no_more_retry,
+    upstream_no_more_retry_from_body,
+};
+use serde_json::json;
+
+#[test]
+fn billable_usage_should_validate_cache_writes_totals_and_overflow() {
+    for (raw, expected) in [
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 80}, "total_tokens": 110}),
+            true,
+        ),
+        (
+            json!({"prompt_tokens": 100, "completion_tokens": 10, "prompt_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 80}}),
+            true,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "cached_tokens": 20, "cache_write_tokens": 90}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "cache_write_tokens": -1}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "input_tokens_details": {"cache_write_tokens": "1"}, "cache_write_tokens": 1}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "cache_write_tokens": 1.5}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "total_tokens": 111}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 100, "output_tokens": 10, "total_tokens": "110"}),
+            false,
+        ),
+        (json!({"input_tokens": u64::MAX, "output_tokens": 1}), false),
+        (
+            json!({"input_tokens": u64::MAX, "output_tokens": 0, "cached_tokens": u64::MAX, "cache_write_tokens": 1}),
+            false,
+        ),
+    ] {
+        let response = json!({"usage": raw});
+        let usage = extract_usage(&response).expect("提取用量不得因溢出而崩溃");
+        assert_eq!(
+            billable_usage_is_complete(&response, usage),
+            expected,
+            "{response}"
+        );
+    }
+}
+
+#[test]
+fn billable_usage_should_require_valid_input_output_and_cache_facts() {
+    for (raw, expected) in [
+        (json!({}), false),
+        (json!({"input_tokens": 0}), false),
+        (json!({"input_tokens": 0, "output_tokens": 0}), true),
+        (
+            json!({"prompt_tokens": 8, "completion_tokens": 4, "cached_tokens": 2}),
+            true,
+        ),
+        (json!({"input_tokens": -1, "output_tokens": 1}), false),
+        (
+            json!({"input_tokens": "8", "prompt_tokens": 8, "output_tokens": 1}),
+            false,
+        ),
+        (json!({"input_tokens": 8, "output_tokens": 1.5}), false),
+        (
+            json!({"input_tokens": 8, "output_tokens": 1, "cached_tokens": 9}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 8, "output_tokens": 1, "cached_tokens": null}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 8, "output_tokens": 1, "input_tokens_details": {"cached_tokens": "2"}, "cached_tokens": 2}),
+            false,
+        ),
+        (
+            json!({"input_tokens": 8, "prompt_tokens": 9, "output_tokens": 1}),
+            true,
+        ),
+    ] {
+        let body = json!({"usage": raw});
+        let usage = extract_usage(&body).unwrap_or_default();
+        assert_eq!(billable_usage_is_complete(&body, usage), expected, "{body}");
+    }
+    let body = json!({"usage": {"input_tokens": 8, "output_tokens": 4}});
+    assert!(!billable_usage_is_complete(&body, TokenUsage::default()));
+    assert!(!billable_usage_is_complete(
+        &json!({}),
+        TokenUsage::default()
+    ));
+}
+
+#[test]
+fn extract_usage_should_read_codex_usage_shape() {
+    let body = json!({
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 5,
+            "input_tokens_details": {
+                "cached_tokens": 3,
+                "cache_write_tokens": 4
+            }
+        }
+    });
+
+    assert_eq!(
+        extract_usage(&body),
+        Some(TokenUsage {
+            input_tokens: 12,
+            output_tokens: 5,
+            cached_input_tokens: 3,
+            cache_write_input_tokens: 4,
+            reasoning_output_tokens: 0,
+            image_input_tokens: 0,
+            image_output_tokens: 0,
+            total_tokens: 17,
+        })
+    );
+}
+
+#[test]
+fn extract_usage_should_read_openai_usage_shape() {
+    let body = json!({
+        "usage": {
+            "prompt_tokens": 8,
+            "completion_tokens": 4,
+            "prompt_tokens_details": {"cached_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 3}
+        }
+    });
+
+    assert_eq!(
+        extract_usage(&body),
+        Some(TokenUsage {
+            input_tokens: 8,
+            output_tokens: 4,
+            cached_input_tokens: 2,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 3,
+            image_input_tokens: 0,
+            image_output_tokens: 0,
+            total_tokens: 12,
+        })
+    );
+}
+
+#[test]
+fn extract_usage_should_preserve_explicit_total_and_reasoning_tokens() {
+    let body = json!({
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 8,
+            "total_tokens": 20,
+            "output_tokens_details": {"reasoning_tokens": 6}
+        }
+    });
+
+    assert_eq!(
+        extract_usage(&body),
+        Some(TokenUsage {
+            input_tokens: 12,
+            output_tokens: 8,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 6,
+            image_input_tokens: 0,
+            image_output_tokens: 0,
+            total_tokens: 20,
+        })
+    );
+}
+
+#[test]
+fn extract_usage_should_keep_image_tool_usage_separate_from_model_total() {
+    let body = json!({
+        "usage": {
+            "input_tokens": 12,
+            "output_tokens": 5,
+            "total_tokens": 17
+        },
+        "tool_usage": {
+            "image_gen": {
+                "input_tokens": 31,
+                "output_tokens": 9
+            }
+        }
+    });
+
+    assert_eq!(
+        extract_usage(&body),
+        Some(TokenUsage {
+            input_tokens: 12,
+            output_tokens: 5,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            image_input_tokens: 31,
+            image_output_tokens: 9,
+            total_tokens: 17,
+        })
+    );
+}
+
+#[test]
+fn extract_usage_should_reject_objects_without_usage_fields() {
+    assert_eq!(extract_usage(&json!({"status": "completed"})), None);
+}
+
+#[test]
+fn extract_sse_usage_should_prefer_completed_response_usage() {
+    let body = concat!(
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    assert_eq!(
+        extract_sse_usage(body).expect("valid SSE"),
+        Some(TokenUsage {
+            input_tokens: 3,
+            output_tokens: 5,
+            cached_input_tokens: 1,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            image_input_tokens: 0,
+            image_output_tokens: 0,
+            total_tokens: 8,
+        })
+    );
+}
+
+#[test]
+fn extract_sse_usage_should_fall_back_to_last_visible_usage() {
+    let body = concat!(
+        "event: response.created\n",
+        "data: {\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n\n",
+        "event: response.output_text.done\n",
+        "data: {\"usage\":{\"input_tokens\":4,\"output_tokens\":6}}\n\n",
+    );
+
+    assert_eq!(
+        extract_sse_usage(body).expect("valid SSE"),
+        Some(TokenUsage {
+            input_tokens: 4,
+            output_tokens: 6,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            image_input_tokens: 0,
+            image_output_tokens: 0,
+            total_tokens: 10,
+        })
+    );
+}
+
+#[test]
+fn extract_sse_usage_should_preserve_completed_image_tool_usage() {
+    let body = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":3}},\"tool_usage\":{\"image_gen\":{\"input_tokens\":31,\"output_tokens\":9}}}}\n\n",
+    );
+
+    assert_eq!(
+        extract_sse_usage(body).expect("valid SSE"),
+        Some(TokenUsage {
+            input_tokens: 12,
+            output_tokens: 5,
+            cached_input_tokens: 3,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            image_input_tokens: 31,
+            image_output_tokens: 9,
+            total_tokens: 17,
+        })
+    );
+}
+
+#[test]
+fn extract_sse_usage_should_ignore_non_json_control_events() {
+    let body = concat!(
+        "event: ping\n",
+        "data: still-alive\n\n",
+        "event: response.completed\n",
+        "data: {\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n",
+    );
+
+    assert_eq!(
+        extract_sse_usage(body).expect("valid SSE"),
+        Some(TokenUsage {
+            input_tokens: 2,
+            output_tokens: 3,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            reasoning_output_tokens: 0,
+            image_input_tokens: 0,
+            image_output_tokens: 0,
+            total_tokens: 5,
+        })
+    );
+}
+
+#[test]
+fn retry_after_should_read_structured_response_delay() {
+    let body = json!({
+        "response": {"error": {"resets_in_seconds": 45}}
+    })
+    .to_string();
+
+    assert_eq!(retry_after_seconds_from_body(&body), Some(45));
+}
+
+#[test]
+fn retry_after_should_read_string_reset_delay() {
+    let body = json!({
+        "error": {"type": "usage_limit_reached", "resets_in_seconds": "46"}
+    })
+    .to_string();
+
+    assert_eq!(retry_after_seconds_from_body(&body), Some(46));
+}
+
+#[test]
+fn retry_after_should_read_string_reset_timestamp() {
+    let reset_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs()
+        + 60;
+    let body = json!({
+        "error": {"type": "usage_limit_reached", "resets_at": reset_at.to_string()}
+    })
+    .to_string();
+
+    let retry_after = retry_after_seconds_from_body(&body).expect("retry-after");
+    assert!((59..=60).contains(&retry_after));
+}
+
+#[test]
+fn retry_after_should_ignore_elapsed_reset_timestamps_and_keep_later_advice() {
+    for reset_at in [json!(1), json!("1")] {
+        let mut body = json!({
+            "error": {"type": "usage_limit_reached", "resets_at": reset_at}
+        });
+        assert_eq!(retry_after_seconds_from_body(&body.to_string()), None);
+
+        body["retry_after_seconds"] = json!(7);
+        assert_eq!(retry_after_seconds_from_body(&body.to_string()), Some(7));
+    }
+}
+
+#[test]
+fn retry_after_should_read_nested_error_delay() {
+    let body = json!({
+        "type": "error",
+        "error": {"retry_after_seconds": "19"}
+    })
+    .to_string();
+
+    assert_eq!(retry_after_seconds_from_body(&body), Some(19));
+}
+
+#[test]
+fn retry_after_should_ignore_header_arrays() {
+    let body = json!({
+        "type": "error",
+        "headers": {"Retry-After": ["37"]}
+    })
+    .to_string();
+
+    assert_eq!(retry_after_seconds_from_body(&body), None);
+}
+
+#[test]
+fn retry_after_should_round_fractional_seconds_up() {
+    let body = json!({
+        "response": {
+            "error": {
+                "code": "rate_limit_exceeded",
+                "message": "Rate limit reached. Please try again in 11.054s."
+            }
+        }
+    })
+    .to_string();
+
+    assert_eq!(retry_after_seconds_from_body(&body), Some(12));
+}
+
+#[test]
+fn retry_after_should_round_milliseconds_up_to_one_second() {
+    let body = json!({
+        "error": {
+            "code": "rate_limit_exceeded",
+            "message": "Rate limit reached. Please try again in 28ms."
+        }
+    })
+    .to_string();
+
+    assert_eq!(retry_after_seconds_from_body(&body), Some(1));
+}
+
+#[test]
+fn retry_after_should_not_infer_retry_from_unrelated_error_message() {
+    let body = json!({
+        "response": {
+            "error": {
+                "code": "upstream_transient_error",
+                "message": "Try again in 35 seconds."
+            }
+        }
+    })
+    .to_string();
+
+    assert_eq!(retry_after_seconds_from_body(&body), None);
+}
+
+#[test]
+fn no_more_retry_should_read_the_error_header_without_replacing_retry_after() {
+    for (body, expected) in [
+        (
+            json!({"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","headers":{"x-retry-metadata":"NO_MORE_RETRY","retry-after":"30","retry-after-ms":"30000"}}}),
+            true,
+        ),
+        (
+            json!({"type":"response.failed","response":{"error":{"headers":{"X-Retry-Metadata":" no_more_retry "}}}}),
+            true,
+        ),
+        (
+            json!({"type":"error","headers":{"x-retry-metadata":"NO_MORE_RETRY"},"error":{"code":"server_is_overloaded"}}),
+            true,
+        ),
+        (
+            json!({"error":{"headers":{"x-retry-metadata":"RETRY","retry-after":"30"}}}),
+            false,
+        ),
+        (
+            json!({"error":{"headers":{"x-retry-metadata":["NO_MORE_RETRY"]}}}),
+            false,
+        ),
+        (
+            json!({"error":{"code":"server_is_overloaded","headers":{"retry-after":"30"}}}),
+            false,
+        ),
+    ] {
+        assert_eq!(upstream_no_more_retry(&body), expected, "{body}");
+        assert_eq!(
+            upstream_no_more_retry_from_body(&body.to_string()),
+            expected,
+            "{body}"
+        );
+    }
+    assert!(!upstream_no_more_retry_from_body("not-json"));
+    assert_eq!(
+        retry_after_seconds_from_body(
+            &json!({"error":{"headers":{"x-retry-metadata":"NO_MORE_RETRY","retry-after":"30"}}})
+                .to_string()
+        ),
+        Some(30)
+    );
+}
+
+#[test]
+fn retry_after_should_reject_malformed_json() {
+    assert_eq!(retry_after_seconds_from_body("not-json"), None);
+}
+
+#[test]
+fn retry_after_should_prioritize_nested_headers_over_other_advice() {
+    for header in [json!(30), json!("30")] {
+        for wrap_response in [false, true] {
+            let error = json!({
+                "code": "rate_limit_exceeded", "message": "Try again in 2s",
+                "retry_after_seconds": 10, "headers": {"ReTrY-AfTeR": header}
+            });
+            let body = if wrap_response {
+                json!({"type":"response.failed", "response":{"error":error}, "headers":{"retry-after":"20"}})
+            } else {
+                json!({"type":"error", "error":error, "headers":{"retry-after":"20"}})
+            };
+            assert_eq!(retry_after_seconds_from_body(&body.to_string()), Some(30));
+        }
+    }
+}
+
+#[test]
+fn retry_after_should_validate_http_values_before_resolving_duplicates() {
+    for (headers, expected) in [
+        (json!("invalid"), 12),
+        (json!({"retry-after":"\n5\n"}), 12),
+        (json!({"retry-after":"\t5\t"}), 5),
+        (json!({"Retry-After":"5", "retry-after":"30"}), 30),
+        (json!({"Retry-After":"5", "retry-after":"invalid"}), 12),
+        (json!({"Retry-After":"5", "retry-after":"\n30\n"}), 5),
+        (json!({"Retry-After":"5", "retry-after":["30"]}), 5),
+        (json!({"Retry-After":"5", "retry-after":false}), 12),
+    ] {
+        for wrap_response in [false, true] {
+            let error = json!({"code":"rate_limit_exceeded", "headers":headers});
+            let body = if wrap_response {
+                json!({"type":"response.failed", "response":{"error":error}, "headers":{"retry-after":"12"}})
+            } else {
+                json!({"type":"error", "error":error, "headers":{"retry-after":"12"}})
+            };
+            assert_eq!(
+                retry_after_seconds_from_body(&body.to_string()),
+                Some(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn retry_after_should_keep_zero_advice_and_fall_back_only_for_invalid_headers() {
+    for (header, expected) in [
+        (json!("0"), 0),
+        (json!(0), 0),
+        (json!("Sun, 06 Nov 1994 08:49:37 GMT"), 0),
+        (json!("invalid"), 2),
+        (json!({"seconds":30}), 2),
+    ] {
+        let body = json!({"type":"response.failed", "response":{"error":{
+            "code":"rate_limit_exceeded", "message":"Try again in 2s",
+            "headers":{"Retry-After":header}
+        }}});
+        assert_eq!(
+            retry_after_seconds_from_body(&body.to_string()),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn parse_rate_limit_headers_should_extract_primary_and_secondary_windows() {
+    let headers = vec![
+        ("x-codex-primary-used-percent".to_owned(), "100".to_owned()),
+        ("x-codex-primary-window-minutes".to_owned(), "5".to_owned()),
+        (
+            "x-codex-primary-reset-at".to_owned(),
+            "1893456300".to_owned(),
+        ),
+        (
+            "x-codex-secondary-used-percent".to_owned(),
+            "42.5".to_owned(),
+        ),
+        (
+            "x-codex-secondary-window-minutes".to_owned(),
+            "10080".to_owned(),
+        ),
+    ];
+
+    let parsed = parse_rate_limit_headers(&headers).expect("rate-limit headers");
+    let details = parsed.limits.get("codex").expect("Codex limit");
+
+    assert_eq!(
+        (details.primary, details.secondary),
+        (
+            Some(RateLimitWindow {
+                used_percent: 100.0,
+                window_minutes: Some(5),
+                reset_at: Some(1_893_456_300),
+            }),
+            Some(RateLimitWindow {
+                used_percent: 42.5,
+                window_minutes: Some(10_080),
+                reset_at: None,
+            }),
+        )
+    );
+}
+
+#[test]
+fn parse_rate_limit_headers_should_preserve_dynamic_limit_and_account_metadata() {
+    let headers = vec![
+        ("x-codex-primary-used-percent".to_owned(), "95".to_owned()),
+        (
+            "x-codex-other-primary-used-percent".to_owned(),
+            "63.5".to_owned(),
+        ),
+        ("x-codex-active-limit".to_owned(), "codex-other".to_owned()),
+        (
+            "x-codex-other-limit-name".to_owned(),
+            "Codex Other".to_owned(),
+        ),
+        ("x-codex-credits-has-credits".to_owned(), "true".to_owned()),
+        ("x-codex-credits-unlimited".to_owned(), "false".to_owned()),
+        ("x-codex-credits-balance".to_owned(), "12.50".to_owned()),
+        ("x-codex-plan-type".to_owned(), "pro".to_owned()),
+    ];
+
+    let parsed = parse_rate_limit_headers(&headers).expect("rate-limit headers");
+    assert_eq!(
+        parsed.limits["codex"]
+            .primary
+            .expect("core window")
+            .used_percent,
+        95.0
+    );
+    let details = parsed.limits.get("codex_other").expect("dynamic limit");
+    let credits = parsed.credits.expect("credits");
+
+    assert_eq!(
+        (
+            parsed.active_limit.as_deref(),
+            details.limit_name.as_deref(),
+            credits.has_credits,
+            credits.unlimited,
+            credits.balance.as_deref(),
+            parsed.plan_type.as_deref(),
+        ),
+        (
+            Some("codex_other"),
+            Some("Codex Other"),
+            true,
+            false,
+            Some("12.50"),
+            Some("pro"),
+        )
+    );
+}
+
+#[test]
+fn image_headers_assign_generic_windows_to_the_active_limit_only_without_its_own_headers() {
+    let headers = [
+        ("x-codex-active-limit", "imagegen_premium"),
+        ("x-codex-primary-used-percent", "0"),
+        ("x-codex-primary-window-minutes", "1440"),
+        ("x-codex-primary-reset-at", "1900000000"),
+        ("x-codex-secondary-used-percent", "0"),
+        ("x-codex-secondary-window-minutes", "0"),
+        ("x-codex-secondary-reset-at", ""),
+    ]
+    .map(|(name, value)| (name.to_owned(), value.to_owned()));
+
+    let parsed = parse_image_rate_limit_headers(&headers).expect("image rate-limit headers");
+    let image = parsed.limits.get("imagegen_premium").expect("image limit");
+    assert_eq!(image.limit_id, "imagegen_premium");
+    assert_eq!(image.key_source, RateLimitKeySource::LimitId);
+    assert_eq!(
+        image.primary,
+        Some(RateLimitWindow {
+            used_percent: 0.0,
+            window_minutes: Some(1440),
+            reset_at: Some(1_900_000_000),
+        })
+    );
+    assert!(!parsed.limits.contains_key("codex"));
+    let mut headers = rate_limits_to_header_pairs(&parsed);
+    headers.push(("x-codex-primary-used-percent".to_owned(), "89".to_owned()));
+    let separate =
+        parse_image_rate_limit_headers(&headers).expect("separate image and core limits");
+    assert_eq!(separate.limits["imagegen_premium"], *image);
+    assert_eq!(separate.limits["codex"].primary.unwrap().used_percent, 89.0);
+}
+
+#[test]
+fn parse_rate_limit_headers_should_preserve_a_code_review_window() {
+    let headers = vec![
+        (
+            "x-codex-code-review-primary-used-percent".to_owned(),
+            "80".to_owned(),
+        ),
+        (
+            "x-codex-code-review-primary-reset-at".to_owned(),
+            "1893456600".to_owned(),
+        ),
+    ];
+
+    let parsed = parse_rate_limit_headers(&headers).expect("review rate limit");
+    let review = parsed
+        .limits
+        .get("codex_code_review")
+        .expect("review window");
+
+    assert_eq!(
+        review.primary,
+        Some(RateLimitWindow {
+            used_percent: 80.0,
+            window_minutes: None,
+            reset_at: Some(1_893_456_600),
+        })
+    );
+}
+
+#[test]
+fn parse_rate_limits_event_should_extract_websocket_metered_limit() {
+    let event = json!({
+        "type": "codex.rate_limits",
+        "plan_type": "team",
+        "metered_limit_name": "codex-other",
+        "limit_name": "Other requests",
+        "rate_limits": {
+            "allowed": false,
+            "limit_reached": true,
+            "primary": {
+                "used_percent": 33,
+                "window_minutes": 60,
+                "reset_at": 1893456300
+            }
+        },
+        "credits": {
+            "has_credits": true,
+            "unlimited": false,
+            "balance": "9.25"
+        },
+        "rate_limit_reached_type": "usage_limit_reached"
+    });
+
+    let parsed = parse_rate_limits_event(&event).expect("rate-limit event");
+    let details = parsed.limits.get("codex_other").expect("metered limit");
+
+    assert_eq!(
+        (
+            parsed.active_limit.as_deref(),
+            details.limit_name.as_deref(),
+            details.allowed,
+            details.limit_reached,
+            details.primary.expect("primary window").window_minutes,
+            parsed.plan_type.as_deref(),
+            parsed.credits.expect("credits").balance,
+            parsed.rate_limit_reached_type.as_deref(),
+        ),
+        (
+            Some("codex_other"),
+            Some("Other requests"),
+            Some(false),
+            Some(true),
+            Some(60),
+            Some("team"),
+            Some("9.25".to_owned()),
+            Some("usage_limit_reached"),
+        )
+    );
+}
+
+#[test]
+fn parse_rate_limits_event_should_preserve_name_keyed_additional_limit() {
+    let event = json!({
+        "type": "codex.rate_limits",
+        "plan_type": "pro",
+        "rate_limits": {
+            "allowed": true,
+            "limit_reached": false,
+            "primary": {
+                "used_percent": 0,
+                "window_minutes": 10080,
+                "reset_after_seconds": 354916,
+                "reset_at": 1787396838
+            },
+            "secondary": null
+        },
+        "additional_rate_limits": {
+            "GPT-5.3-Codex-Spark": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary": {
+                    "used_percent": 0,
+                    "window_minutes": 10080,
+                    "reset_after_seconds": 354916,
+                    "reset_at": 1787396838
+                },
+                "secondary": null
+            }
+        },
+        "credits": null
+    });
+
+    let parsed = parse_rate_limits_event(&event).expect("rate-limit event");
+    let details = parsed
+        .limits
+        .get("gpt_5.3_codex_spark")
+        .expect("name-keyed additional limit");
+
+    assert_eq!(parsed.active_limit.as_deref(), Some("gpt_5.3_codex_spark"));
+    assert_eq!(details.key_source, RateLimitKeySource::LimitName);
+    assert_eq!(details.limit_name.as_deref(), Some("GPT-5.3-Codex-Spark"));
+    assert_eq!(
+        details.primary,
+        Some(RateLimitWindow {
+            used_percent: 0.0,
+            window_minutes: Some(10080),
+            reset_at: Some(1787396838),
+        })
+    );
+    assert!(!parsed.limits.contains_key("codex"));
+}
+
+#[test]
+fn parse_rate_limits_event_should_reject_unrelated_event_type() {
+    for event in [
+        json!({
+            "type": "response.completed",
+            "rate_limits": {"primary": {"used_percent": 100}}
+        }),
+        json!({
+            "rate_limits": {"primary": {"used_percent": 100}}
+        }),
+    ] {
+        assert_eq!(parse_rate_limits_event(&event), None);
+    }
+}
+
+#[test]
+fn rate_limit_header_round_trip_should_preserve_wire_facts() {
+    let source = vec![
+        ("x-codex-primary-used-percent".to_owned(), "75".to_owned()),
+        (
+            "x-codex-primary-window-minutes".to_owned(),
+            "300".to_owned(),
+        ),
+        ("x-codex-active-limit".to_owned(), "codex".to_owned()),
+        ("x-codex-allowed".to_owned(), "false".to_owned()),
+        ("x-codex-limit-reached".to_owned(), "true".to_owned()),
+        ("x-codex-credits-has-credits".to_owned(), "true".to_owned()),
+        ("x-codex-credits-unlimited".to_owned(), "false".to_owned()),
+        ("x-codex-plan-type".to_owned(), "plus".to_owned()),
+        (
+            "x-codex-rate-limit-reached-type".to_owned(),
+            "usage_limit_reached".to_owned(),
+        ),
+    ];
+    let parsed = parse_rate_limit_headers(&source).expect("initial parse");
+    let encoded = rate_limits_to_header_pairs(&parsed);
+
+    assert_eq!(parse_rate_limit_headers(&encoded), Some(parsed));
+}
+
+#[test]
+fn rate_limit_header_filter_should_accept_only_supported_domain_headers() {
+    assert_eq!(
+        [
+            "retry-after",
+            "X-CoDeX-Primary-Used-Percent",
+            "x-codex-plan-type",
+            "content-type",
+            "x-request-id",
+        ]
+        .map(is_rate_limit_header_name),
+        [true, true, true, false, false]
+    );
+}
+
+#[test]
+fn codex_quota_header_filter_should_only_match_client_quota_signals() {
+    assert_eq!(
+        [
+            "X-CoDeX-Primary-Used-Percent",
+            "x-codex-code-review-primary-reset-at",
+            "x-codex-credits-balance",
+            "x-codex-primary-over-secondary-limit-percent",
+            "retry-after",
+            "x-ratelimit-remaining",
+            "x-codex-safety-buffering-enabled",
+            "x-codex-turn-state",
+        ]
+        .map(is_codex_quota_header_name),
+        [true, true, true, true, false, false, false, false]
+    );
+}

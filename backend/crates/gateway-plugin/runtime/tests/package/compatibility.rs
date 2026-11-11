@@ -1,0 +1,200 @@
+//! 验证宿主兼容性声明与静态制品检查的协议版本约束
+
+use gateway_admin::{
+    model::plugins::PluginHostCompatibility, ports::plugins::PluginPackageInspector as _,
+};
+use gateway_plugin_runtime::{PackageInspector, PackageLimits};
+use gateway_plugin_sdk::{Capability, Contributions, Stage};
+use sha2::{Digest as _, Sha256};
+
+#[test]
+fn host_compatibility_only_advertises_known_contracts() {
+    let compatibility: PluginHostCompatibility =
+        serde_json::from_str(include_str!("../../plugin-host-compatibility.json"))
+            .expect("compatibility JSON");
+    assert!(compatibility.is_valid());
+
+    assert_eq!(
+        compatibility.manifest_schema_versions,
+        [gateway_plugin_sdk::MANIFEST_VERSION]
+    );
+    assert_eq!(
+        compatibility.protocol_versions,
+        [gateway_plugin_sdk::PROTOCOL_VERSION]
+    );
+    for entry in &compatibility.capabilities {
+        let capability: Capability = serde_json::from_value(entry.capability.clone().into())
+            .expect("host capability is understood by the SDK");
+        assert_eq!(entry.capability, capability.identifier());
+        for version in &entry.versions {
+            assert!(
+                capability.contract_versions().contains(version),
+                "unknown contract {} v{version}",
+                entry.capability
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn package_inspector_returns_static_requirements_without_starting_the_plugin() {
+    let archive = crate::support::package_with_contributions(
+        b"not-an-executable",
+        Contributions::from([crate::support::contribution(
+            Capability::Middleware,
+            vec![Stage::Request],
+            vec!["openai".into()],
+            vec!["openai".into()],
+        )]),
+    );
+    let digest = hex::encode(Sha256::digest(archive.as_ref()));
+    let inspector = PackageInspector::new(PackageLimits::default(), semver::Version::new(3, 13, 0));
+
+    let requirements = inspector
+        .compatibility(archive, digest)
+        .await
+        .expect("compatibility requirements");
+    assert_eq!(requirements.host_version, ">=1.0.0, <2.0.0");
+    assert_eq!(
+        requirements.manifest_schema_version,
+        gateway_plugin_sdk::MANIFEST_VERSION
+    );
+    assert_eq!(
+        requirements.protocol_version,
+        gateway_plugin_sdk::PROTOCOL_VERSION
+    );
+    assert_eq!(requirements.capabilities, vec![("middleware".into(), 6)]);
+}
+
+#[tokio::test]
+async fn retired_contracts_remain_loadable_with_compatibility_warnings() {
+    for legacy in [false, true] {
+        let mut middleware = crate::support::contribution(
+            Capability::Middleware,
+            vec![Stage::Request],
+            vec!["openai".into()],
+            vec!["openai".into()],
+        );
+        let mut upstream = crate::support::contribution(
+            Capability::UpstreamAdapter,
+            vec![Stage::Upstream],
+            vec!["openai".into()],
+            vec!["openai".into()],
+        );
+        let mut catalog = crate::support::contribution(
+            Capability::ModelCatalog,
+            vec![Stage::Registration],
+            vec![],
+            vec![],
+        );
+        if legacy {
+            middleware.1.version = 3;
+            upstream.1.version = 1;
+            catalog.1.version = 1;
+        }
+        let archive = crate::support::package_with_contributions(
+            b"not-an-executable",
+            Contributions::from([middleware, upstream, catalog]),
+        );
+        let inspector =
+            PackageInspector::new(PackageLimits::default(), semver::Version::new(1, 0, 0));
+        let artifact = inspector.inspect(archive.clone(), None).await.unwrap();
+        let notices = inspector.api_deprecations(&artifact.metadata).unwrap();
+        assert!(notices.is_empty());
+        let warning = inspector
+            .compatibility_warning(archive, artifact.metadata.sha256)
+            .await
+            .unwrap();
+        if legacy {
+            let warning = warning.expect("retired contracts must remain visible");
+            assert!(warning.contains("middleware v3"));
+            assert!(warning.contains("upstream_adapter v1"));
+            assert!(warning.contains("model_catalog v1"));
+        } else {
+            assert!(warning.is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn host_and_capability_version_mismatches_are_warnings_only() {
+    let mut declaration = crate::support::contribution(
+        Capability::Middleware,
+        vec![Stage::Request],
+        vec!["openai".into()],
+        vec!["openai".into()],
+    );
+    declaration.1.version = 99;
+    let archive =
+        crate::support::package_with_contributions(b"fixture", Contributions::from([declaration]));
+    let inspector = PackageInspector::new(PackageLimits::default(), semver::Version::new(3, 19, 0));
+    let artifact = inspector.inspect(archive.clone(), None).await.unwrap();
+    let warning = inspector
+        .compatibility_warning(archive, artifact.metadata.sha256)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(warning.contains("middleware v99"));
+    assert!(warning.contains("3.19.0"));
+}
+
+#[tokio::test]
+async fn compatibility_warning_rejects_invalid_packages_and_digest_mismatches() {
+    let inspector = PackageInspector::new(PackageLimits::default(), semver::Version::new(1, 0, 0));
+    let archive = crate::support::package_with_contributions(b"fixture", Contributions::new());
+    let error = inspector
+        .compatibility_warning(archive, "0".repeat(64))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Invalid);
+    let invalid: std::sync::Arc<[u8]> = b"invalid archive".as_slice().into();
+    let digest = hex::encode(Sha256::digest(invalid.as_ref()));
+    let error = inspector
+        .compatibility_warning(invalid, digest)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Invalid);
+}
+
+#[tokio::test]
+async fn runtime_and_update_preflight_compare_only_declared_contracts() {
+    let host: PluginHostCompatibility =
+        serde_json::from_str(include_str!("../../plugin-host-compatibility.json")).unwrap();
+    for capability_version in [6, 3] {
+        let mut contribution =
+            crate::support::contribution(Capability::Middleware, vec![Stage::Http], vec![], vec![]);
+        contribution.1.version = capability_version;
+        let archive = crate::support::package_with_contributions(
+            b"not-an-executable",
+            Contributions::from([contribution]),
+        );
+        let digest = hex::encode(Sha256::digest(&archive));
+        for version in ["1.0.0", "3.0.0"] {
+            let version = semver::Version::parse(version).unwrap();
+            let inspector = PackageInspector::new(PackageLimits::default(), version.clone());
+            let requirements = inspector
+                .compatibility(archive.clone(), digest.clone())
+                .await
+                .unwrap();
+            let reasons = host.incompatibilities(&requirements, &version);
+            assert_eq!(
+                inspector
+                    .compatibility_warning(archive.clone(), digest.clone())
+                    .await
+                    .unwrap(),
+                (!reasons.is_empty()).then(|| reasons.join("，"))
+            );
+            assert_eq!(
+                reasons.len(),
+                usize::from(capability_version != 6) + usize::from(version.major != 1)
+            );
+            let mut unsupported = requirements;
+            unsupported.manifest_schema_version = 999;
+            unsupported.protocol_version = 999;
+            assert_eq!(
+                host.incompatibilities(&unsupported, &version).len(),
+                reasons.len() + 2
+            );
+        }
+    }
+}

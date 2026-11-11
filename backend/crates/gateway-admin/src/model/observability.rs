@@ -1,0 +1,1611 @@
+//! 用量、成本、健康与错误诊断的 UTC 语义事实
+
+use std::{num::NonZeroU16, str::FromStr};
+
+use chrono::{DateTime, TimeDelta, Utc};
+
+use super::AdminModelError;
+pub use super::analytics::{
+    AnalyticsMetadata, AnalyticsState, UsageBillingProjection, UsageInsightsObservation,
+    UsageProjectedCostPoint,
+};
+
+/// 观测记录查询的页大小，由 HTTP、管理用例和存储端口共同使用
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservabilityPageSize(NonZeroU16);
+
+impl ObservabilityPageSize {
+    pub const MAX: u16 = 100;
+
+    pub fn new(value: u16) -> Result<Self, AdminModelError> {
+        if value > Self::MAX {
+            return Err(AdminModelError::InvalidObservabilityPageSize(value));
+        }
+        NonZeroU16::new(value)
+            .map(Self)
+            .ok_or(AdminModelError::InvalidObservabilityPageSize(value))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0.get()
+    }
+}
+
+/// 页面筛选表达自然日范围，具体 UTC 边界由部署时区解析
+#[derive(Debug, Clone, Copy)]
+pub enum CalendarPeriod {
+    Today,
+    SevenDays,
+    ThirtyDays,
+}
+
+impl CalendarPeriod {
+    pub fn parse(value: &str) -> Result<Self, AdminModelError> {
+        match value {
+            "today" => Ok(Self::Today),
+            "7d" => Ok(Self::SevenDays),
+            "30d" => Ok(Self::ThirtyDays),
+            _ => Err(AdminModelError::InvalidTimeRange),
+        }
+    }
+}
+
+/// 外部观测查询的 UTC 时间范围
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TimeRange {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+impl TimeRange {
+    pub fn calendar_at(
+        period: CalendarPeriod,
+        end: DateTime<Utc>,
+        timezone: gateway_core::time::DeploymentTimeZone,
+    ) -> Result<Self, AdminModelError> {
+        let days = match period {
+            CalendarPeriod::Today => 0,
+            CalendarPeriod::SevenDays => 6,
+            CalendarPeriod::ThirtyDays => 29,
+        };
+        let start = timezone
+            .days_before(end, days)
+            .ok_or(AdminModelError::InvalidTimeRange)?;
+        // 自然日刚开始时允许空快照，不借用前一天或伪造未来终点
+        if start == end {
+            return Ok(Self { start, end });
+        }
+        Self::new(start, end)
+    }
+    /// 创建最长 366 天的正时间范围
+    ///
+    /// # Errors
+    ///
+    /// 范围为空、反向或超过 366 天时返回错误
+    pub fn new(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Self, AdminModelError> {
+        let duration = end.signed_duration_since(start);
+        if duration <= TimeDelta::zero() || duration > TimeDelta::days(366) {
+            return Err(AdminModelError::InvalidTimeRange);
+        }
+        Ok(Self { start, end })
+    }
+}
+
+/// 请求结果状态
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RequestOutcome {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Incomplete,
+    Other(OtherRequestOutcome),
+}
+
+/// 未知但有界的请求结果值；私有字段禁止绕过 [`RequestOutcome::new`] 构造
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OtherRequestOutcome(String);
+
+impl RequestOutcome {
+    pub const MAX_BYTES: usize = 256;
+
+    /// 从持久化或 wire 字符串创建可扩展结果语义
+    ///
+    /// # Errors
+    ///
+    /// 空值、超过 256 字节或含控制字符时返回
+    /// [`AdminModelError::InvalidRequestOutcome`]
+    pub fn new(value: impl Into<String>) -> Result<Self, AdminModelError> {
+        let value = value.into();
+        match value.as_str() {
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "incomplete" => Ok(Self::Incomplete),
+            _ if value.trim().is_empty()
+                || value.len() > Self::MAX_BYTES
+                || value.chars().any(char::is_control) =>
+            {
+                Err(AdminModelError::InvalidRequestOutcome)
+            }
+            _ => Ok(Self::Other(OtherRequestOutcome(value))),
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Incomplete => "incomplete",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+}
+
+impl OtherRequestOutcome {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 用量记录过滤条件
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct UsageFilter {
+    pub client_api_key_name: Option<String>,
+    pub provider_account_name: Option<String>,
+    pub client_api_key_ref: Option<String>,
+    pub request_id: Option<String>,
+    pub provider_account_ref: Option<String>,
+    pub operation: Option<String>,
+    pub provider_kind: Option<String>,
+    pub model: Option<String>,
+    pub model_contains: Option<String>,
+    pub outcome: Option<RequestOutcome>,
+    pub status_code: Option<u16>,
+    pub transport: Option<String>,
+    pub attempt_index: Option<u32>,
+    pub response_id: Option<String>,
+    pub upstream_request_id: Option<String>,
+    pub search: Option<String>,
+}
+
+/// 请求列表的结果筛选，不改变汇总和计量口径
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UsageRecordStatus {
+    #[default]
+    Success,
+    Error,
+    All,
+}
+
+/// 用量记录分页查询
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageQuery {
+    pub status: UsageRecordStatus,
+    pub range: TimeRange,
+    pub filter: UsageFilter,
+    pub current_page: u32,
+    pub page_size: ObservabilityPageSize,
+}
+
+/// Admin 确定概览的数量、趋势粒度及最近请求筛选，Store 只执行该选择
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DashboardQuery {
+    pub range: TimeRange,
+    pub yesterday_range: TimeRange,
+    pub granularity: Granularity,
+    pub account_limit: u16,
+    pub recent_request_limit: u16,
+    pub recent_request_filter: UsageFilter,
+}
+
+impl DashboardQuery {
+    pub fn new(
+        range: TimeRange,
+        timezone: gateway_core::time::DeploymentTimeZone,
+    ) -> Result<Self, AdminModelError> {
+        let yesterday_range = TimeRange::new(
+            timezone
+                .days_before(range.end, 1)
+                .ok_or(AdminModelError::InvalidTimeRange)?,
+            timezone
+                .day_start(range.end)
+                .ok_or(AdminModelError::InvalidTimeRange)?,
+        )?;
+        Ok(Self {
+            range,
+            yesterday_range,
+            granularity: Granularity::for_range(range),
+            account_limit: 4,
+            recent_request_limit: 10,
+            recent_request_filter: UsageFilter {
+                outcome: Some(RequestOutcome::Succeeded),
+                ..UsageFilter::default()
+            },
+        })
+    }
+}
+
+/// 运维错误过滤条件
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpsErrorFilter {
+    pub client_api_key_ref: Option<String>,
+    pub request_id: Option<String>,
+    pub provider_kind: Option<String>,
+    pub provider_account_ref: Option<String>,
+    pub operation: Option<String>,
+    pub model: Option<String>,
+    pub transport: Option<String>,
+    pub attempt_index: Option<u32>,
+    pub response_id: Option<String>,
+    pub upstream_request_id: Option<String>,
+    pub status_code: Option<u16>,
+    pub search: Option<String>,
+}
+
+/// 运维错误分页查询
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpsErrorQuery {
+    pub range: TimeRange,
+    pub filter: OpsErrorFilter,
+    pub current_page: u32,
+    pub page_size: ObservabilityPageSize,
+}
+
+/// 用量诊断维度
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticDimension {
+    Provider,
+    Model,
+    Account,
+    ApiKey,
+    Transport,
+    Failure,
+    Status,
+}
+
+/// `numeric(20,10)` 的非负规范金额
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DecimalAmount(String);
+
+impl DecimalAmount {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// 精确相加两个 `numeric(20,10)` 金额
+    #[must_use]
+    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+        Self::from_decimal(self.to_decimal()?.checked_add(other.to_decimal()?)?)
+    }
+
+    /// 将金额按非零请求数均分，保留最多十位小数
+    #[must_use]
+    pub fn checked_div_u64(&self, divisor: u64) -> Option<Self> {
+        Self::from_decimal(self.to_decimal()?.checked_div_u64(divisor)?)
+    }
+
+    fn to_decimal(&self) -> Option<gateway_core::metering::Decimal> {
+        self.0.parse().ok()
+    }
+
+    fn from_decimal(value: gateway_core::metering::Decimal) -> Option<Self> {
+        Self::from_str(&value.canonical()).ok()
+    }
+}
+
+impl FromStr for DecimalAmount {
+    type Err = AdminModelError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let input = input.trim();
+        let mut parts = input.split('.');
+        let whole = parts.next().unwrap_or_default();
+        let fraction = parts.next();
+        let valid = !whole.is_empty()
+            && whole.len() <= 10
+            && whole.bytes().all(|byte| byte.is_ascii_digit())
+            && parts.next().is_none()
+            && fraction.is_none_or(|value| {
+                !value.is_empty()
+                    && value.len() <= 10
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        if !valid {
+            return Err(AdminModelError::InvalidDecimalAmount);
+        }
+        let whole = whole.trim_start_matches('0');
+        let whole = if whole.is_empty() { "0" } else { whole };
+        let fraction = fraction.unwrap_or_default().trim_end_matches('0');
+        let canonical = if fraction.is_empty() {
+            whole.to_owned()
+        } else {
+            format!("{whole}.{fraction}")
+        };
+        Ok(Self(canonical))
+    }
+}
+
+impl std::fmt::Display for DecimalAmount {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// 单一币种的成本合计
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrencyCost {
+    pub currency: String,
+    pub amount: DecimalAmount,
+}
+
+/// PostgreSQL 连续百分位返回的非负有限毫秒值
+///
+/// 以 IEEE-754 bits 保存，既不丢失插值小数，也可安全实现 `Eq`
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PercentileMilliseconds(u64);
+
+impl PercentileMilliseconds {
+    /// 校验并保存一个毫秒百分位
+    ///
+    /// # Errors
+    ///
+    /// 非有限值或负值返回 [`AdminModelError::InvalidLatencyPercentile`]
+    pub fn new(value: f64) -> Result<Self, AdminModelError> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(AdminModelError::InvalidLatencyPercentile);
+        }
+        Ok(Self(value.to_bits()))
+    }
+
+    #[must_use]
+    pub const fn as_f64(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+}
+
+impl std::fmt::Debug for PercentileMilliseconds {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_f64().fmt(formatter)
+    }
+}
+
+/// 延迟分布的三个稳定百分位
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LatencyPercentiles {
+    pub p50_ms: Option<PercentileMilliseconds>,
+    pub p95_ms: Option<PercentileMilliseconds>,
+    pub p99_ms: Option<PercentileMilliseconds>,
+}
+
+/// Provider 价格规则计算所需的持久请求事实
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderBillingInput {
+    pub upstream_model_id: String,
+    pub service_tier: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub total: CurrencyCost,
+}
+
+/// 已完整交付且由 Provider 计算费用的持久请求事实
+///
+/// 控制面仅保留通用事实，具体 Provider 负责校验已持久化总额并恢复标准费用
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageCalculatedBillingFact {
+    pub breakdown: Option<CalculatedBillingBreakdown>,
+    pub bucket_start: DateTime<Utc>,
+    pub provider_kind: String,
+    pub upstream_model_id: String,
+    pub service_tier: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub total: CurrencyCost,
+}
+
+/// Provider 已确认的逐项费用与单价
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalculatedBillingBreakdown {
+    pub long_context_billing_applied: bool,
+    pub image: Option<ImageBillingBreakdown>,
+    pub custom_multiplier_bps: u32,
+    pub input_amount: CurrencyCost,
+    pub output_amount: CurrencyCost,
+    pub cache_read_amount: CurrencyCost,
+    pub cache_write_amount: CurrencyCost,
+    pub standard_amount: CurrencyCost,
+    pub total_amount: CurrencyCost,
+    pub input_price_per_million: CurrencyCost,
+    pub output_price_per_million: CurrencyCost,
+    pub cache_read_price_per_million: CurrencyCost,
+    pub cache_write_price_per_million: CurrencyCost,
+    pub service_tier: Option<String>,
+    pub multiplier_percent: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageBillingBreakdown {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub input_amount: CurrencyCost,
+    pub cache_read_amount: CurrencyCost,
+    pub input_price_per_million: CurrencyCost,
+    pub cache_read_price_per_million: CurrencyCost,
+}
+
+/// 单次请求的费用语义
+///
+/// Provider 上报费用或无法恢复逐项价格时保留总额；Provider 验证成功后升级为完整分解
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsageBilling {
+    Total { source: String, total: CurrencyCost },
+    Calculated(Box<CalculatedBillingBreakdown>),
+}
+
+/// 计费数据覆盖情况
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CostCoverage {
+    pub provider_reported_count: u64,
+    pub calculated_count: u64,
+    pub partial_count: u64,
+    pub unavailable_count: u64,
+    pub not_billable_count: u64,
+}
+
+impl CostCoverage {
+    /// Provider 直接上报或 Provider 规则完整计算的已知成本数
+    #[must_use]
+    pub fn known_count(&self) -> u64 {
+        self.provider_reported_count
+            .saturating_add(self.calculated_count)
+    }
+}
+
+/// 请求健康计数与服务成功率，调用方错误和取消不计入有效样本
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestHealth {
+    pub success_requests: u64,
+    pub failed_requests: u64,
+    pub cancelled_requests: u64,
+    pub incomplete_requests: u64,
+    pub caller_error_requests: u64,
+}
+
+impl RequestHealth {
+    #[must_use]
+    pub fn from_counts(
+        success: u64,
+        failed: u64,
+        cancelled: u64,
+        incomplete: u64,
+        caller_error: u64,
+    ) -> Self {
+        Self {
+            success_requests: success,
+            failed_requests: failed.saturating_sub(caller_error),
+            cancelled_requests: cancelled,
+            incomplete_requests: incomplete,
+            caller_error_requests: caller_error,
+        }
+    }
+
+    pub(crate) fn from_metrics(metrics: &RequestMetrics) -> Self {
+        Self::from_counts(
+            metrics.success_count,
+            metrics.failure_count,
+            metrics.cancelled_count,
+            metrics.incomplete_count,
+            metrics.caller_error_count,
+        )
+    }
+
+    /// 账号与健康时间线使用百分数，洞察接口使用 0 到 1 的比例
+    #[must_use]
+    pub fn success_rate(self) -> Option<f64> {
+        self.success_ratio().map(|ratio| ratio * 100.0)
+    }
+
+    pub(crate) fn success_ratio(self) -> Option<f64> {
+        let total = self.eligible_requests();
+        (total > 0).then(|| self.success_requests as f64 / total as f64)
+    }
+
+    pub(crate) fn error_ratio(self) -> Option<f64> {
+        let total = self.eligible_requests();
+        (total > 0).then(|| self.non_success_requests() as f64 / total as f64)
+    }
+
+    // 未完成保留交付终态，但上游失败、超时和进程中断都不能视为服务成功
+    pub(crate) fn non_success_requests(self) -> u64 {
+        self.failed_requests
+            .saturating_add(self.incomplete_requests)
+    }
+
+    pub(crate) fn eligible_requests(self) -> u64 {
+        self.success_requests
+            .saturating_add(self.non_success_requests())
+    }
+
+    pub(crate) fn add_metrics(&mut self, metrics: &RequestMetrics) {
+        self.add_window(Self::from_metrics(metrics));
+    }
+
+    pub(crate) fn add_window(&mut self, other: Self) {
+        self.success_requests = self.success_requests.saturating_add(other.success_requests);
+        self.failed_requests = self.failed_requests.saturating_add(other.failed_requests);
+        self.cancelled_requests = self
+            .cancelled_requests
+            .saturating_add(other.cancelled_requests);
+        self.incomplete_requests = self
+            .incomplete_requests
+            .saturating_add(other.incomplete_requests);
+        self.caller_error_requests = self
+            .caller_error_requests
+            .saturating_add(other.caller_error_requests);
+    }
+}
+
+/// 请求级聚合指标
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestMetrics {
+    pub request_count: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub cancelled_count: u64,
+    pub incomplete_count: u64,
+    pub caller_error_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+    pub first_token_latency_sum_ms: u64,
+    pub first_token_latency_count: u64,
+    pub latency_sum_ms: u64,
+    pub latency_count: u64,
+    pub min_latency_ms: Option<u64>,
+    pub max_latency_ms: Option<u64>,
+    pub latency_percentiles: LatencyPercentiles,
+    pub first_token_latency_percentiles: LatencyPercentiles,
+    pub admission_decision_count: u64,
+    pub admission_decision_percentiles: LatencyPercentiles,
+    pub account_selection_wait_count: u64,
+    pub account_selection_wait_percentiles: LatencyPercentiles,
+    pub output_throughput_p10: Option<u64>,
+    pub output_throughput_p50: Option<u64>,
+    pub output_throughput_p90: Option<u64>,
+    pub capacity_sample_count: u64,
+    pub capacity_utilization_avg_basis_points: Option<u64>,
+    pub capacity_utilization_p95_basis_points: Option<u64>,
+    pub cache_eligible_request_count: u64,
+    pub cache_hit_request_count: u64,
+}
+
+/// 摘要实际消费的请求计数与延迟样本，不承诺分位数或分布
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequestSummaryMetrics {
+    pub request_count: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub cancelled_count: u64,
+    pub incomplete_count: u64,
+    pub caller_error_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_write_input_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+    pub latency_sum_ms: u64,
+    pub latency_count: u64,
+}
+
+impl From<&RequestMetrics> for RequestSummaryMetrics {
+    fn from(metrics: &RequestMetrics) -> Self {
+        Self {
+            request_count: metrics.request_count,
+            success_count: metrics.success_count,
+            failure_count: metrics.failure_count,
+            cancelled_count: metrics.cancelled_count,
+            incomplete_count: metrics.incomplete_count,
+            caller_error_count: metrics.caller_error_count,
+            input_tokens: metrics.input_tokens,
+            output_tokens: metrics.output_tokens,
+            cached_input_tokens: metrics.cached_input_tokens,
+            cache_write_input_tokens: metrics.cache_write_input_tokens,
+            reasoning_output_tokens: metrics.reasoning_output_tokens,
+            total_tokens: metrics.total_tokens,
+            latency_sum_ms: metrics.latency_sum_ms,
+            latency_count: metrics.latency_count,
+        }
+    }
+}
+
+/// 上游 attempt 聚合指标
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttemptMetrics {
+    pub attempt_count: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub cancelled_count: u64,
+    pub incomplete_count: u64,
+    pub rate_limited_count: u64,
+    pub auth_failure_count: u64,
+    pub provider_5xx_count: u64,
+    pub cost_coverage: CostCoverage,
+    pub costs: Vec<CurrencyCost>,
+}
+
+/// 时间序列粒度
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Granularity {
+    FifteenMinutes,
+    Hour,
+    Day,
+}
+
+impl Granularity {
+    /// 管理趋势按范围选择粒度，费用校验与请求指标必须使用同一策略
+    #[must_use]
+    pub fn for_range(range: TimeRange) -> Self {
+        let seconds = range.end.signed_duration_since(range.start).num_seconds();
+        if seconds <= 2 * 24 * 60 * 60 {
+            Self::FifteenMinutes
+        } else if seconds <= 31 * 24 * 60 * 60 {
+            Self::Hour
+        } else {
+            Self::Day
+        }
+    }
+
+    #[must_use]
+    pub const fn seconds(self) -> i64 {
+        match self {
+            Self::FifteenMinutes => 15 * 60,
+            Self::Hour => 60 * 60,
+            Self::Day => 24 * 60 * 60,
+        }
+    }
+}
+
+/// 一段时间桶内的请求指标
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestMetricPoint {
+    pub bucket_start: DateTime<Utc>,
+    pub granularity: Granularity,
+    pub metrics: RequestMetrics,
+    pub cost_coverage: CostCoverage,
+    pub costs: Vec<CurrencyCost>,
+}
+
+/// 账号池的状态统计
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccountPoolMetrics {
+    pub total: u64,
+    pub normal: u64,
+    pub quota_paused: u64,
+    pub quota_exhausted: u64,
+    pub rate_limited: u64,
+    pub disabled: u64,
+    pub error: u64,
+}
+
+/// 账号在查询时间范围内的模型级用量事实
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountModelUsage {
+    pub model: String,
+    pub request_count: u64,
+    pub health: RequestHealth,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub image_input_tokens: Option<u64>,
+    pub image_output_tokens: Option<u64>,
+    pub image_request_count: u64,
+    pub image_request_failed_count: u64,
+    pub total_tokens: Option<u64>,
+    pub cost_coverage: CostCoverage,
+    pub costs: Vec<CurrencyCost>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// 账号在单小时窗口内的请求数
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRequestBucket {
+    pub bucket_start: DateTime<Utc>,
+    pub request_count: u64,
+}
+
+/// Dashboard 中一个账号的完整用量事实
+#[derive(Debug, Clone, PartialEq)]
+pub struct DashboardAccountUsage {
+    pub upstream: Option<super::upstream_info::ProviderUpstreamInfo>,
+    pub account_id: String,
+    pub provider_kind: String,
+    pub authentication_kind: String,
+    pub name: String,
+    pub email: Option<String>,
+    pub notes: Option<String>,
+    pub plan_type: Option<String>,
+    /// Admin 按 Provider 补齐的套餐展示名称
+    pub plan_type_display: Option<String>,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub image_input_tokens: Option<u64>,
+    pub image_output_tokens: Option<u64>,
+    pub image_request_count: u64,
+    pub image_request_failed_count: u64,
+    pub total_tokens: Option<u64>,
+    pub cost_coverage: CostCoverage,
+    pub costs: Vec<CurrencyCost>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub request_buckets: Vec<AccountRequestBucket>,
+    /// Provider 已持久化额度窗口投影出的代表性已用比例
+    ///
+    /// `None` 表示上游未提供可比较的百分比，不应伪造为零
+    pub quota_used_percent: Option<f64>,
+    /// Provider 返回的代表窗口；缺失时保留未知语义
+    pub quota_window: Option<super::provider_credentials::ProviderQuotaWindow>,
+    pub models: Vec<AccountModelUsage>,
+}
+
+/// Dashboard 当前账号池的可重建运行时槽位事实
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardRuntimeSlots {
+    /// 仅未设置本地覆盖的账号可能继承有效互联观测
+    pub inherited_versions: Vec<gateway_core::account::QuotaObservationVersion>,
+    /// 继承运行参数默认并发上限的可调度账号数
+    pub inherited_accounts: u64,
+    /// 已配置账号级并发上限的可调度账号槽位总数
+    pub overridden_slots: u64,
+    /// Redis 可用时的实时 in-flight 槽位总数；不可用时为 `None`
+    pub used_slots: Option<u64>,
+}
+
+/// 仪表盘卡片脚注展示的全历史累计
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DashboardTotals {
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub total_tokens: u64,
+    pub billing_usd: Option<DecimalAmount>,
+}
+
+/// 仪表盘所需的当前区间事实及全历史累计
+#[derive(Debug, Clone, PartialEq)]
+pub struct DashboardObservation {
+    pub analytics: AnalyticsMetadata,
+    pub range: TimeRange,
+    pub totals: DashboardTotals,
+    pub yesterday: RequestMetrics,
+    pub provider_accounts: AccountPoolMetrics,
+    pub runtime_slots: Option<DashboardRuntimeSlots>,
+    pub trend: Vec<RequestMetricPoint>,
+    pub account_usage: Vec<DashboardAccountUsage>,
+    pub recent_requests: Vec<UsageListRecord>,
+}
+
+/// 根据已记录事实推导的错误位置，不表示责任归属
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageErrorOrigin {
+    Proxy,
+    Upstream,
+    Connection,
+    Unknown,
+}
+
+impl UsageErrorOrigin {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proxy => "proxy",
+            Self::Upstream => "upstream",
+            Self::Connection => "connection",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// 使用记录表格的窄读模型
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageListRecord {
+    pub outcome: RequestOutcome,
+    /// 已保存的上游错误对象含非空字符串 code、type 或 message
+    pub has_upstream_error: bool,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub error_kind: Option<String>,
+    pub websocket_close_code: Option<u16>,
+    pub continuation_unavailable_reason: Option<String>,
+    pub upstream_connection_exit_reason: Option<String>,
+    pub recovered: bool,
+    pub client_status_code: Option<u16>,
+    pub upstream_status_code: Option<u16>,
+    pub client_api_key_name: Option<String>,
+    pub id: String,
+    pub endpoint: String,
+    pub client_transport: String,
+    pub requested_model_id: Option<String>,
+    pub provider_kind: Option<String>,
+    pub provider_account_ref: Option<String>,
+    pub provider_account_name: Option<String>,
+    pub provider_account_email: Option<String>,
+    /// 请求选号时冻结的账号备注，未采集时保持未知
+    pub provider_account_notes: Option<String>,
+    /// 请求选号时冻结的账号套餐
+    pub provider_account_plan_type: Option<String>,
+    pub provider_account_plan_type_display: Option<String>,
+    /// 查询时的互联识别结果，缺少当前摘要时为未知
+    pub provider_account_upstream_peer: Option<bool>,
+    pub provider_account_authentication_kind: Option<String>,
+    pub upstream_model_id: Option<String>,
+    pub upstream_transport: Option<String>,
+    pub service_tier: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub image_input_tokens: Option<u64>,
+    pub image_output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cost_source: String,
+    pub cost_amount: Option<DecimalAmount>,
+    pub cost_currency: Option<String>,
+    pub billing: Option<UsageBilling>,
+    pub transport_decision_wait_ms: Option<u64>,
+    pub connect_ms: Option<u64>,
+    pub headers_ms: Option<u64>,
+    pub first_event_ms: Option<u64>,
+    pub first_reasoning_ms: Option<u64>,
+    pub first_text_ms: Option<u64>,
+    pub first_token_ms: Option<u64>,
+    pub provider_processing_ms: Option<u64>,
+    pub upstream_response_ms: Option<u64>,
+    pub upstream_api_overhead_ms: Option<f64>,
+    pub upstream_engine_ms: Option<f64>,
+    pub latency_ms: Option<u64>,
+    pub admission_decision_ms: Option<u64>,
+    pub account_selection_wait_ms: Option<u64>,
+    pub capacity_used_slots: Option<u64>,
+    pub capacity_total_slots: Option<u64>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_preset: Option<String>,
+    pub subagent_kind: Option<String>,
+    pub compact: bool,
+    pub started_at: DateTime<Utc>,
+}
+
+/// 受控请求详情中的上游错误字段，不参与错误分类或普通日志输出
+#[derive(Clone, PartialEq)]
+pub struct UsageUpstreamError {
+    pub code: Option<String>,
+    pub error_type: Option<String>,
+    pub message: Option<String>,
+    pub param: Option<String>,
+    pub close_reason: Option<String>,
+    pub last_event_type: Option<String>,
+}
+
+impl std::fmt::Debug for UsageUpstreamError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("UsageUpstreamError(<restricted>)")
+    }
+}
+
+/// 一次完整模型请求的公共观测记录
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageRecord {
+    pub id: String,
+    pub client_api_key_ref: String,
+    pub config_revision: u64,
+    pub routing_scope: String,
+    pub routing_group_refs: Vec<String>,
+    pub routing_group_names_snapshot: Vec<String>,
+    pub protocol: String,
+    pub operation: String,
+    pub endpoint: String,
+    pub client_transport: String,
+    pub requested_model_id: Option<String>,
+    pub provider_kind: Option<String>,
+    pub provider_account_ref: Option<String>,
+    pub provider_account_name: Option<String>,
+    pub provider_account_email: Option<String>,
+    pub provider_account_authentication_kind: Option<String>,
+    pub upstream_model_id: Option<String>,
+    pub upstream_transport: Option<String>,
+    pub http_version: Option<String>,
+    pub websocket_pool: Option<String>,
+    pub service_tier: Option<String>,
+    /// Provider 已筛选的专有观测 JSON；管理领域保持不透明
+    pub provider_metadata_json: Option<String>,
+    pub attempt_count: u32,
+    pub upstream_send_state: String,
+    pub downstream_committed_at: Option<DateTime<Utc>>,
+    pub outcome: RequestOutcome,
+    pub client_status_code: Option<u16>,
+    pub upstream_status_code: Option<u16>,
+    pub client_response_id: Option<String>,
+    pub upstream_request_id: Option<String>,
+    pub upstream_response_id: Option<String>,
+    pub error_kind: Option<String>,
+    pub provider_error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub upstream_error: Option<UsageUpstreamError>,
+    pub websocket_close_code: Option<u16>,
+    pub continuation_unavailable_reason: Option<String>,
+    pub upstream_connection_exit_reason: Option<String>,
+    pub recovered: bool,
+    pub retry_after_ms: Option<u64>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub image_input_tokens: Option<u64>,
+    pub image_output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cost_source: String,
+    pub cost_amount: Option<DecimalAmount>,
+    pub cost_currency: Option<String>,
+    pub billing: Option<UsageBilling>,
+    pub transport_decision_wait_ms: Option<u64>,
+    pub connect_ms: Option<u64>,
+    pub headers_ms: Option<u64>,
+    pub first_event_ms: Option<u64>,
+    pub first_reasoning_ms: Option<u64>,
+    pub first_text_ms: Option<u64>,
+    pub first_token_ms: Option<u64>,
+    pub provider_processing_ms: Option<u64>,
+    pub upstream_response_ms: Option<u64>,
+    pub upstream_api_overhead_ms: Option<f64>,
+    pub upstream_engine_ms: Option<f64>,
+    pub latency_ms: Option<u64>,
+    pub admission_decision_ms: Option<u64>,
+    pub account_selection_wait_ms: Option<u64>,
+    pub capacity_used_slots: Option<u64>,
+    pub capacity_total_slots: Option<u64>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_preset: Option<String>,
+    pub request_kind: Option<String>,
+    pub subagent_kind: Option<String>,
+    pub compact: bool,
+    pub image_generation_requested: bool,
+    pub image_generation_succeeded: Option<bool>,
+    pub started_at: DateTime<Utc>,
+    pub deadline_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// 用量分页结果
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsagePage {
+    pub items: Vec<UsageListRecord>,
+    pub current_page: u32,
+    pub page_size: u16,
+    pub total: u64,
+}
+
+/// 请求中的一次上游尝试或运维事件
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageAttempt {
+    pub source: String,
+    pub id: String,
+    pub attempt_index: u32,
+    pub component: String,
+    pub operation: String,
+    pub provider_kind: Option<String>,
+    pub provider_account_ref: Option<String>,
+    pub provider_account_name: Option<String>,
+    pub provider_account_email: Option<String>,
+    pub provider_account_authentication_kind: Option<String>,
+    pub upstream_model_id: Option<String>,
+    pub upstream_transport: Option<String>,
+    pub upstream_send_state: Option<String>,
+    pub outcome: RequestOutcome,
+    /// 未记录尝试交付边界时保持未知，不以 false 代替
+    pub downstream_committed: Option<bool>,
+    pub status_code: Option<u16>,
+    pub provider_error_code: Option<String>,
+    pub failure_kind: Option<String>,
+    pub retry_after_ms: Option<u64>,
+    pub upstream_request_id: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub message: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cost_source: Option<String>,
+    pub cost_amount: Option<DecimalAmount>,
+    pub cost_currency: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// 一条请求及其保留的尝试与诊断轨迹
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageDetail {
+    pub trace: Option<serde_json::Value>,
+    pub related_requests: Vec<serde_json::Value>,
+    pub request: UsageRecord,
+    pub attempts: Vec<UsageAttempt>,
+}
+
+/// 一个 Provider 的聚合用量
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderObservation {
+    pub provider_kind: String,
+    pub request_count: u64,
+    pub attempt_count: u64,
+    pub failure_count: u64,
+    pub total_tokens: u64,
+}
+
+/// 用量总览
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageOverview {
+    pub analytics: AnalyticsMetadata,
+    pub range: TimeRange,
+    pub requests: RequestMetrics,
+    pub attempts: AttemptMetrics,
+    pub providers: Vec<ProviderObservation>,
+}
+
+/// 用量摘要所需的窄聚合事实
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSummaryObservation {
+    pub analytics: AnalyticsMetadata,
+    pub range: TimeRange,
+    pub requests: RequestSummaryMetrics,
+    pub attempts: AttemptMetrics,
+}
+
+/// 用量摘要的用例结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSummary {
+    pub observation: UsageSummaryObservation,
+    pub average_latency_ms: Option<u64>,
+}
+
+/// 诊断聚合结果，分母包含截取展示项之前的全部匹配请求
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiagnosticsObservation {
+    pub analytics: AnalyticsMetadata,
+    pub total_request_count: u64,
+    pub items: Vec<DiagnosticObservation>,
+}
+
+/// 单个诊断维度值的聚合结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticObservation {
+    pub key: String,
+    pub name: String,
+    pub account_provider_kind: Option<String>,
+    pub account_authentication_kind: Option<String>,
+    pub account_plan_type: Option<String>,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub attempt_count: u64,
+    pub total_tokens: u64,
+    pub average_latency_ms: Option<u64>,
+    pub latency_p95_ms: Option<u64>,
+    pub first_token_p95_ms: Option<u64>,
+    pub cancelled_count: u64,
+    pub incomplete_count: u64,
+    pub caller_error_count: u64,
+    pub retry_count: u64,
+    pub retried_request_count: u64,
+    pub cost_coverage: CostCoverage,
+    pub costs: Vec<CurrencyCost>,
+}
+
+/// 统一运维错误记录
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpsError {
+    pub client_api_key_name: Option<String>,
+    pub source: String,
+    pub event_id: String,
+    pub request_id: Option<String>,
+    pub attempt_index: Option<u32>,
+    pub client_api_key_ref: Option<String>,
+    pub component: String,
+    pub operation: String,
+    pub protocol: Option<String>,
+    pub client_transport: Option<String>,
+    pub requested_model_id: Option<String>,
+    pub service_tier: Option<String>,
+    pub endpoint: Option<String>,
+    pub provider_kind: Option<String>,
+    pub provider_account_ref: Option<String>,
+    pub provider_account_name: Option<String>,
+    pub provider_account_email: Option<String>,
+    pub provider_account_plan_type: Option<String>,
+    pub provider_account_plan_type_display: Option<String>,
+    pub provider_account_authentication_kind: Option<String>,
+    pub upstream_model_id: Option<String>,
+    pub upstream_transport: Option<String>,
+    pub failure_kind: String,
+    pub upstream_send_state: Option<String>,
+    pub client_status_code: Option<u16>,
+    pub upstream_status_code: Option<u16>,
+    pub provider_error_code: Option<String>,
+    pub client_response_id: Option<String>,
+    pub upstream_request_id: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub message: String,
+    pub error_details: Option<String>,
+    pub client_ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_preset: Option<String>,
+    pub request_kind: Option<String>,
+    pub subagent_kind: Option<String>,
+    pub compact: Option<bool>,
+    pub continuation_affinity_hash: Option<String>,
+    pub continuation_previous_response_id_hash: Option<String>,
+    pub continuation_unavailable_reason: Option<String>,
+    pub upstream_connection_id: Option<String>,
+    pub upstream_connection_exit_reason: Option<String>,
+    pub upstream_connection_age_ms: Option<u64>,
+    pub upstream_connection_idle_ms: Option<u64>,
+    pub recovery_request_id: Option<String>,
+    pub recovered_at: Option<DateTime<Utc>>,
+    pub recovery_attempt_count: u32,
+    pub recovery_retry_delay_ms: Option<u64>,
+    pub recovery_total_latency_ms: Option<u64>,
+    pub occurred_at: DateTime<Utc>,
+    pub stable_sort_id: String,
+}
+
+/// 运维错误分页结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpsErrorPage {
+    pub items: Vec<OpsError>,
+    pub current_page: u32,
+    pub page_size: u16,
+    pub total: u64,
+}
+
+/// 仪表盘趋势指标
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrendKind {
+    Usage,
+    Latency,
+    Errors,
+}
+
+/// 一个趋势桶的全部已计算语义，API 只负责时区标签与展示格式
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrendPoint {
+    pub bucket_start: DateTime<Utc>,
+    pub granularity: Granularity,
+    pub metrics: RequestMetrics,
+    pub error_count: u64,
+    pub average_latency_ms: Option<u64>,
+    pub average_first_token_latency_ms: Option<u64>,
+    pub cached_token_rate: f64,
+    pub cache_hit_request_rate: Option<f64>,
+    pub success_rate: Option<f64>,
+    pub cost_coverage: CostCoverage,
+    pub costs: Vec<CurrencyCost>,
+}
+
+/// 趋势的无格式化汇总
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrendSummary {
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub total_tokens: u64,
+    pub error_count: u64,
+    pub average_latency_ms: Option<u64>,
+    pub max_latency_ms: Option<u64>,
+    pub min_latency_ms: Option<u64>,
+    pub peak_first_token_p95_ms: Option<f64>,
+    pub peak_latency_p95_ms: Option<f64>,
+    pub minimum_output_throughput_p50: Option<u64>,
+    pub success_rate: Option<f64>,
+    pub cache_hit_request_rate: Option<f64>,
+    pub costs: Vec<CurrencyCost>,
+    pub cost_coverage: CostCoverage,
+}
+
+/// 趋势结果；API 再决定图表标签与数字格式
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trend {
+    pub analytics: AnalyticsMetadata,
+    pub kind: TrendKind,
+    pub points: Vec<TrendPoint>,
+    pub summary: TrendSummary,
+}
+
+/// 健康时间桶状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthStatus {
+    Future,
+    NoData,
+    Unavailable,
+    LowSample,
+    Unstable,
+    Stable,
+}
+
+/// 一个 15 分钟健康桶的语义结果
+#[derive(Debug, Clone, PartialEq)]
+pub struct HealthTimelinePoint {
+    pub bucket_start: DateTime<Utc>,
+    pub status: HealthStatus,
+    pub reliability_percent: Option<f64>,
+    pub success_requests: u64,
+    pub failed_requests: u64,
+    pub cancelled_requests: u64,
+    pub incomplete_requests: u64,
+    pub caller_error_requests: u64,
+}
+
+/// 中国自然日的固定 96 槽健康时间线
+#[derive(Debug, Clone, PartialEq)]
+pub struct HealthTimeline {
+    pub reliability_percent: Option<f64>,
+    pub status: HealthStatus,
+    pub success_requests: u64,
+    pub failed_requests: u64,
+    pub cancelled_requests: u64,
+    pub incomplete_requests: u64,
+    pub caller_error_requests: u64,
+    pub points: Vec<HealthTimelinePoint>,
+}
+
+/// Dashboard 请求画像的目标平台
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardWireTarget {
+    pub os_type: String,
+    pub os_version: String,
+    pub arch: String,
+    pub terminal: String,
+}
+
+/// Desktop 发布检查状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopReleaseStatus {
+    Unchecked,
+    Current,
+    UpdateAvailable,
+    Failed,
+}
+
+/// 与请求画像分离的 Desktop 发布检查事实
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardDesktopRelease {
+    pub status: DesktopReleaseStatus,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub latest_version: Option<String>,
+    pub latest_build: Option<String>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub minimum_system_version: Option<String>,
+    pub hardware_requirements: Option<String>,
+    pub download_url: Option<String>,
+    pub download_size: Option<u64>,
+    pub signature_present: Option<bool>,
+    pub error: Option<String>,
+}
+
+/// Provider 拥有并实际用于上游请求的身份画像快照
+///
+/// `attributes` 承载 Provider 特有的可观测字段；公共控制面不解释其语义
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardWireProfile {
+    pub provider: String,
+    pub product: String,
+    pub version: String,
+    pub build: Option<String>,
+    pub target: DashboardWireTarget,
+    pub user_agent: String,
+    pub attributes: Vec<DashboardWireAttribute>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub release: Option<DashboardDesktopRelease>,
+}
+
+/// Provider 画像的差异字段，以稳定标识传递语义，名称由前端本地化
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardWireAttribute {
+    pub key: String,
+    pub value: String,
+}
+
+/// 当前账号池的并发调度容量
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardCapacity {
+    pub max_concurrent_per_account: u64,
+    /// `None` 表示可用账号池不限制并发
+    pub total_slots: Option<u64>,
+    pub used_slots: Option<u64>,
+    pub available_slots: Option<u64>,
+}
+
+/// Dashboard 某个自然日区间内的卡片计数
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DashboardPeriodMetrics {
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_token_rate: f64,
+    pub observed_cached_token_rate: Option<f64>,
+}
+
+/// 仪表盘聚合结果
+#[derive(Debug, Clone, PartialEq)]
+pub struct DashboardResult {
+    pub observation: DashboardObservation,
+    pub today: DashboardPeriodMetrics,
+    pub yesterday: DashboardPeriodMetrics,
+    pub total_billing_usd: Option<DecimalAmount>,
+    pub total_cached_token_rate: f64,
+    pub average_first_token_latency_ms: Option<u64>,
+    pub trend: Trend,
+    pub health_timeline: HealthTimeline,
+    pub wire_profiles: Vec<DashboardWireProfile>,
+    pub capacity: DashboardCapacity,
+    pub rotation_strategy: super::settings::RotationStrategy,
+}
+
+/// 洞察健康时间点的语义结果
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsightsHealthPoint {
+    pub total_requests: u64,
+    pub bucket_start: DateTime<Utc>,
+    pub success_requests: u64,
+    pub failed_requests: u64,
+    pub cancelled_requests: u64,
+    pub incomplete_requests: u64,
+    pub caller_error_requests: u64,
+    pub error_rate: Option<f64>,
+}
+
+/// 洞察健康汇总；失败数已排除调用方错误
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsightsHealth {
+    pub total_requests: u64,
+    pub success_requests: u64,
+    pub failed_requests: u64,
+    pub cancelled_requests: u64,
+    pub incomplete_requests: u64,
+    pub caller_error_requests: u64,
+    pub success_rate: Option<f64>,
+    pub completion_rate: f64,
+    pub points: Vec<UsageInsightsHealthPoint>,
+}
+
+/// 一个时间桶内按重叠时长加权的逻辑请求并发
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageConcurrencyPoint {
+    pub bucket_start: DateTime<Utc>,
+    pub average_concurrency: f64,
+    pub peak_concurrency: u64,
+}
+
+/// 请求并发与调度等待的负载指标
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsightsLoad {
+    pub average_concurrency: f64,
+    pub peak_concurrency: u64,
+    pub admission_decision_p95_ms: Option<PercentileMilliseconds>,
+    pub account_selection_wait_p95_ms: Option<PercentileMilliseconds>,
+}
+
+/// 洞察性能时间点
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsightsPerformancePoint {
+    pub bucket_start: DateTime<Utc>,
+    pub latency_percentiles: LatencyPercentiles,
+    pub first_token_latency_percentiles: LatencyPercentiles,
+    pub output_throughput_p10: Option<u64>,
+    pub output_throughput_p50: Option<u64>,
+    pub output_throughput_p90: Option<u64>,
+    pub load: UsageInsightsLoad,
+}
+
+/// 洞察性能汇总
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsightsPerformance {
+    pub latency_percentiles: LatencyPercentiles,
+    pub first_token_latency_percentiles: LatencyPercentiles,
+    pub output_throughput_p10: Option<u64>,
+    pub output_throughput_p50: Option<u64>,
+    pub output_throughput_p90: Option<u64>,
+    pub load: UsageInsightsLoad,
+    pub points: Vec<UsageInsightsPerformancePoint>,
+}
+
+/// 洞察成本时间点
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsightsCostPoint {
+    pub bucket_start: DateTime<Utc>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost: Option<DecimalAmount>,
+    pub standard_cost: Option<DecimalAmount>,
+    pub no_cache_cost: Option<DecimalAmount>,
+    pub cache_savings: Option<DecimalAmount>,
+    pub cached_token_rate: f64,
+    pub cache_hit_request_rate: Option<f64>,
+}
+
+/// 洞察成本汇总
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsightsCost {
+    pub estimated_cost: Option<DecimalAmount>,
+    pub standard_cost: Option<DecimalAmount>,
+    pub no_cache_cost: Option<DecimalAmount>,
+    pub cache_savings: Option<DecimalAmount>,
+    pub tier_premium: Option<DecimalAmount>,
+    pub cost_per_request: Option<DecimalAmount>,
+    pub cost_per_successful_request: Option<DecimalAmount>,
+    pub tokens_per_request: f64,
+    pub cached_token_rate: f64,
+    pub cache_hit_request_rate: Option<f64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub total_tokens: u64,
+    pub points: Vec<UsageInsightsCostPoint>,
+    pub costs: Vec<CurrencyCost>,
+    pub coverage: CostCoverage,
+}
+
+/// 用量洞察的完整用例结果；API 只负责标签、时区与字符串格式化
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsights {
+    pub analytics: AnalyticsMetadata,
+    pub granularity: Granularity,
+    pub health: UsageInsightsHealth,
+    pub performance: UsageInsightsPerformance,
+    pub cost: UsageInsightsCost,
+    pub attempts: AttemptMetrics,
+    pub providers: Vec<ProviderObservation>,
+}
+
+/// 单次洞察查询所需的指标，持久化层据此选择计数、分布与费用状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UsageInsightMetric {
+    Health,
+    Latency,
+    FirstToken,
+    Throughput,
+    Load,
+    Cost,
+    Savings,
+    Cache,
+}
+
+/// 单个指标的时间点，活动计数与指标共用读取快照
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageMetricPoint<T> {
+    pub bucket_start: DateTime<Utc>,
+    pub request_count: u64,
+    pub value: T,
+}
+
+/// 各指标复用时间序列形状，汇总与时间点保留各自的类型
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageMetricSeries<S, P = S> {
+    pub summary: S,
+    pub points: Vec<UsageMetricPoint<P>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageThroughputPercentiles {
+    pub p10: Option<u64>,
+    pub p50: Option<u64>,
+    pub p90: Option<u64>,
+}
+
+/// 成本卡片各视图共同显示的汇总
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageCostSummary {
+    pub estimated_cost: Option<DecimalAmount>,
+    pub cache_savings: Option<DecimalAmount>,
+    pub tier_premium: Option<DecimalAmount>,
+    pub cost_per_successful_request: Option<DecimalAmount>,
+    pub coverage: CostCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageCostComparison {
+    pub estimated_cost: Option<DecimalAmount>,
+    pub no_cache_cost: Option<DecimalAmount>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageCacheEfficiency {
+    pub input_tokens: u64,
+    pub cached_token_rate: f64,
+    pub cache_hit_request_rate: Option<f64>,
+}
+
+/// 只发布本次请求的指标，未查询的值不伪装成零
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsageInsightData {
+    Health(UsageInsightsHealth),
+    Latency(UsageMetricSeries<LatencyPercentiles>),
+    FirstToken(UsageMetricSeries<LatencyPercentiles>),
+    Throughput(UsageMetricSeries<UsageThroughputPercentiles>),
+    Load(UsageMetricSeries<UsageInsightsLoad>),
+    Cost(UsageMetricSeries<UsageCostSummary, UsageCostComparison>),
+    Savings(UsageMetricSeries<UsageCostSummary, Option<DecimalAmount>>),
+    Cache(UsageMetricSeries<UsageCostSummary, UsageCacheEfficiency>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageInsight {
+    pub analytics: AnalyticsMetadata,
+    pub granularity: Granularity,
+    pub data: UsageInsightData,
+}
+
+/// 已完成分母计算的诊断项
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiagnosticsItem {
+    pub key: String,
+    pub name: String,
+    pub account_authentication_kind: Option<String>,
+    pub account_plan_type: Option<String>,
+    /// 仅账号维度补充当前互联识别结果
+    pub account_upstream_peer: Option<bool>,
+    pub account_plan_type_display: Option<String>,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub error_rate: Option<f64>,
+    pub request_share: f64,
+    pub average_latency_ms: Option<u64>,
+    pub latency_p95_ms: Option<u64>,
+    pub first_token_p95_ms: Option<u64>,
+    pub non_completion_count: u64,
+    pub non_completion_rate: f64,
+    pub retry_count: u64,
+    pub retry_rate: f64,
+    pub estimated_cost: Option<DecimalAmount>,
+    pub attempt_count: u64,
+    pub total_tokens: u64,
+}
+
+/// 诊断结果
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiagnosticsResult {
+    pub analytics: AnalyticsMetadata,
+    pub dimension: DiagnosticDimension,
+    pub items: Vec<DiagnosticsItem>,
+}

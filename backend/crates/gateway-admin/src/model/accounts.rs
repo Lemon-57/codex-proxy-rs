@@ -1,0 +1,352 @@
+//! 多 Provider 账号目录与连接测试的公共事实
+
+use std::{collections::BTreeMap, pin::Pin};
+
+use chrono::{DateTime, Utc};
+use futures::Stream;
+
+use gateway_core::{
+    engine::probe::AccountProbeErrorSource, error::GatewayErrorKind, routing::ProviderKind,
+    upstream::UpstreamSendState,
+};
+
+use super::{PageSize, Revision, account_groups::AccountGroupRef, observability::TimeRange};
+
+pub use gateway_core::account::{
+    AccountConcurrencyLimit, AccountErrorReason, AccountStatus, AccountStatusFacts,
+    AccountStatusProjection, AccountWeight, CredentialState, QuotaAccessState, QuotaEvidence,
+    QuotaState, resolve_account_status,
+};
+
+/// 账号可用的管理操作
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderAccountCapabilities {
+    pub quota_limits_supported: bool,
+    pub quota_credits: bool,
+    pub quota: bool,
+    pub quota_refresh: bool,
+    pub profile: bool,
+    pub subscription: bool,
+    pub avatar: bool,
+    pub reset_credits: bool,
+    pub consume_reset_credit: bool,
+}
+
+/// 导入时应用的账号设置；名称只覆盖单账号导入，其余设置统一应用
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountImportSettings {
+    pub name: Option<String>,
+    pub notes: Option<String>,
+    pub enabled: bool,
+    pub concurrency_limit: Option<AccountConcurrencyLimit>,
+    pub weight: AccountWeight,
+    pub model_access: Option<gateway_core::account::AccountModelAccess>,
+    pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
+}
+
+/// 账号列表排序字段
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSortField {
+    Email,
+    Status,
+    PlanType,
+    Usage,
+    LastUsedAt,
+    ExpiresAt,
+}
+
+/// 账号列表排序方向
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+/// 一组完整的账号排序规则
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountSort {
+    pub field: AccountSortField,
+    pub direction: SortDirection,
+}
+
+/// 账号列表的存储查询条件
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountListQuery {
+    pub plan_type: Option<String>,
+    pub supplier: Option<String>,
+    pub page: u32,
+    pub page_size: PageSize,
+    pub provider_kind: Option<ProviderKind>,
+    pub group_filter: Option<AccountGroupFilter>,
+    pub search: Option<String>,
+    pub status: Option<AccountStatus>,
+    pub sort: Option<AccountSort>,
+}
+
+/// Admin query service 从运行态存储取得的当前账号冷却快照
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountRuntimeSnapshot {
+    pub protection_rules: BTreeMap<String, Vec<gateway_core::account::AccountProtectionMatch>>,
+    pub cooldown: BTreeMap<String, gateway_core::account::AccountCooldown>,
+    /// `None` 表示实时 lease 存储不可用；`Some` 中未出现的账号当前使用量为零
+    pub in_flight: Option<BTreeMap<String, u64>>,
+}
+
+/// 恢复任务读取的冻结快照；generation 将异步结果绑定到本次冻结
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountFreeze {
+    pub credential_revision: Revision,
+    pub until: DateTime<Utc>,
+    pub generation: String,
+    pub requires_probe: bool,
+    pub duration_seconds: Option<u64>,
+    pub probe_model: Option<String>,
+    pub protection_rules: Vec<gateway_core::account::AccountProtectionMatch>,
+}
+
+/// 可选的账号分组成员筛选条件
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountGroupFilter {
+    Group(gateway_core::routing::AccountGroupId),
+    Ungrouped,
+}
+
+/// 账号公共存储投影；Provider 专属字段不进入此结构
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRecord {
+    pub quota_paused: bool,
+    pub quota_limits: gateway_core::account::AccountQuotaLimits,
+    pub auto_use_quota_credits: bool,
+    pub supplier: Option<String>,
+    pub manual_starts_at: Option<DateTime<Utc>>,
+    pub manual_expires_at: Option<DateTime<Utc>>,
+    pub id: String,
+    pub provider_kind: ProviderKind,
+    pub groups: Vec<AccountGroupRef>,
+    pub name: String,
+    pub notes: Option<String>,
+    pub email: Option<String>,
+    pub upstream_user_id: Option<String>,
+    pub upstream_account_id: Option<String>,
+    pub plan_type: Option<String>,
+    pub authentication_kind: String,
+    pub credential_revision: Revision,
+    pub has_refresh_token: bool,
+    pub access_token_expires_at: Option<DateTime<Utc>>,
+    pub next_refresh_at: Option<DateTime<Utc>>,
+    pub enabled: bool,
+    pub concurrency_limit: Option<AccountConcurrencyLimit>,
+    pub weight: AccountWeight,
+    pub model_access: gateway_core::account::AccountModelAccess,
+    pub outbound_proxy_id: Option<String>,
+    pub outbound_proxy: Option<gateway_core::account::OutboundProxy>,
+    pub outbound_proxy_enabled: bool,
+    pub credential_state: CredentialState,
+    pub credential_observed_at: DateTime<Utc>,
+    pub quota: QuotaState,
+    pub last_error_reason: Option<AccountErrorReason>,
+    pub last_error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl AccountRecord {
+    /// 配置保留绑定，执行请求时禁用代理按直连处理
+    #[must_use]
+    pub fn effective_outbound_proxy(&self) -> Option<&gateway_core::account::OutboundProxy> {
+        self.outbound_proxy
+            .as_ref()
+            .filter(|_| self.outbound_proxy_enabled)
+    }
+}
+
+pub use super::observability::{
+    AccountModelUsage, AccountPoolMetrics as AccountSummary, AccountRequestBucket,
+    CurrencyCost as AccountCost,
+};
+
+/// 账号历史用量聚合
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountUsage {
+    pub account_id: String,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub image_input_tokens: Option<u64>,
+    pub image_output_tokens: Option<u64>,
+    pub image_request_count: u64,
+    pub image_request_failed_count: u64,
+    pub total_tokens: Option<u64>,
+    pub cost_coverage: super::observability::CostCoverage,
+    pub costs: Vec<AccountCost>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub request_buckets: Vec<AccountRequestBucket>,
+    pub models: Vec<AccountModelUsage>,
+}
+
+/// 某个账号在调用方指定时间窗口内的本地用量查询
+///
+/// `key` 只用于把聚合结果关联回调用方的窗口，不承载 Provider 私有语义
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountUsageWindowQuery {
+    pub account_id: String,
+    pub key: String,
+    pub range: TimeRange,
+}
+
+/// 一个账号时间窗口用量查询的结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountUsageWindowResult {
+    pub account_id: String,
+    pub key: String,
+    pub usage: AccountUsage,
+}
+
+/// 账号列表页所需的完整存储事实
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountPage {
+    pub config_revision: Revision,
+    pub items: Vec<AccountPageItem>,
+    pub total: u64,
+    pub summary: AccountSummary,
+}
+
+/// 同一状态快照下的账号事实与唯一状态投影
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountPageItem {
+    pub protection_rules: Vec<gateway_core::account::AccountProtectionMatch>,
+    pub account: AccountRecord,
+    pub projection: AccountStatusProjection,
+    pub capacity: AccountCapacity,
+}
+
+/// 网关配置的账号并发上限与查询时的占用，不包含排队请求或上游隐藏限制
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountCapacity {
+    /// 实时租约读取失败时为 `None`，不能当作空闲
+    pub used_slots: Option<u64>,
+    /// 应用账号覆盖或继承默认值后的普通并发上限；`None` 表示不限
+    pub total_slots: Option<u64>,
+}
+
+/// 账号可编辑事实的一次性替换命令
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateAccount {
+    pub supplier: Option<String>,
+    pub manual_starts_at: Option<Option<DateTime<Utc>>>,
+    pub manual_expires_at: Option<Option<DateTime<Utc>>>,
+    pub account_id: String,
+    /// 缺省保留名称，空字符串清除名称并使用邮箱展示
+    pub name: Option<String>,
+    /// 缺省保留备注；空字符串清空备注
+    pub notes: Option<String>,
+    pub enabled: bool,
+    pub concurrency_limit: Option<AccountConcurrencyLimit>,
+    pub weight: AccountWeight,
+    pub model_access: Option<gateway_core::account::AccountModelAccess>,
+    pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
+    pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
+}
+
+/// 账号更新结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountUpdateResult {
+    pub config_revision: Revision,
+    pub account_id: gateway_core::account::ProviderAccountId,
+}
+
+/// 仅修改显式字段的批量账号设置命令
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchUpdateAccounts {
+    pub quota_limits: Option<gateway_core::account::AccountQuotaLimits>,
+    pub auto_use_quota_credits: Option<bool>,
+    pub account_ids: Vec<String>,
+    pub enabled: Option<bool>,
+    pub concurrency_limit: Option<Option<AccountConcurrencyLimit>>,
+    pub weight: Option<AccountWeight>,
+    pub model_access: Option<gateway_core::account::AccountModelAccess>,
+    pub group_ids: Option<Vec<gateway_core::routing::AccountGroupId>>,
+    pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
+}
+
+/// 已按拟提交策略重算的账号暂停结果，以快照版本防止旧判断覆盖新观测
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedQuotaPause {
+    pub observed_at: Option<DateTime<Utc>>,
+    pub revision: Revision,
+    pub paused: bool,
+}
+
+pub type PreparedQuotaPauses = std::collections::BTreeMap<String, PreparedQuotaPause>;
+
+/// 批量账号更新结果
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountsUpdateResult {
+    pub config_revision: Revision,
+    pub account_ids: Vec<gateway_core::account::ProviderAccountId>,
+}
+
+/// 账号批量删除命令
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteAccounts {
+    pub account_ids: Vec<String>,
+}
+
+/// 账号连接测试的语义事件
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountConnectionTestEvent {
+    Started {
+        model: String,
+    },
+    Request {
+        model: String,
+        input_text: String,
+        stream: bool,
+        store: bool,
+    },
+    Content {
+        text: String,
+    },
+    Completed,
+    Failed {
+        source: AccountProbeErrorSource,
+        gateway_error_code: GatewayErrorKind,
+        proxy_hint: Option<gateway_core::error::ProxyConnectionHint>,
+        send_state: Option<UpstreamSendState>,
+        message: String,
+        provider_error_code: Option<String>,
+        provider_error_type: Option<String>,
+        upstream_status: Option<u16>,
+        upstream_content_type: Option<String>,
+        upstream_body: Option<String>,
+    },
+}
+
+/// 每次连接测试独占的有限事件流
+pub type AccountConnectionTestEventStream =
+    Pin<Box<dyn Stream<Item = AccountConnectionTestEvent> + Send + 'static>>;
+
+/// 单个账号普通并发池的实时租约明细，不关联请求历史
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountConcurrencyEntry {
+    pub lease_id: String,
+    pub request_id: Option<String>,
+    pub client_key_id: Option<String>,
+    pub client_key_name: Option<String>,
+    pub model: Option<String>,
+    pub client_ip: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub acquired_at: Option<DateTime<Utc>>,
+}
+
+/// 同一次 Redis 读取中的当前占用数和分页明细
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountConcurrencyPage {
+    pub entries: Vec<AccountConcurrencyEntry>,
+    pub total: u64,
+    pub observed_at: DateTime<Utc>,
+}

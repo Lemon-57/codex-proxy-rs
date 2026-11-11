@@ -1,0 +1,732 @@
+//! 账号管理路由与 HTTP handler 编排
+
+use gateway_core::engine::probe::AccountProbeTarget;
+
+use crate::auth::SessionState;
+
+use super::*;
+
+/// 构造统一账号管理路由
+pub fn router<S>() -> Router<S>
+where
+    S: SessionState + Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .merge(super::import_tasks::router::<S>())
+        .route("/api/admin/accounts", get(list_accounts::<S>))
+        .route(
+            "/api/admin/accounts/diagnostic",
+            post(diagnose_account::<S>),
+        )
+        .route(
+            "/api/admin/accounts/concurrency",
+            get(super::concurrency::list::<S>),
+        )
+        .route("/api/admin/accounts/detail", get(account_detail::<S>))
+        .route("/api/admin/accounts/export", get(export_accounts::<S>))
+        .route("/api/admin/accounts/import", post(import_accounts::<S>))
+        .route("/api/admin/accounts/refresh", post(refresh_account::<S>))
+        .route("/api/admin/accounts/recover", post(recover_account::<S>))
+        .route("/api/admin/accounts/update", post(update_account::<S>))
+        .route("/api/admin/accounts/delete", post(delete_accounts::<S>))
+        .route(
+            "/api/admin/accounts/batch-update",
+            post(batch_update_accounts::<S>),
+        )
+        .route("/api/admin/accounts/quota", get(account_quota::<S>))
+        .route(
+            "/api/admin/accounts/personal-info",
+            get(account_personal_info::<S>),
+        )
+        .route(
+            "/api/admin/accounts/quota-forecast",
+            get(account_quota_forecast::<S>),
+        )
+        .route(
+            "/api/admin/accounts/profile-avatar",
+            get(account_profile_avatar::<S>),
+        )
+        .route(
+            "/api/admin/accounts/reset-credits/automation",
+            get(account_reset_credit_automation::<S>)
+                .post(set_account_reset_credit_automation::<S>),
+        )
+        .route(
+            "/api/admin/accounts/reset-credits",
+            get(account_reset_credits::<S>).post(consume_account_reset_credit::<S>),
+        )
+        .route(
+            "/api/admin/accounts/quota/refresh",
+            post(refresh_account_quota::<S>),
+        )
+        .route("/api/admin/accounts/models", get(account_models::<S>))
+        .route(
+            "/api/admin/accounts/models/catalog",
+            get(account_model_catalog::<S>),
+        )
+        .route(
+            "/api/admin/accounts/models/refresh",
+            post(refresh_account_models::<S>),
+        )
+        .route(
+            "/api/admin/accounts/connection-test",
+            get(test_account_connection::<S>),
+        )
+        .route(
+            "/api/admin/accounts/oauth/start",
+            post(start_account_authorization::<S>),
+        )
+        .route(
+            "/api/admin/accounts/oauth/complete",
+            post(complete_account_authorization::<S>),
+        )
+}
+
+async fn batch_update_accounts<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<BatchUpdateAccountsRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let command = request.into_command().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .batch_update(&auth.context().mutation_context(), command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(BatchUpdatedAccountsData::from(result)),
+    ))
+}
+
+async fn list_accounts<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<ListQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let command = query.validate().map_err(map_wire_error)?;
+    let page = command.page;
+    let page_size = command.page_size.get();
+    let result = state
+        .admin_services()
+        .accounts()
+        .list(command)
+        .await
+        .map_err(map_service_error)?;
+    let data = account_page_data(result, page, page_size, Utc::now(), time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn account_detail<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let account_id = query.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .quota(&account_id, false)
+        .await
+        .map_err(map_service_error)?;
+    let configuration = state
+        .admin_services()
+        .accounts()
+        .account_configuration(&account_id)
+        .await
+        .map_err(map_service_error)?;
+    let data = AccountDetailData {
+        account: account_view(result, Utc::now(), time),
+        credential_configuration: configuration.map(provider_document_value),
+    };
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn export_accounts<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountExportQuery>,
+) -> Result<Response, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let ids = query.into_ids().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .export(&auth.context().mutation_context(), ids)
+        .await
+        .map_err(map_service_error)?;
+    let data = AccountExportData::from_result(result, time);
+    let mut response = AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn import_accounts<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountImportRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let (provider, command) = request
+        .into_command(auth.context().mutation_context())
+        .map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .credentials()
+        .for_provider(&provider)
+        .map_err(map_service_error)?
+        .import_document(command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::CREATED,
+        AdminEnvelope::ok(AccountImportData::from_result(result)),
+    ))
+}
+
+async fn start_account_authorization<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<StartAccountAuthorizationRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let (provider, command) = request
+        .into_command(auth.context().mutation_context())
+        .map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .credentials()
+        .for_provider(&provider)
+        .map_err(map_service_error)?
+        .start_authorization(command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::CREATED,
+        AdminEnvelope::ok(AccountAuthorizationData::from(result)),
+    ))
+}
+
+async fn complete_account_authorization<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<CompleteAccountAuthorizationRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let (provider, command) = request
+        .into_command(auth.context().mutation_context())
+        .map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .credentials()
+        .complete_authorization(&provider, command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::CREATED,
+        AdminEnvelope::ok(AccountMutationData::from(result)),
+    ))
+}
+
+async fn update_account<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<UpdateAccountRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let (command, connection) = request.into_command().map_err(map_wire_error)?;
+    let context = auth.context().mutation_context();
+    let result = if let Some(provider_material) = connection {
+        let provider = ProviderKind::new("openai").map_err(|_| AdminError::internal())?;
+        let account_id = ProviderAccountId::new(command.account_id.clone())
+            .map_err(|_| AdminError::internal())?;
+        let result = state
+            .admin_services()
+            .credentials()
+            .for_provider(&provider)
+            .map_err(map_service_error)?
+            .rotate(RotateCredential {
+                mutation: CredentialMutation {
+                    context,
+                    account_id,
+                },
+                settings: Some(command),
+                provider_material,
+            })
+            .await
+            .map_err(map_service_error)?;
+        AccountUpdateResult {
+            account_id: result.account_id,
+            config_revision: result.config_revision,
+        }
+    } else {
+        state
+            .admin_services()
+            .accounts()
+            .update(&context, command)
+            .await
+            .map_err(map_service_error)?
+    };
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(UpdatedAccountData::from(result)),
+    ))
+}
+
+async fn delete_accounts<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountDeletionRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let (provider, command) = request
+        .into_command(auth.context().mutation_context())
+        .map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .credentials()
+        .for_provider(&provider)
+        .map_err(map_service_error)?
+        .delete(command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountDeletionData::from(result)),
+    ))
+}
+
+async fn refresh_account<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountRefreshRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let account_id = request.into_command().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .refresh(&auth.context().mutation_context(), account_id)
+        .await
+        .map_err(map_service_error)?;
+    let data = account_refresh_data(result, Utc::now(), time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn recover_account<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountActionRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let account_id = request.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .recover(&auth.context().mutation_context(), account_id)
+        .await
+        .map_err(map_service_error)?;
+    let data = account_refresh_data(result, Utc::now(), time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn account_quota<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let account_id = query.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .quota(&account_id, false)
+        .await
+        .map_err(map_service_error)?;
+    let data = AccountQuotaData {
+        account: account_view(result, Utc::now(), time),
+    };
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn account_quota_forecast<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let account_id = query.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .quota_forecast(&account_id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountQuotaForecastData::from((
+            result,
+            crate::time::TimePresenter::new(state.admin_services().timezone()),
+        ))),
+    ))
+}
+
+async fn account_personal_info<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let account_id = query.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .personal_info(&account_id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountPersonalInfoData::from((result, time))),
+    ))
+}
+
+async fn account_profile_avatar<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountProfileAvatarQuery>,
+) -> Result<Response, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let account_id = query.into_id().map_err(map_wire_error)?;
+    let avatar = state
+        .admin_services()
+        .accounts()
+        .profile_avatar(&account_id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(profile_avatar_response(avatar))
+}
+
+/// 将 Provider 头像流投影为受保护的同源 HTTP 响应
+#[must_use]
+pub fn profile_avatar_response(avatar: ProviderProfileAvatar) -> Response {
+    let ProviderProfileAvatar {
+        content_type,
+        content_length,
+        etag,
+        body,
+    } = avatar;
+    let mut response = Response::new(Body::from_stream(body));
+    *response.status_mut() = StatusCode::OK;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        content_type
+            .and_then(|value| HeaderValue::from_str(&value).ok())
+            .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream")),
+    );
+    if let Some(value) =
+        content_length.and_then(|length| HeaderValue::from_str(&length.to_string()).ok())
+    {
+        headers.insert(header::CONTENT_LENGTH, value);
+    }
+    if let Some(value) = etag.and_then(|value| HeaderValue::from_str(&value).ok()) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=3600"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("sandbox; default-src 'none'"),
+    );
+    response
+}
+
+async fn refresh_account_quota<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountActionRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let account_id = request.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .quota(&account_id, true)
+        .await
+        .map_err(map_service_error)?;
+    let data = AccountQuotaData {
+        account: account_view(result, Utc::now(), time),
+    };
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn account_reset_credits<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let account_id = query.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .reset_credits(&auth.context().mutation_context(), account_id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountResetCreditsData::from((result, time))),
+    ))
+}
+
+async fn consume_account_reset_credit<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountResetCreditConsumeRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let command = request.into_command().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .consume_reset_credit(&auth.context().mutation_context(), command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountResetCreditResultData::from((result, time))),
+    ))
+}
+
+async fn account_models<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let account_id = query.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .models(&account_id, false)
+        .await
+        .map_err(map_service_error)?;
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let data = account_models_data(result, time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn account_model_catalog<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let account_id = query.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .model_catalog_document(&account_id)
+        .await
+        .map_err(map_service_error)?;
+    let data = AccountModelCatalogData::try_from(result).map_err(|_| AdminError::internal())?;
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn refresh_account_models<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountActionRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let account_id = request.into_id().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .models(&account_id, true)
+        .await
+        .map_err(map_service_error)?;
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let data = account_models_data(result, time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn test_account_connection<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountTestQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let (account_id, upstream_model) = query.into_command().map_err(map_wire_error)?;
+    let stream = state
+        .admin_services()
+        .accounts()
+        .test_connection(
+            AccountProbeTarget::ConnectionTest(account_id),
+            upstream_model,
+        )
+        .await
+        .map_err(map_service_error)?
+        .map(move |event| {
+            let event = AccountConnectionTestEvent::from((event, time));
+            let data = serde_json::to_string(&event.data).unwrap_or_else(|_| "{}".to_owned());
+            Ok(Event::default().data(data))
+        });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn account_reset_credit_automation<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let result = state
+        .admin_services()
+        .accounts()
+        .reset_credit_automation_status(query.into_id().map_err(map_wire_error)?)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountResetCreditAutomationData::from((result, time))),
+    ))
+}
+
+async fn set_account_reset_credit_automation<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountResetCreditAutomationRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let account_id = AccountIdQuery {
+        account_id: request.account_id,
+    }
+    .into_id()
+    .map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .set_reset_credit_automation(
+            &auth.context().mutation_context(),
+            account_id,
+            request.enabled,
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountResetCreditAutomationData::from((result, time))),
+    ))
+}
+
+/// 接口只接受已经通过 AdminAuth 的调用，账号始终保持原调度状态
+async fn diagnose_account<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountDiagnosticRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    if !matches!(&auth.context().principal, gateway_admin::model::auth::AdminPrincipal::Plugin { instance_id } if instance_id == "56483a1c-0a29-8744-9e91-06334612b8b8")
+    {
+        return Err(map_service_error(AdminServiceError::invalid(
+            "诊断入口仅允许已登记的巡检插件",
+        )));
+    }
+    request.validate().map_err(map_wire_error)?;
+    let account = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let model = UpstreamModelId::new(request.model_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("modelId")))?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .diagnose(account, model, request.body)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(
+            serde_json::json!({"text":result.text.concat(),"completed":result.completed_text}),
+        ),
+    ))
+}

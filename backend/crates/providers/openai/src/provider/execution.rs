@@ -1,0 +1,1420 @@
+//! OpenAI attempt 的选择、发送与响应流执行
+
+use gateway_core::metering::{CalculatedCost, Usage};
+
+use super::*;
+use crate::credential::CodexSelectionModel;
+use gateway_core::operation::RawJsonPayload;
+
+impl CodexProvider {
+    pub(super) async fn execute_image(
+        self: Arc<Self>,
+        image: &ImageRequest,
+        candidate: &ProviderCandidate,
+        context: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        if image.payload().protocol() != OPENAI_PROTOCOL || candidate.upstream_model().is_some() {
+            return Err(provider_error(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            ));
+        }
+        let (endpoint_path, response_origin) = match image.kind() {
+            ImageRequestKind::Generation => (
+                CODEX_IMAGE_GENERATIONS_PATH,
+                self.image_generations_url.clone(),
+            ),
+            ImageRequestKind::Edit => (CODEX_IMAGE_EDITS_PATH, self.image_edits_url.clone()),
+        };
+        let image_turn_id = image
+            .payload()
+            .context()
+            .get("image_turn_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let session_affinity = self
+            .image_session_affinity(image.payload(), &[], &context)
+            .await?;
+        self.execute_raw_json_endpoint(
+            context,
+            RawJsonEndpointRequest {
+                operation: Operation::GenerateImage(image.clone()),
+                response_origin,
+                endpoint_path,
+                body: image.payload().body().clone(),
+                image_turn_id,
+                session_affinity,
+            },
+        )
+        .await
+    }
+
+    async fn image_session_affinity(
+        &self,
+        payload: &RawJsonPayload,
+        headers: &[MiddlewareHeader],
+        context: &AttemptContext,
+    ) -> Result<Option<CodexSessionAffinity>, ProviderError> {
+        if context.is_diagnostic_required_account() {
+            return Ok(None);
+        }
+        let explicit = derive_endpoint_affinity_with_headers(
+            payload,
+            context.client_api_key_ref(),
+            "session_id",
+            headers,
+        );
+        let turn = headers
+            .iter()
+            .find(|header| header.name().eq_ignore_ascii_case("x-codex-image-turn-id"))
+            .and_then(|header| std::str::from_utf8(header.value()).ok())
+            .or_else(|| {
+                payload
+                    .context()
+                    .get("image_turn_id")
+                    .and_then(Value::as_str)
+            });
+        let inferred = if let Some(alias) =
+            turn.and_then(|turn| derive_turn_alias(turn, context.client_api_key_ref()))
+        {
+            self.selector
+                .session_for_turn(&alias)
+                .await
+                .map_err(map_selection_error)?
+        } else {
+            None
+        };
+        if explicit
+            .as_ref()
+            .zip(inferred.as_ref())
+            .is_some_and(|(explicit, inferred)| explicit.key() != inferred.key())
+        {
+            return Err(provider_error(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            )
+            .with_retry_prohibited());
+        }
+        let follow_only = inferred
+            .as_ref()
+            .is_some_and(CodexSessionAffinity::follow_only)
+            || explicit
+                .as_ref()
+                .is_some_and(CodexSessionAffinity::follow_only);
+        Ok(inferred
+            .or(explicit)
+            .map(|affinity| affinity.with_follow_only(follow_only)))
+    }
+
+    pub(super) async fn execute_search(
+        self: Arc<Self>,
+        search: &StandaloneSearchRequest,
+        candidate: &ProviderCandidate,
+        context: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        if search.payload().protocol() != OPENAI_PROTOCOL || candidate.upstream_model().is_some() {
+            return Err(provider_error(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            ));
+        }
+        let session_affinity = derive_codex_endpoint_session_affinity(
+            search.payload(),
+            context.client_api_key_ref(),
+            "id",
+        );
+        let response_origin = self.search_url.clone();
+        self.execute_raw_json_endpoint(
+            context,
+            RawJsonEndpointRequest {
+                operation: Operation::Search(search.clone()),
+                response_origin,
+                endpoint_path: CODEX_ALPHA_SEARCH_PATH,
+                body: search.payload().body().clone(),
+                image_turn_id: None,
+                session_affinity,
+            },
+        )
+        .await
+    }
+
+    async fn execute_raw_json_endpoint(
+        self: Arc<Self>,
+        context: AttemptContext,
+        request: RawJsonEndpointRequest,
+    ) -> Result<ProviderStream, ProviderError> {
+        let requested_model = match &request.operation {
+            Operation::GenerateImage(image) => endpoint_requested_model(image.payload()),
+            Operation::Search(search) => endpoint_requested_model(search.payload()),
+            _ => None,
+        };
+        let model = if matches!(&request.operation, Operation::GenerateImage(_)) {
+            CodexSelectionModel::Image(requested_model.as_ref().map(|model| model.as_str()))
+        } else {
+            CodexSelectionModel::Search(requested_model.as_ref().map(|model| model.as_str()))
+        };
+        let selection_started_at = Instant::now();
+        let lease = self
+            .selector
+            .select_for_provider_endpoint(&SelectCodexProviderEndpointCredential {
+                request_url: &request.response_origin,
+                attempt: &context,
+                session_affinity: request.session_affinity.as_ref(),
+                model,
+            })
+            .await
+            .map_err(map_selection_error)?;
+        let account_selection_wait_ms =
+            u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let operation = request.operation.clone();
+        let provider_kind = ProviderKind::new(PROVIDER_NAME)
+            .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
+        let account_id = lease.account_id().clone();
+        let provider = Arc::clone(&self);
+        let terminal_context = context.clone();
+        context
+            .execute_middleware(
+                operation,
+                provider_kind,
+                requested_model.map(|model| model.as_str().to_owned()),
+                account_id,
+                Box::new(move |operation, middleware_headers| {
+                    Box::pin(async move {
+                        provider
+                            .execute_selected_raw_json_endpoint(
+                                terminal_context,
+                                operation,
+                                middleware_headers,
+                                request,
+                                lease,
+                                account_selection_wait_ms,
+                            )
+                            .await
+                    })
+                }),
+            )
+            .await
+    }
+
+    async fn execute_selected_raw_json_endpoint(
+        self: Arc<Self>,
+        context: AttemptContext,
+        operation: Operation,
+        middleware_headers: Vec<MiddlewareHeader>,
+        mut request: RawJsonEndpointRequest,
+        mut lease: CodexCredentialLease,
+        account_selection_wait_ms: u64,
+    ) -> Result<ProviderStream, ProviderError> {
+        let affinity = match &operation {
+            Operation::GenerateImage(image) => {
+                let model = endpoint_requested_model(image.payload());
+                let selection =
+                    CodexSelectionModel::Image(model.as_ref().map(|model| model.as_str()));
+                // 中间件可改写正文，最终图片模型必须仍被当前租约账号允许
+                // 校验先于亲和变更和发送，不能在持有租约时重新选号
+                if !selection.allows_account(lease.account())
+                    || (!context.is_diagnostic_required_account()
+                        && !context
+                            .account_scope()
+                            .is_some_and(|scope| selection.allows(scope, lease.account_id())))
+                {
+                    return Err(provider_error(
+                        ProviderErrorKind::NoEligibleAccount,
+                        UpstreamSendState::NotSent,
+                    )
+                    .with_retry_prohibited());
+                }
+                self.image_session_affinity(image.payload(), &middleware_headers, &context)
+                    .await?
+            }
+            Operation::Search(search) => derive_endpoint_affinity_with_headers(
+                search.payload(),
+                context.client_api_key_ref(),
+                "id",
+                &middleware_headers,
+            ),
+            _ => None,
+        };
+        if !context.is_diagnostic_required_account() {
+            self.selector
+                .validate_translated_selection(
+                    &mut lease,
+                    affinity.as_ref(),
+                    None,
+                    context.account_selection_policy(),
+                )
+                .await
+                .map_err(map_selection_error)?;
+        }
+        let lease = Arc::new(lease);
+        let payload = match &operation {
+            Operation::GenerateImage(image) => {
+                let Operation::GenerateImage(original) = &request.operation else {
+                    return Err(provider_error(
+                        ProviderErrorKind::InvalidRequest,
+                        UpstreamSendState::NotSent,
+                    ));
+                };
+                if image.kind() != original.kind() || image.payload().protocol() != OPENAI_PROTOCOL
+                {
+                    return Err(provider_error(
+                        ProviderErrorKind::InvalidRequest,
+                        UpstreamSendState::NotSent,
+                    ));
+                }
+                request.image_turn_id = image
+                    .payload()
+                    .context()
+                    .get("image_turn_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                image.payload()
+            }
+            Operation::Search(search) => {
+                if !matches!(&request.operation, Operation::Search(_))
+                    || search.payload().protocol() != OPENAI_PROTOCOL
+                {
+                    return Err(provider_error(
+                        ProviderErrorKind::InvalidRequest,
+                        UpstreamSendState::NotSent,
+                    ));
+                }
+                search.payload()
+            }
+            _ => {
+                return Err(provider_error(
+                    ProviderErrorKind::InvalidRequest,
+                    UpstreamSendState::NotSent,
+                ));
+            }
+        };
+        request.body = payload.body().clone();
+        let passthrough_headers =
+            crate::transport::request::decode_passthrough_headers(payload.context());
+        if !context.is_diagnostic_required_account()
+            && let Some(affinity) = affinity.as_ref()
+            && let Some(turn) = affinity.turn_alias()
+        {
+            self.selector
+                .remember_turn(
+                    turn,
+                    affinity,
+                    context
+                        .account_selection_policy()
+                        .openai_session_affinity_ttl(),
+                )
+                .await
+                .map_err(map_selection_error)?;
+        }
+        let allows_account_state_mutation = lease.allows_account_state_mutation();
+        let provider_kind = ProviderKind::new(PROVIDER_NAME)
+            .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
+        let outbound_middleware = context.outbound_middleware(
+            provider_kind.clone(),
+            endpoint_requested_model(payload).map(|model| model.as_str().to_owned()),
+            lease.account_id().clone(),
+        );
+        let metadata = ProviderCallMetadata::for_provider_endpoint(
+            provider_kind,
+            lease.account_id().clone(),
+            UpstreamTransport::new(HTTP_JSON_TRANSPORT).map_err(|_| {
+                provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent)
+            })?,
+        )
+        .with_credential_revision(lease.account().revision())
+        .with_account_snapshot(Some(
+            gateway_core::account::AccountHistorySnapshot::from_account(lease.account()),
+        ))
+        .with_selection_observation(ProviderSelectionObservation::new(
+            account_selection_wait_ms,
+            lease.capacity_snapshot(),
+        ));
+        // Standalone Provider 端点没有可证明的账号 owner；Images/Search metadata 必须按
+        // 跨账号输入收敛到当前 lease，不能沿用下游声明的账号或 installation identity
+        let client = self.client_for_request(&context, lease.account())?;
+        let installation_id = client.profile_state().effective_installation_id(
+            context.client_api_key_ref(),
+            lease.account_id(),
+            lease.installation_id(),
+        );
+        let turn_metadata = payload
+            .context()
+            .get("turn_metadata")
+            .and_then(Value::as_str)
+            .and_then(|metadata| {
+                crate::transport::request::scope_turn_metadata(
+                    metadata,
+                    &installation_id,
+                    RequestAccountScope::Different,
+                )
+            });
+        let events = cold_json_response_stream(ColdJsonResponse {
+            installation_id,
+            client: client
+                .for_account(lease.account())
+                .map_err(|error| map_client_error(error, UpstreamSendState::NotSent, None).error)?
+                .with_responses_api_base_url(lease.authentication().responses_api_base_url())
+                .with_middleware_headers(middleware_headers)
+                .with_outbound_middleware(outbound_middleware)
+                .with_privacy(context.privacy(), context.cancellation().clone()),
+            response_origin: request.response_origin,
+            endpoint_path: request.endpoint_path,
+            body: request.body,
+            passthrough_headers,
+            image_turn_id: request.image_turn_id,
+            turn_metadata,
+            context,
+            selector: Arc::clone(&self.selector),
+            quota: Arc::clone(&self.quota),
+            lease: Arc::clone(&lease),
+        });
+        let stream = ProviderStream::new(metadata, events, lease);
+        Ok(if allows_account_state_mutation {
+            stream.with_filtered_account_feedback(
+                Arc::clone(&self.account_feedback),
+                openai_failure_affects_account_score,
+            )
+        } else {
+            stream
+        })
+    }
+}
+
+struct RawJsonEndpointRequest {
+    operation: Operation,
+    response_origin: Url,
+    endpoint_path: &'static str,
+    body: Bytes,
+    image_turn_id: Option<String>,
+    session_affinity: Option<CodexSessionAffinity>,
+}
+
+pub(super) struct ColdResponse {
+    pub(super) client: CodexBackendClient,
+    pub(super) installation_id: String,
+    pub(super) response_origin: Url,
+    pub(super) request: CodexResponsesRequest,
+    pub(super) upstream_model: UpstreamModelId,
+    pub(super) transport_policy: CodexProviderTransport,
+    pub(super) context: AttemptContext,
+    pub(super) selector: Arc<CodexCredentialSelector>,
+    pub(super) quota: Arc<CodexCredentialQuotaService>,
+    pub(super) catalog: Arc<CodexCredentialCatalogService>,
+    pub(super) lease: Arc<CodexCredentialLease>,
+    pub(super) session_transport_key: Option<ProviderSessionAffinityKey>,
+    pub(super) session_transport_key_hash: Option<String>,
+    pub(super) session_transport_recovery: CodexSessionTransportRecovery,
+    pub(super) guardian_routing: guardian::GuardianRouting,
+    pub(super) websocket_retry_count: u32,
+    pub(super) stream_max_retries: u32,
+    pub(super) session_capture: Option<OpenAiSessionCapture>,
+}
+
+pub(super) struct ColdJsonResponse {
+    pub(super) client: CodexBackendClient,
+    pub(super) installation_id: String,
+    pub(super) response_origin: Url,
+    pub(super) endpoint_path: &'static str,
+    pub(super) body: Bytes,
+    pub(super) passthrough_headers: reqwest::header::HeaderMap,
+    pub(super) image_turn_id: Option<String>,
+    pub(super) turn_metadata: Option<String>,
+    pub(super) context: AttemptContext,
+    pub(super) selector: Arc<CodexCredentialSelector>,
+    pub(super) quota: Arc<CodexCredentialQuotaService>,
+    pub(super) lease: Arc<CodexCredentialLease>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct OpenAiSessionState {
+    pub(super) account_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) credential_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) oauth_identity: Option<String>,
+    pub(super) conversation_id: Option<String>,
+    #[serde(default)]
+    pub(super) turn_state: Option<String>,
+    #[serde(default)]
+    pub(super) client_turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reasoning_effort_override: Option<String>,
+    pub(super) continuation_scope: OpenAiContinuationScope,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum OpenAiContinuationScope {
+    Persisted,
+    ConnectionLocal,
+    ReplayRequired,
+}
+
+pub(super) struct OpenAiSessionCapture {
+    pub(super) account_id: String,
+    pub(super) credential_revision: Option<u64>,
+    pub(super) oauth_identity: Option<String>,
+    pub(super) conversation_id: Option<String>,
+    pub(super) turn_state: Option<String>,
+    pub(super) client_turn_id: Option<String>,
+    pub(super) reasoning_effort_override: Option<String>,
+    pub(super) response_store: bool,
+    pub(super) oversized_http: bool,
+    pub(super) continuation_scope: Option<OpenAiContinuationScope>,
+}
+
+pub(super) fn same_client_turn(previous: Option<&str>, current: Option<&str>) -> bool {
+    previous
+        .zip(current)
+        .is_some_and(|(previous, current)| !previous.is_empty() && previous == current)
+}
+
+pub(super) fn decode_openai_session_state(request: &GenerateRequest) -> Option<OpenAiSessionState> {
+    request
+        .provider_session_state(PROVIDER_NAME)
+        .and_then(|state| serde_json::from_value(Value::Object(state.payload().clone())).ok())
+}
+
+pub(super) fn encode_openai_session_state(
+    state: OpenAiSessionState,
+) -> Result<ProviderSessionState, ProviderError> {
+    let Value::Object(payload) = serde_json::to_value(state)
+        .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::Sent))?
+    else {
+        return Err(provider_error(
+            ProviderErrorKind::Protocol,
+            UpstreamSendState::Sent,
+        ));
+    };
+    ProviderSessionState::new(PROVIDER_NAME, payload)
+        .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::Sent))
+}
+
+fn encode_openai_session_capture(
+    capture: &OpenAiSessionCapture,
+) -> Result<ProviderSessionState, ProviderError> {
+    let Some(continuation_scope) = capture.continuation_scope else {
+        return Err(provider_error(
+            ProviderErrorKind::Protocol,
+            UpstreamSendState::Sent,
+        ));
+    };
+    encode_openai_session_state(OpenAiSessionState {
+        account_id: capture.account_id.clone(),
+        credential_revision: capture.credential_revision,
+        oauth_identity: capture.oauth_identity.clone(),
+        conversation_id: capture.conversation_id.clone(),
+        turn_state: capture.turn_state.clone(),
+        client_turn_id: capture.client_turn_id.clone(),
+        reasoning_effort_override: capture.reasoning_effort_override.clone(),
+        continuation_scope,
+    })
+}
+
+pub(super) fn attach_openai_session_update(
+    events: &mut [ProviderEvent],
+    capture: &mut Option<OpenAiSessionCapture>,
+) {
+    let Some(terminal_index) = events
+        .iter()
+        .position(|event| terminal_response_output(event).is_some())
+    else {
+        return;
+    };
+    let Some(capture) = capture.take() else {
+        return;
+    };
+    let Ok(update) = encode_openai_session_capture(&capture) else {
+        return;
+    };
+    let update = if capture.oversized_http
+        && capture.continuation_scope == Some(OpenAiContinuationScope::ReplayRequired)
+    {
+        update.with_websocket_reconnect()
+    } else {
+        update
+    };
+    events[terminal_index].attach_session_update(update);
+}
+
+pub(super) fn terminal_response_output(event: &ProviderEvent) -> Option<&[Value]> {
+    let wire = event.wire_event()?;
+    if wire.protocol() != OPENAI_PROTOCOL {
+        return None;
+    }
+    let event_type = wire
+        .event_type()
+        .or_else(|| wire.data().get("type").and_then(Value::as_str));
+    matches!(
+        event_type,
+        Some("response.completed" | "response.incomplete")
+    )
+    .then(|| {
+        wire.data()
+            .pointer("/response/output")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+    })
+    .flatten()
+}
+
+pub(super) enum CodexHandshakeAttemptError {
+    Client(CodexClientError),
+    Cancelled,
+    Timeout,
+}
+
+pub(super) async fn create_response_attempt(
+    client: &CodexBackendClient,
+    request: &CodexResponsesRequest,
+    request_context: CodexRequestContext<'_>,
+    account_id: &str,
+    deadline: gateway_core::lifecycle::Deadline,
+    cancellation: &CancellationToken,
+) -> Result<CodexBackendStreamingResponse, CodexHandshakeAttemptError> {
+    if deadline.is_elapsed() {
+        return Err(CodexHandshakeAttemptError::Timeout);
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(CodexHandshakeAttemptError::Cancelled),
+        _ = deadline.wait() => Err(CodexHandshakeAttemptError::Timeout),
+        response = client.create_response_stream_with_pool_account(
+            request,
+            request_context,
+            Some(account_id),
+        ) => response.map_err(CodexHandshakeAttemptError::Client),
+    }
+}
+
+pub(super) fn map_handshake_attempt_error(
+    error: CodexHandshakeAttemptError,
+    account: &ProviderAccount,
+) -> MappedProviderFailure {
+    match error {
+        CodexHandshakeAttemptError::Client(error) => {
+            map_client_error(error, UpstreamSendState::Ambiguous, Some(account))
+        }
+        CodexHandshakeAttemptError::Cancelled => MappedProviderFailure::plain(provider_error(
+            ProviderErrorKind::Cancelled,
+            UpstreamSendState::Ambiguous,
+        )),
+        CodexHandshakeAttemptError::Timeout => MappedProviderFailure::plain(provider_error(
+            ProviderErrorKind::Timeout,
+            UpstreamSendState::Ambiguous,
+        )),
+    }
+}
+
+pub(super) async fn create_json_attempt(
+    request: &ColdJsonResponse,
+    account: &ProviderAccount,
+    authorization: &SecretString,
+    cookie_header: Option<&SecretString>,
+    account_selection: CodexAccountSelectionTelemetry<'_>,
+) -> Result<CodexBackendJsonResponse, CodexHandshakeAttemptError> {
+    if request.context.deadline().is_elapsed() {
+        return Err(CodexHandshakeAttemptError::Timeout);
+    };
+    let request_id = request.context.request_id().as_str();
+    let trace = request.context.trace();
+    let mut request_context = CodexRequestContext::auxiliary(
+        authorization.expose_secret(),
+        account.upstream_account_id(),
+        request_id,
+        Some(&request.installation_id),
+    );
+    request_context.trace = Some(&trace);
+    request_context.cookie_header = cookie_header.map(ExposeSecret::expose_secret);
+    request_context.turn_metadata = request.turn_metadata.as_deref();
+    request_context.account_selection = account_selection;
+    tokio::select! {
+        biased;
+        _ = request.context.cancellation().cancelled() => Err(CodexHandshakeAttemptError::Cancelled),
+        _ = request.context.deadline().wait() => Err(CodexHandshakeAttemptError::Timeout),
+        response = request.client.post_raw_json(
+            request.endpoint_path,
+            request.body.clone(),
+            &request.passthrough_headers,
+            request.image_turn_id.as_deref(),
+            request_context,
+        ) => response.map_err(CodexHandshakeAttemptError::Client),
+    }
+}
+
+pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStream {
+    Box::pin(async_stream::try_stream! {
+        let allows_account_state_mutation = request.lease.allows_account_state_mutation();
+        let image_endpoint = matches!(request.endpoint_path, CODEX_IMAGE_GENERATIONS_PATH | CODEX_IMAGE_EDITS_PATH);
+        let failure_context = OpenAiFailureContext {
+            client: &request.client,
+            selector: &request.selector,
+            quota: &request.quota,
+            response_origin: &request.response_origin,
+            cyber_policy_scope: None,
+            allows_account_state_mutation,
+            image_endpoint,
+            upstream_model: None,
+        };
+        let active_account = request.lease.account().clone();
+        let cookie_header = build_cookie_header(request.lease.cookies())?;
+        let authorization = request
+            .lease
+            .authentication()
+            .authorization_header()
+            .map_err(|_| {
+                provider_error(
+                    ProviderErrorKind::Unauthorized,
+                    UpstreamSendState::NotSent,
+                )
+            })?;
+        let account_selection = CodexAccountSelectionTelemetry::new(
+            request.lease.affinity_hit(),
+            request.lease.escape_reason(),
+            request.lease.account_switch(),
+        );
+        let response = create_json_attempt(
+            &request,
+            &active_account,
+            &authorization,
+            cookie_header.as_ref(),
+            account_selection,
+        )
+        .await;
+        if let Err(CodexHandshakeAttemptError::Client(error)) = &response {
+            log_client_upstream_error(
+                UpstreamErrorLogContext::new(&request.context, &active_account, None),
+                error,
+            );
+        }
+        let response = match response.map_err(|error| map_handshake_attempt_error(error, &active_account)) {
+            Ok(response) => response,
+            Err(mut failure) => {
+                if let Some(observation) = failure.observation.take() {
+                    yield ProviderEvent::observation(observation);
+                }
+                apply_failure(&failure_context, &active_account, &failure).await;
+                Err(failure.error)?;
+                return;
+            }
+        };
+
+        let mut metrics = response.transport_metrics.clone();
+        metrics.first_event_ms = Some(
+            i64::try_from(request.context.timing_started_at().elapsed().as_millis())
+                .unwrap_or(i64::MAX),
+        );
+        if let Some(observation) = codex_response_observation(
+            CodexBackendTransport::HttpJson,
+            &response.diagnostics,
+            &response.response_metadata,
+            &metrics,
+            None,
+            openai_response_timings(&metrics, &response.response_metadata),
+        ) {
+            yield ProviderEvent::observation(observation);
+        }
+        if allows_account_state_mutation {
+            synchronize_passive_quota_headers(
+                &request.quota,
+                &active_account,
+                &response.rate_limit_headers,
+                image_endpoint,
+            )
+            .await;
+            if !response.set_cookie_headers.is_empty()
+                && let Err(error) = request
+                    .selector
+                    .capture_response_cookies(
+                        &active_account,
+                        response.diagnostics.response_origin.as_ref().unwrap_or(&request.response_origin),
+                        &response.set_cookie_headers,
+                    )
+                    .await
+            {
+                tracing::warn!(
+                    account_id = %active_account.id(),
+                    error = %error,
+                    "Failed to persist OpenAI provider endpoint response cookies"
+                );
+            }
+        }
+
+        let response_meta =
+            ResponseMeta::for_provider_endpoint(request.context.request_id().as_str());
+        yield ProviderEvent::canonical(GatewayEvent::Started(response_meta.clone()));
+        if image_endpoint
+            && let Some((usage, cost)) = image_response_metering(&request.body, &response.body, request.context.pricing())
+        {
+            yield ProviderEvent::canonical(GatewayEvent::Usage(usage));
+            if let Some(cost) = cost {
+                yield ProviderEvent::canonical(GatewayEvent::CalculatedCost(cost));
+            }
+        }
+        let wire = ProtocolWireEvent::raw_json(OPENAI_PROTOCOL, response.body).map_err(|_| {
+            provider_error(ProviderErrorKind::Protocol, UpstreamSendState::Sent)
+        })?;
+        yield ProviderEvent::wire(wire);
+        yield ProviderEvent::canonical(GatewayEvent::Completed(
+            response_meta.with_finish_reason(FinishReason::Stop),
+        ));
+    })
+}
+
+fn image_response_metering(
+    request_body: &[u8],
+    body: &[u8],
+    prices: &gateway_core::metering::PricingOverrides,
+) -> Option<(Usage, Option<CalculatedCost>)> {
+    // 只保留 usage，跳过通常很大的 base64 图片；原始响应仍按字节透传
+    #[derive(Deserialize)]
+    struct ImageUsageEnvelope {
+        usage: Option<Value>,
+    }
+
+    let raw = serde_json::from_slice::<ImageUsageEnvelope>(body)
+        .ok()?
+        .usage?;
+    let mut usage = Usage::new();
+    usage.input_tokens = raw.get("input_tokens").and_then(Value::as_u64);
+    usage.output_tokens = raw.get("output_tokens").and_then(Value::as_u64);
+    usage.cached_input_tokens = raw
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(Value::as_u64);
+    usage.image_input_tokens = raw
+        .pointer("/input_tokens_details/image_tokens")
+        .and_then(Value::as_u64);
+    usage.image_output_tokens = raw
+        .pointer("/output_tokens_details/image_tokens")
+        .and_then(Value::as_u64);
+    // 总量是上游独立报告的事实；图片明细是总输入/输出的子集，不能再次相加
+    usage.total_tokens = raw.get("total_tokens").and_then(Value::as_u64);
+    let cost = crate::transport::usage::image_calculated_cost(request_body, &raw, prices);
+    (usage != Usage::default()).then_some((usage, cost))
+}
+
+pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
+    let ColdResponse {
+        client,
+        installation_id,
+        response_origin,
+        request,
+        upstream_model,
+        transport_policy,
+        context,
+        selector,
+        quota,
+        catalog,
+        lease,
+        session_transport_key,
+        session_transport_key_hash,
+        session_transport_recovery,
+        guardian_routing,
+        websocket_retry_count,
+        stream_max_retries,
+        mut session_capture,
+    } = response;
+    Box::pin(async_stream::try_stream! {
+        let cyber_policy_scope = lease.cyber_policy_scope().cloned();
+        let allows_account_state_mutation = lease.allows_account_state_mutation();
+        let failure_context = OpenAiFailureContext {
+            client: &client,
+            image_endpoint: false,
+            selector: &selector,
+            quota: &quota,
+            response_origin: &response_origin,
+            cyber_policy_scope: cyber_policy_scope.as_ref(),
+            allows_account_state_mutation,
+            upstream_model: Some(&upstream_model),
+        };
+        let mut active_account = lease.account().clone();
+        let cookie_header = build_cookie_header(lease.cookies())?;
+        let authorization = lease
+            .authentication()
+            .authorization_header()
+            .map_err(|_| {
+                provider_error(
+                    ProviderErrorKind::Unauthorized,
+                    UpstreamSendState::NotSent,
+                )
+            })?;
+        let request_id = context.request_id().as_str().to_owned();
+        let cancellation = context.cancellation().clone();
+        let account_selection = CodexAccountSelectionTelemetry::new(
+            lease.affinity_hit(),
+            lease.escape_reason(),
+            lease.account_switch(),
+        );
+        let request_transport_requirement = transport_requirement(&request);
+        let trace = context.trace();
+        let response = create_response_attempt(
+            &client,
+            &request,
+            codex_request_context(
+                &request,
+                &request_id,
+                &active_account,
+                &installation_id,
+                &authorization,
+                cookie_header.as_ref(),
+                account_selection,
+            ).with_trace(&trace).with_response_control(context.response_control()),
+            active_account.id().as_str(),
+            context.deadline(),
+            &cancellation,
+        )
+        .await;
+        let websocket_failure_policy = match &response {
+            Err(CodexHandshakeAttemptError::Client(error))
+                if transport_policy == CodexProviderTransport::PreferWebSocket =>
+            {
+                websocket_client_failure_policy(error)
+            }
+            _ => None,
+        };
+        if let Err(CodexHandshakeAttemptError::Client(error)) = &response {
+            log_client_upstream_error(
+                UpstreamErrorLogContext::new(&context, &active_account, None),
+                error,
+            );
+        }
+        let response = response.map_err(|error| map_handshake_attempt_error(error, &active_account));
+        let response = match response {
+            Ok(response) => response,
+            Err(mut failure) => {
+                if let Some(policy) = websocket_failure_policy {
+                    apply_websocket_recovery_policy(
+                        &mut failure,
+                        WebSocketRecoveryContext {
+                            policy,
+                            replay_boundary: ReplayBoundary::BeforeSemanticOutput,
+                            requirement: request_transport_requirement,
+                            retry_count: websocket_retry_count,
+                            max_retries: stream_max_retries,
+                            request_id: context.request_id().as_str(),
+                            attempt_index: context.attempt_index().get(),
+                            account_id: active_account.id().as_str(),
+                            session_transport_key: session_transport_key.as_ref(),
+                            session_transport_key_hash: session_transport_key_hash.as_deref(),
+                            session_transport_recovery: &session_transport_recovery,
+                        },
+                    );
+                }
+                if let Some(observation) = failure.observation.take() {
+                    yield ProviderEvent::observation(observation);
+                }
+                apply_failure(&failure_context, &active_account, &failure)
+                .await;
+                Err(quota_continuation_replay_error(
+                    failure.error,
+                    &request,
+                    ReplayBoundary::BeforeSemanticOutput,
+                ))?;
+                return;
+            }
+        };
+        context.connection_budget().complete();
+        if !accepts_backend_transport(transport_policy, response.transport) {
+            let failure = MappedProviderFailure::plain(provider_error(
+                ProviderErrorKind::Protocol,
+                UpstreamSendState::Sent,
+            ));
+            apply_failure(&failure_context, &active_account, &failure)
+            .await;
+            Err(failure.error)?;
+            return;
+        }
+        if let Some(capture) = session_capture.as_mut() {
+            capture.continuation_scope = Some(if capture.response_store {
+                OpenAiContinuationScope::Persisted
+            } else if response.transport == CodexBackendTransport::WebSocket
+                && response.connection_local_continuation
+            {
+                OpenAiContinuationScope::ConnectionLocal
+            } else {
+                OpenAiContinuationScope::ReplayRequired
+            });
+            capture.turn_state = response.turn_state.clone().or(capture.turn_state.clone());
+        }
+        let mut observation_state = OpenAiResponseObservationState::from_backend_response(
+            &response,
+            &request,
+        );
+        if let Some(observation) = observation_state.observation(None) {
+            yield ProviderEvent::observation(observation);
+        }
+        if let Some(etag) = response.response_metadata.models_etag.as_deref()
+            && let Err(error) = catalog.observe_response_etag(&active_account,etag)
+        {
+            tracing::warn!(
+                error = %error,
+                "OpenAI model ETag observation was rejected"
+            );
+        }
+        if allows_account_state_mutation
+            && !response.set_cookie_headers.is_empty()
+        {
+            match selector
+                .capture_response_cookies(
+                    &active_account,
+                    response.diagnostics.response_origin.as_ref().unwrap_or(&response_origin),
+                    &response.set_cookie_headers,
+                )
+                .await
+            {
+                Ok(outcome) => {
+                    if let Some(revision) = outcome.credential_revision
+                        && let Ok(current) = selector.current_account(active_account.id()).await
+                        && current.revision().get() == revision
+                    {
+                        active_account = current;
+                    }
+                }
+                // 迟到响应不能覆盖已更新的凭据，版本冲突属于正常跳过而非存储故障
+                Err(CredentialSelectionError::RevisionConflict(_)) => {
+                    tracing::debug!(
+                        request_id = %request_id,
+                        account_id = %active_account.id(),
+                        credential_revision = active_account.revision().get(),
+                        "Skipped OpenAI response cookies after credential revision changed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        account_id = %active_account.id(),
+                        credential_revision = active_account.revision().get(),
+                        error = %error,
+                        "Failed to persist OpenAI response cookies"
+                    );
+                }
+            }
+        }
+        let response_transport = response.transport;
+        let routing_affinity = response.routing_affinity;
+        let websocket_connection_id = response.websocket_connection_id;
+        let mut body = response.body;
+        let mut failure_diagnostics = response.diagnostics.clone();
+        if response_transport == CodexBackendTransport::WebSocket {
+            // opening ID 标识连接，不可作为缺失请求级错误头时的当前请求 ID
+            failure_diagnostics.request_id = None;
+        }
+        let failure_rate_limit_headers = response.rate_limit_headers.clone();
+        let mut passive_quota_observation =
+            OpenAiPassiveQuotaObservation::new(response.rate_limit_headers);
+        let rate_limit_updates = response.rate_limit_updates;
+        let response_metadata_updates = response.response_metadata_updates;
+        // 同协议保留原始帧；canonical 解析只提取计费、续接和状态事实
+        let websocket_transport = response.transport == CodexBackendTransport::WebSocket;
+        let mut decoder = CodexCanonicalDecoder::new(upstream_model.as_str())
+            .with_trace(trace.clone())
+            .with_pricing(context.pricing().get("openai").and_then(|models| models.get(upstream_model.as_str())).cloned())
+            .with_requested_service_tier(request.service_tier())
+            .with_request_tool_pricing(upstream_model.as_str(), request.tools())
+            .with_raw_sse_passthrough();
+        let mut client_events = ClientEventDelivery::new(context.allows_replayable_prelude());
+        loop {
+            if context.deadline().is_elapsed() {
+                if allows_account_state_mutation {
+                    synchronize_passive_quota(
+                        &quota,
+                        &active_account,
+                        passive_quota_observation.rate_limits(),
+                    )
+                    .await;
+                }
+                Err(provider_error(ProviderErrorKind::Timeout, UpstreamSendState::Sent))?;
+                return;
+            };
+            let next = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(MappedProviderFailure::plain(provider_error(
+                    ProviderErrorKind::Cancelled,
+                    UpstreamSendState::Sent,
+                ))),
+                _ = context.deadline().wait() => Err(MappedProviderFailure::plain(provider_error(
+                    ProviderErrorKind::Timeout,
+                    UpstreamSendState::Sent,
+                ))),
+                chunk = body.next() => match chunk {
+                    Some(Ok(chunk)) => Ok(Some(chunk)),
+                    Some(Err(error)) => {
+                        log_client_upstream_error(
+                            UpstreamErrorLogContext::new(
+                                &context,
+                                &active_account,
+                                websocket_connection_id,
+                            ),
+                            &error,
+                        );
+                        Err(map_stream_error(error))
+                    }
+                    None => Ok(None),
+                },
+            };
+            let next = match next {
+                Ok(next) => next,
+                Err(mut failure) => {
+                    let updates = take_rate_limit_updates(rate_limit_updates.as_ref()).await;
+                    let rate_limits_changed = if updates.is_empty() {
+                        false
+                    } else {
+                        passive_quota_observation.observe(&updates);
+                        let update_headers = rate_limit_update_headers(&updates);
+                        observation_state.merge_rate_limit_headers(&update_headers)
+                    };
+                    let metadata_merge = merge_response_metadata_updates(
+                        response_metadata_updates.as_ref(),
+                        &mut session_capture,
+                        &mut observation_state,
+                    )
+                    .await;
+                    let observation_event = if rate_limits_changed || metadata_merge.is_some()
+                        || response_transport == CodexBackendTransport::WebSocket
+                    {
+                        observation_state.observation(Some(&failure.error)).map(ProviderEvent::observation)
+                    } else {
+                        None
+                    };
+                    if failure.websocket_transport_retryable
+                        && response_transport == CodexBackendTransport::WebSocket
+                    {
+                        apply_websocket_recovery_policy(
+                            &mut failure,
+                            WebSocketRecoveryContext {
+                                policy: WebSocketFailurePolicy::Budgeted,
+                                replay_boundary: ReplayBoundary::from_semantic_output(client_events.replay_closed()),
+                                requirement: request_transport_requirement,
+                                retry_count: websocket_retry_count,
+                                max_retries: stream_max_retries,
+                                request_id: context.request_id().as_str(),
+                                attempt_index: context.attempt_index().get(),
+                                account_id: active_account.id().as_str(),
+                                session_transport_key: session_transport_key.as_ref(),
+                                session_transport_key_hash: session_transport_key_hash.as_deref(),
+                                session_transport_recovery: &session_transport_recovery,
+                            },
+                        );
+                    }
+                    if let Some(event) = observation_event {
+                        yield event;
+                    }
+                    if allows_account_state_mutation {
+                        synchronize_passive_quota(
+                            &quota,
+                            &active_account,
+                            passive_quota_observation.rate_limits(),
+                        )
+                        .await;
+                    }
+                    apply_failure(&failure_context, &active_account, &failure)
+                    .await;
+                    Err(quota_continuation_replay_error(
+                        failure.error,
+                        &request,
+                        ReplayBoundary::from_semantic_output(client_events.replay_closed()),
+                    ))?;
+                    return;
+                }
+            };
+            let Some(chunk) = next else { break; };
+            let updates = take_rate_limit_updates(rate_limit_updates.as_ref()).await;
+            let rate_limits_changed = if updates.is_empty() {
+                false
+            } else {
+                passive_quota_observation.observe(&updates);
+                observation_state.merge_rate_limit_headers(&rate_limit_update_headers(&updates))
+            };
+            let first_event_changed =
+                observation_state.observe_stream_chunk(&chunk, context.timing_started_at());
+            let decoded = if websocket_transport {
+                let text = std::str::from_utf8(&chunk).map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::Sent))?;
+                decoder.push_websocket(text)
+            } else {
+                decoder.push(&chunk)
+            };
+            let (mut events, canonical_failure) = match decoded {
+                CodexCanonicalOutcome::Events(events) => (events, None),
+                CodexCanonicalOutcome::Failed(failure) => {
+                    let (events, error, semantic_output_seen) = failure.into_parts();
+                    (events, Some((error, semantic_output_seen)))
+                }
+            };
+            let metadata_merge = merge_response_metadata_updates(
+                response_metadata_updates.as_ref(),
+                &mut session_capture,
+                &mut observation_state,
+            )
+            .await;
+            let metadata_changed = metadata_merge.unwrap_or(false);
+            let service_tier_changed = observation_state
+                .observe_upstream_service_tier(decoder.response_service_tier());
+            let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
+                log_canonical_upstream_error(
+                    UpstreamErrorLogContext::new(
+                        &context,
+                        &active_account,
+                        websocket_connection_id,
+                    ),
+                    response_transport,
+                    &error,
+                );
+                let atomic_upstream_failure = matches!(&error, CodexCanonicalError::Upstream(_));
+                (
+                    map_canonical_error(
+                        error,
+                        &failure_diagnostics,
+                        &failure_rate_limit_headers,
+                        ReplayBoundary::from_semantic_output(
+                            semantic_output_seen || client_events.replay_closed(),
+                        ),
+                    ),
+                    atomic_upstream_failure,
+                )
+            });
+            let timing_signals = decoder.take_timing_signals();
+            if let Some(affinity) = &routing_affinity {
+                for fact in events.iter().flat_map(ProviderEvent::canonical_facts) {
+                    if let GatewayEvent::Started(meta) = fact {
+                        guardian_routing.remember(context.client_api_key_ref(), &active_account, meta.response_id(), affinity);
+                    }
+                }
+            }
+            let output_timing_changed = observation_state
+                .observe_timing_signals(timing_signals, context.timing_started_at());
+            let upstream_timing_changed = observation_state
+                .observe_upstream_response_ms(decoder.upstream_response_ms());
+            let upstream_metrics_changed = observation_state
+                .observe_upstream_timing_metrics(decoder.upstream_timing_metrics());
+            let timing_changed = first_event_changed
+                || output_timing_changed
+                || upstream_timing_changed
+                || upstream_metrics_changed;
+            let completed = events
+                .iter()
+                .flat_map(ProviderEvent::canonical_facts)
+                .any(|event| matches!(event, GatewayEvent::Completed(_)));
+            let terminal_changed = completed
+                && observation_state.mark_completed(terminal_response_is_incomplete(&events));
+            if response_transport == CodexBackendTransport::WebSocket
+                && completed && terminal_failure.is_none()
+                && let Some(key) = session_transport_key.as_ref()
+            {
+                session_transport_recovery.websocket_succeeded(key);
+            }
+            if allows_account_state_mutation && (completed || terminal_failure.is_some()) {
+                let started = Instant::now();
+                synchronize_passive_quota(
+                    &quota,
+                    &active_account,
+                    passive_quota_observation.rate_limits(),
+                )
+                .await;
+                trace.record("provider.quota_sync", json!({
+                    "durationMs": started.elapsed().as_millis(),
+                }));
+            }
+            if let Some((failure, _)) = terminal_failure.as_ref() {
+                let started = Instant::now();
+                apply_failure(&failure_context, &active_account, failure)
+                .await;
+                trace.record("provider.account_failure", json!({
+                    "durationMs": started.elapsed().as_millis(),
+                }));
+            }
+            attach_openai_session_update(&mut events, &mut session_capture);
+            if allows_account_state_mutation && completed && terminal_failure.is_none() {
+                // 完成事实交给下游前更新账号健康，绑定已经在发送前完成
+                let started = Instant::now();
+                selector
+                    .record_success(&active_account)
+                    .await;
+                trace.record("provider.account_success", json!({
+                    "durationMs": started.elapsed().as_millis(),
+                }));
+                let started = Instant::now();
+                selector
+                    .observe_cyber_policy_success(cyber_policy_scope.as_ref())
+                    .await;
+                trace.record("provider.cyber_policy_success", json!({
+                    "durationMs": started.elapsed().as_millis(),
+                }));
+            }
+            if (rate_limits_changed
+                || service_tier_changed
+                || timing_changed
+                || metadata_changed
+                || terminal_changed
+                || (response_transport == CodexBackendTransport::WebSocket && terminal_failure.is_some()))
+                && let Some(observation) = observation_state.observation(
+                    terminal_failure.as_ref().map(|(failure, _)| &failure.error)
+                )
+            {
+                yield ProviderEvent::observation(observation);
+            }
+            if let Some((mut failure, atomic_upstream_failure)) = terminal_failure {
+                let failure_after_commit =
+                    timing_signals.semantic_output || client_events.replay_closed();
+                if failure_after_commit {
+                    for event in client_events.commit(events) {
+                        yield event;
+                    }
+                } else if atomic_upstream_failure {
+                    failure.error = failure
+                        .error
+                        .with_atomic_client_events(events);
+                }
+                Err(quota_continuation_replay_error(
+                    failure.error,
+                    &request,
+                    ReplayBoundary::from_semantic_output(failure_after_commit),
+                ))?;
+                return;
+            }
+            let events = client_events.forward(events, timing_signals, completed);
+            for event in events {
+                yield event;
+            }
+            if completed {
+                return;
+            }
+        }
+        let (mut events, canonical_failure) = match decoder.finish() {
+            CodexCanonicalOutcome::Events(events) => (events, None),
+            CodexCanonicalOutcome::Failed(failure) => {
+                let (events, error, semantic_output_seen) = failure.into_parts();
+                (events, Some((error, semantic_output_seen)))
+            }
+        };
+        let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
+            log_canonical_upstream_error(
+                UpstreamErrorLogContext::new(
+                    &context,
+                    &active_account,
+                    websocket_connection_id,
+                ),
+                response_transport,
+                &error,
+            );
+            let atomic_upstream_failure = matches!(&error, CodexCanonicalError::Upstream(_));
+            (
+                map_canonical_error(
+                    error,
+                    &failure_diagnostics,
+                    &failure_rate_limit_headers,
+                    ReplayBoundary::from_semantic_output(
+                        semantic_output_seen || client_events.replay_closed(),
+                    ),
+                ),
+                atomic_upstream_failure,
+            )
+        });
+        let timing_signals = decoder.take_timing_signals();
+        let service_tier_changed = observation_state
+            .observe_upstream_service_tier(decoder.response_service_tier());
+        let output_timing_changed = observation_state
+            .observe_timing_signals(timing_signals, context.timing_started_at());
+        let upstream_timing_changed = observation_state
+            .observe_upstream_response_ms(decoder.upstream_response_ms());
+        let upstream_metrics_changed = observation_state
+            .observe_upstream_timing_metrics(decoder.upstream_timing_metrics());
+        let timing_changed = output_timing_changed
+            || upstream_timing_changed
+            || upstream_metrics_changed;
+        let updates = take_rate_limit_updates(rate_limit_updates.as_ref()).await;
+        let rate_limits_changed = if updates.is_empty() {
+            false
+        } else {
+            passive_quota_observation.observe(&updates);
+            observation_state.merge_rate_limit_headers(&rate_limit_update_headers(&updates))
+        };
+        if allows_account_state_mutation {
+            synchronize_passive_quota(
+                &quota,
+                &active_account,
+                passive_quota_observation.rate_limits(),
+            )
+            .await;
+        }
+        if let Some((failure, _)) = terminal_failure.as_ref() {
+            apply_failure(&failure_context, &active_account, failure)
+            .await;
+        }
+        let metadata_changed = merge_response_metadata_updates(
+            response_metadata_updates.as_ref(),
+            &mut session_capture,
+            &mut observation_state,
+        )
+        .await
+        .unwrap_or(false);
+        attach_openai_session_update(&mut events, &mut session_capture);
+        let completed = events
+            .iter()
+            .flat_map(ProviderEvent::canonical_facts)
+            .any(|event| matches!(event, GatewayEvent::Completed(_)));
+        let terminal_changed = completed
+            && observation_state.mark_completed(terminal_response_is_incomplete(&events));
+        if response_transport == CodexBackendTransport::WebSocket
+            && completed && terminal_failure.is_none()
+            && let Some(key) = session_transport_key.as_ref()
+        {
+            session_transport_recovery.websocket_succeeded(key);
+        }
+        if allows_account_state_mutation && completed && terminal_failure.is_none() {
+            // 尾部 finish() 也可能产出 completed，账号健康更新先于下游 yield
+            selector
+                .record_success(&active_account)
+                .await;
+            selector
+                .observe_cyber_policy_success(cyber_policy_scope.as_ref())
+                .await;
+        }
+        if (service_tier_changed
+            || timing_changed
+            || rate_limits_changed
+            || metadata_changed
+            || terminal_changed
+            || (response_transport == CodexBackendTransport::WebSocket && terminal_failure.is_some()))
+            && let Some(observation) = observation_state.observation(
+                terminal_failure.as_ref().map(|(failure, _)| &failure.error)
+            )
+        {
+            yield ProviderEvent::observation(observation);
+        }
+        if let Some((mut failure, atomic_upstream_failure)) = terminal_failure {
+            let failure_after_commit =
+                timing_signals.semantic_output || client_events.replay_closed();
+            if failure_after_commit {
+                for event in client_events.commit(events) {
+                    yield event;
+                }
+            } else if atomic_upstream_failure {
+                failure.error = failure
+                    .error
+                    .with_atomic_client_events(events);
+            }
+            Err(quota_continuation_replay_error(
+                failure.error,
+                &request,
+                ReplayBoundary::from_semantic_output(failure_after_commit),
+            ))?;
+            return;
+        }
+        let events = client_events.forward(events, timing_signals, completed);
+        for event in events {
+            yield event;
+        }
+    })
+}
+
+async fn merge_response_metadata_updates(
+    updates: Option<&CodexResponseMetadataUpdates>,
+    session_capture: &mut Option<OpenAiSessionCapture>,
+    observation_state: &mut OpenAiResponseObservationState,
+) -> Option<bool> {
+    let turn_state = updates?.lock().await.turn_state.take()?;
+    if let Some(capture) = session_capture.as_mut() {
+        capture.turn_state = Some(turn_state.clone());
+    }
+    Some(observation_state.merge_client_header("x-codex-turn-state", &turn_state))
+}

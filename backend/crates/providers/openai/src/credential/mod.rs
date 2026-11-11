@@ -1,0 +1,89 @@
+//! Codex credential 领域导出
+
+mod admin;
+mod affinity;
+mod api_key;
+mod catalog;
+mod codec;
+mod cookie;
+mod eligibility;
+mod oauth;
+mod profile_statistics;
+mod quota;
+mod recovery_log;
+mod refresh;
+mod repository;
+mod scheduling_projection;
+mod selector;
+pub mod token_client;
+mod types;
+
+pub(crate) use affinity::{
+    CodexSessionAffinity, derive_cache_preference, derive_codex_cyber_policy_session_key,
+    derive_codex_endpoint_session_affinity, derive_codex_session_affinity,
+    derive_codex_transport_key, derive_endpoint_affinity_with_headers,
+    derive_live_session_affinity, derive_previous_response_id_hash, derive_turn_alias,
+};
+pub(crate) use eligibility::CodexSelectionModel;
+pub(crate) use oauth::oauth_owner_ref;
+pub(crate) use types::parse_access_token_expiration;
+
+pub(crate) use crate::CODEX_AUTHENTICATION_KIND_API_KEY;
+
+pub use api_key::{
+    ApiKeyAuthentication, ApiKeyConfiguration, ApiKeyCredentialData, ApiKeyProtocol,
+};
+
+pub use admin::{
+    CodexCprExportDocument, CodexCredentialAdmin, CodexCredentialAdminError,
+    CodexCredentialAdminService, ExportManagedCodexCredential, ImportCodexOAuthCredential,
+    PreparedCodexAccountImport, PreparedCodexCredentialRotation,
+    PreparedCodexCredentialRotationGuard,
+};
+pub use catalog::{
+    CodexAccountCatalog, CodexCatalogScope, CodexCredentialCatalogError,
+    CodexCredentialCatalogService, CodexCredentialCatalogSnapshot,
+};
+pub use codec::{
+    CodexCredentialCodec, CodexCredentialDataError, CodexRuntimeAuthentication,
+    CodexRuntimeCredential,
+};
+pub use cookie::{CodexCookiePolicy, CookiePolicyError};
+pub use oauth::{
+    CodexOAuthAdmin, CodexOAuthAdminError, CodexOAuthAdminService, CodexOAuthAuthorizationStarted,
+    CodexOAuthPendingClaimOutcome, CodexOAuthPendingStore, CodexOAuthPendingStoreError,
+    CodexPendingAuthorization, CompleteCodexOAuthAuthorization, CompletedCodexOAuthAuthorization,
+    CompletedCodexOAuthCredential, StartCodexOAuthAuthorization, StoredCodexPendingAuthorization,
+};
+pub use profile_statistics::{
+    CodexCredentialProfileService, CodexProfileAvatarError, CodexProfileStatisticsError,
+};
+pub use quota::{
+    CodexAccountQuotaSnapshot, CodexCredentialQuotaError, CodexCredentialQuotaService,
+    CodexInitialSyncDelays, CodexQuotaFact, CodexQuotaRefreshPolicy, CodexQuotaSyncSummary,
+    CodexQuotaWindow, CodexQuotaWindowKind, CodexQuotaWindowRole, CodexResetCreditsError,
+    parse_codex_quota_usage,
+};
+pub use refresh::{
+    CodexCredentialRefreshError, CodexCredentialRefreshOutcome, CodexCredentialRefreshService,
+    DueCodexCredential,
+};
+pub use repository::{CodexCredentialRepository, CredentialRepositoryError};
+pub use selector::{
+    CodexAccountFailure, CodexCredentialLease, CodexCredentialSelector, CredentialSelectionError,
+    SelectCodexCredential,
+};
+pub(crate) use selector::{CodexCyberPolicyScope, SelectCodexProviderEndpointCredential};
+pub(crate) use types::oauth_identity_key;
+pub use types::{
+    CODEX_AUTHENTICATION_KIND_OAUTH, CodexAccountProfile, CodexCookie, CodexCookieCaptureOutcome,
+    CodexCredentialData, CodexCredentialPrincipal, CodexOAuthCredentialData, CodexOAuthSecret,
+    ResponsesTransport, RuntimeCodexCookie, UpsertCodexCookie,
+};
+
+mod diagnostics;
+
+/// 直连资格由 Provider 拥有，执行快照与只读导出使用同一判断
+pub(crate) fn is_direct_account_kind(authentication_kind: &str) -> bool {
+    authentication_kind == CODEX_AUTHENTICATION_KIND_OAUTH
+}

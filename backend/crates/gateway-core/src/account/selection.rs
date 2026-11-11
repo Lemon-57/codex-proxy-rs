@@ -1,0 +1,1022 @@
+//! 请求级账号资格投影、反馈统计与选择算法
+
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime};
+
+use futures::FutureExt;
+
+use crate::concurrency::{CapacityWait, ConcurrencyQueuePolicy, QueueRejection};
+use crate::identity::ProviderKind;
+
+use super::{
+    AccountConcurrency, AccountStatus, ProviderAccount, ProviderAccountId, SmartSchedulingConfig,
+};
+
+/// `runtime_settings.rotation_strategy` 的稳定值
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RotationStrategy {
+    Smart,
+    QuotaResetPriority,
+    RoundRobin,
+    Sticky,
+}
+
+impl RotationStrategy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Smart => "smart",
+            Self::QuotaResetPriority => "quota_reset_priority",
+            Self::RoundRobin => "round_robin",
+            Self::Sticky => "sticky",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "smart" => Some(Self::Smart),
+            "quota_reset_priority" => Some(Self::QuotaResetPriority),
+            "round_robin" => Some(Self::RoundRobin),
+            "sticky" => Some(Self::Sticky),
+            _ => None,
+        }
+    }
+}
+
+/// 单请求换号预算不能超过路由尝试总数减一
+pub const MAX_ACCOUNT_ROTATIONS: u32 = 31;
+
+/// 会话绑定与轮次关联共用的保留时长上限，单位小时
+pub const MAX_SESSION_AFFINITY_TTL_HOURS: u32 = 720;
+
+/// OpenAI 会话账号亲和；请求身份和模式行为由 Provider 解释
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountAffinity {
+    Relaxed,
+    Preferred,
+    #[default]
+    Strict,
+}
+
+impl AccountAffinity {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Relaxed => "relaxed",
+            Self::Preferred => "preferred",
+            Self::Strict => "strict",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "relaxed" => Some(Self::Relaxed),
+            "preferred" => Some(Self::Preferred),
+            "strict" => Some(Self::Strict),
+            _ => None,
+        }
+    }
+}
+
+/// 从 `runtime_settings` 冻结到一次请求计划的账号调度策略
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountSelectionPolicy {
+    strategy: RotationStrategy,
+    smart_scheduling: SmartSchedulingConfig,
+    max_concurrent_per_account: AccountConcurrency,
+    queue_policy: ConcurrencyQueuePolicy,
+    openai_guardian_reserved_concurrency: u32,
+    openai_account_affinity: AccountAffinity,
+    switch_account_on_queue_failure: bool,
+    max_account_rotations: u32,
+    openai_session_affinity_ttl: Duration,
+}
+
+impl AccountSelectionPolicy {
+    #[must_use]
+    pub fn new(
+        strategy: RotationStrategy,
+        max_concurrent_per_account: impl Into<AccountConcurrency>,
+    ) -> Self {
+        Self {
+            strategy,
+            smart_scheduling: SmartSchedulingConfig::default(),
+            max_concurrent_per_account: max_concurrent_per_account.into(),
+            openai_guardian_reserved_concurrency: 0,
+            openai_account_affinity: AccountAffinity::default(),
+            switch_account_on_queue_failure: false,
+            max_account_rotations: 3,
+            openai_session_affinity_ttl: Duration::from_secs(24 * 3600),
+            queue_policy: ConcurrencyQueuePolicy {
+                max_waiting: 0,
+                timeout: Duration::ZERO,
+            },
+        }
+    }
+
+    #[must_use]
+    pub const fn with_openai_account_affinity(mut self, affinity: AccountAffinity) -> Self {
+        self.openai_account_affinity = affinity;
+        self
+    }
+
+    #[must_use]
+    pub const fn openai_account_affinity(self) -> AccountAffinity {
+        self.openai_account_affinity
+    }
+
+    #[must_use]
+    pub const fn with_switch_account_on_queue_failure(mut self, enabled: bool) -> Self {
+        self.switch_account_on_queue_failure = enabled;
+        self
+    }
+
+    /// 原队位由首次选号释放。仅对允许换号的请求调用，重选不排队，也不延长请求总期限
+    pub async fn reselect_after_queue_rejection<
+        T,
+        E: From<QueueRejection>,
+        F: Future<Output = Result<T, E>>,
+    >(
+        self,
+        rejection: QueueRejection,
+        remaining: Option<Duration>,
+        select: impl FnOnce(ConcurrencyQueuePolicy) -> F,
+        no_account_available: impl FnOnce(&E) -> bool,
+    ) -> Result<T, E> {
+        if !self.switch_account_on_queue_failure || remaining.is_some_and(|time| time.is_zero()) {
+            return Err(rejection.into());
+        }
+        let queue = ConcurrencyQueuePolicy {
+            max_waiting: 0,
+            ..self.queue_policy
+        };
+        let selection = select(queue);
+        let result = match remaining {
+            Some(limit) => futures::select_biased! {
+                () = futures_timer::Delay::new(limit).fuse() => return Err(rejection.into()),
+                result = selection.fuse() => result,
+            },
+            None => selection.await,
+        };
+        match result {
+            Err(error) if no_account_available(&error) => Err(rejection.into()),
+            result => result,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_max_account_rotations(mut self, rotations: u32) -> Self {
+        self.max_account_rotations = rotations;
+        self
+    }
+
+    #[must_use]
+    pub const fn max_account_rotations(self) -> u32 {
+        self.max_account_rotations
+    }
+
+    #[must_use]
+    pub const fn with_openai_session_affinity_ttl(mut self, ttl: Duration) -> Self {
+        self.openai_session_affinity_ttl = ttl;
+        self
+    }
+
+    #[must_use]
+    pub const fn openai_session_affinity_ttl(self) -> Duration {
+        self.openai_session_affinity_ttl
+    }
+
+    /// 只传递冻结的运行设置，Guardian 分类与预留策略由 OpenAI Provider 解释
+    #[must_use]
+    pub const fn with_openai_guardian_reserved_concurrency(mut self, reserved: u32) -> Self {
+        self.openai_guardian_reserved_concurrency = reserved;
+        self
+    }
+
+    #[must_use]
+    pub const fn openai_guardian_reserved_concurrency(self) -> u32 {
+        self.openai_guardian_reserved_concurrency
+    }
+
+    #[must_use]
+    pub const fn with_queue(mut self, policy: ConcurrencyQueuePolicy) -> Self {
+        self.queue_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub const fn queue_policy(self) -> ConcurrencyQueuePolicy {
+        self.queue_policy
+    }
+
+    #[must_use]
+    pub const fn strategy(self) -> RotationStrategy {
+        self.strategy
+    }
+
+    #[must_use]
+    pub const fn with_smart_scheduling(mut self, config: SmartSchedulingConfig) -> Self {
+        self.smart_scheduling = config;
+        self
+    }
+
+    #[must_use]
+    pub const fn smart_scheduling(self) -> SmartSchedulingConfig {
+        self.smart_scheduling
+    }
+
+    #[must_use]
+    pub const fn max_concurrent_per_account(self) -> AccountConcurrency {
+        self.max_concurrent_per_account
+    }
+}
+
+/// Store 提供并发事实，Provider 叠加自己解释的额度事实；全部信号均可重建
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountRuntimeSignals {
+    /// 本次调度容量池的在途数，不合并其他独立池
+    pub in_flight: u32,
+    pub last_started_at: Option<SystemTime>,
+    pub quota_reset_at: Option<SystemTime>,
+    /// Provider 归一化的剩余额度基点：0 耗尽，10_000 全部可用
+    pub quota_remaining_rank: Option<u64>,
+    pub cooldown: Option<super::AccountCooldown>,
+    pub failure_rate_basis_points: Option<u16>,
+    pub first_output_latency_ms: Option<u64>,
+}
+
+const ACCOUNT_FEEDBACK_EWMA_ALPHA: f64 = 0.2;
+const ACCOUNT_CAPACITY_FAILURE_EWMA_ALPHA: f64 = 0.4;
+const ACCOUNT_FAILURE_RATE_HALF_LIFE: Duration = Duration::from_secs(15 * 60);
+const EMPTY_FEEDBACK_SAMPLE: u64 = f64::NAN.to_bits();
+
+/// 一次真实上游 attempt 对账号级 Smart 调度产生的中立反馈
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountAttemptFeedback {
+    Succeeded { first_output_ms: Option<u64> },
+    Failed { first_output_ms: Option<u64> },
+    CapacityRejected { first_output_ms: Option<u64> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AccountFeedbackKey {
+    provider_kind: ProviderKind,
+    account_id: ProviderAccountId,
+}
+
+#[derive(Debug)]
+struct AccountFeedback {
+    failure_rate: Mutex<DecayingAccountFailureRate>,
+    first_output_ms: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct DecayingAccountFailureRate {
+    value: f64,
+    updated_at: Option<Instant>,
+}
+
+impl DecayingAccountFailureRate {
+    fn value_at(&self, now: Instant) -> f64 {
+        let Some(updated_at) = self.updated_at else {
+            return self.value;
+        };
+        let elapsed = now.checked_duration_since(updated_at).unwrap_or_default();
+        self.value
+            * 0.5_f64.powf(elapsed.as_secs_f64() / ACCOUNT_FAILURE_RATE_HALF_LIFE.as_secs_f64())
+    }
+
+    fn report_at(&mut self, sample: f64, alpha: f64, now: Instant) {
+        let now = self
+            .updated_at
+            .map_or(now, |updated_at| updated_at.max(now));
+        let decayed = self.value_at(now);
+        self.value = alpha * sample + (1.0 - alpha) * decayed;
+        self.updated_at = Some(now);
+    }
+}
+
+impl Default for AccountFeedback {
+    fn default() -> Self {
+        Self {
+            // 新账号从健康基线开始，首个失败样本按 EWMA 平滑，而不是直接判死
+            failure_rate: Mutex::new(DecayingAccountFailureRate::default()),
+            first_output_ms: AtomicU64::new(EMPTY_FEEDBACK_SAMPLE),
+        }
+    }
+}
+
+impl AccountFeedback {
+    fn report_at(&self, feedback: AccountAttemptFeedback, now: Instant) {
+        let (failure, alpha, first_output_ms) = match feedback {
+            AccountAttemptFeedback::Succeeded { first_output_ms } => {
+                (0.0, ACCOUNT_FEEDBACK_EWMA_ALPHA, first_output_ms)
+            }
+            AccountAttemptFeedback::Failed { first_output_ms } => {
+                (1.0, ACCOUNT_FEEDBACK_EWMA_ALPHA, first_output_ms)
+            }
+            AccountAttemptFeedback::CapacityRejected { first_output_ms } => {
+                (1.0, ACCOUNT_CAPACITY_FAILURE_EWMA_ALPHA, first_output_ms)
+            }
+        };
+        self.failure_rate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .report_at(failure, alpha, now);
+        if let Some(first_output_ms) = first_output_ms.filter(|value| *value > 0) {
+            update_feedback_ewma(&self.first_output_ms, first_output_ms as f64);
+        }
+    }
+
+    fn scheduling_signals_at(&self, now: Instant) -> (Option<u16>, Option<u64>) {
+        let failure_rate = self
+            .failure_rate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .value_at(now);
+        let failure_rate = Some((failure_rate.clamp(0.0, 1.0) * 10_000.0).round() as u16);
+        let first_output_ms = load_feedback_ewma(&self.first_output_ms)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value.round() as u64);
+        (failure_rate, first_output_ms)
+    }
+}
+
+/// 所有 Provider 共享、按 Provider 和账号隔离的进程内 Smart 健康反馈
+#[derive(Debug, Default)]
+pub struct AccountFeedbackStats {
+    accounts: RwLock<HashMap<AccountFeedbackKey, AccountFeedback>>,
+}
+
+impl AccountFeedbackStats {
+    /// 读取账号当前的错误率与首个有效输出延迟 EWMA
+    #[must_use]
+    pub fn scheduling_signals(
+        &self,
+        provider_kind: &ProviderKind,
+        account_id: &ProviderAccountId,
+    ) -> (Option<u16>, Option<u64>) {
+        self.scheduling_signals_at(provider_kind, account_id, Instant::now())
+    }
+
+    /// 读取账号在指定单调时刻的错误率与首个有效输出延迟 EWMA
+    #[doc(hidden)]
+    #[must_use]
+    pub fn scheduling_signals_at(
+        &self,
+        provider_kind: &ProviderKind,
+        account_id: &ProviderAccountId,
+        now: Instant,
+    ) -> (Option<u16>, Option<u64>) {
+        let key = AccountFeedbackKey {
+            provider_kind: provider_kind.clone(),
+            account_id: account_id.clone(),
+        };
+        self.accounts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .map(|account| account.scheduling_signals_at(now))
+            .unwrap_or_default()
+    }
+
+    /// 回灌一次已经真实发送的上游 attempt
+    pub fn report(
+        &self,
+        provider_kind: &ProviderKind,
+        account_id: &ProviderAccountId,
+        feedback: AccountAttemptFeedback,
+    ) {
+        self.report_at(provider_kind, account_id, feedback, Instant::now());
+    }
+
+    /// 回灌一次在指定单调时刻真实发送的上游 attempt
+    #[doc(hidden)]
+    pub fn report_at(
+        &self,
+        provider_kind: &ProviderKind,
+        account_id: &ProviderAccountId,
+        feedback: AccountAttemptFeedback,
+        observed_at: Instant,
+    ) {
+        let key = AccountFeedbackKey {
+            provider_kind: provider_kind.clone(),
+            account_id: account_id.clone(),
+        };
+        if let Some(account) = self
+            .accounts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
+            account.report_at(feedback, observed_at);
+            return;
+        }
+        self.accounts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key)
+            .or_default()
+            .report_at(feedback, observed_at);
+    }
+}
+
+fn load_feedback_ewma(value: &AtomicU64) -> Option<f64> {
+    let value = f64::from_bits(value.load(Ordering::Relaxed));
+    (!value.is_nan()).then_some(value)
+}
+
+fn update_feedback_ewma(target: &AtomicU64, sample: f64) {
+    let mut current = target.load(Ordering::Relaxed);
+    loop {
+        let previous = f64::from_bits(current);
+        let next = if previous.is_nan() {
+            sample
+        } else {
+            ACCOUNT_FEEDBACK_EWMA_ALPHA * sample + (1.0 - ACCOUNT_FEEDBACK_EWMA_ALPHA) * previous
+        };
+        match target.compare_exchange_weak(
+            current,
+            next.to_bits(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+impl AccountRuntimeSignals {
+    #[must_use]
+    pub fn with_provider_quota(mut self, quota: Option<AccountQuotaSignals>) -> Self {
+        if let Some(quota) = quota {
+            self.quota_reset_at = quota.reset_at;
+            self.quota_remaining_rank = quota.remaining_rank;
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn with_rate_limit(mut self, cooldown: Option<super::AccountCooldown>) -> Self {
+        self.cooldown = cooldown;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_runtime_health(
+        mut self,
+        failure_rate_basis_points: Option<u16>,
+        first_output_latency_ms: Option<u64>,
+    ) -> Self {
+        self.failure_rate_basis_points = failure_rate_basis_points;
+        self.first_output_latency_ms = first_output_latency_ms;
+        self
+    }
+}
+
+/// Provider 从私有 quota JSON 投影出的中立调度事实
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountQuotaSignals {
+    reset_at: Option<SystemTime>,
+    remaining_rank: Option<u64>,
+}
+
+impl AccountQuotaSignals {
+    /// `remaining_rank` 使用剩余额度基点，范围为 0..=10_000
+    #[must_use]
+    pub const fn new(reset_at: Option<SystemTime>, remaining_rank: Option<u64>) -> Self {
+        Self {
+            reset_at,
+            remaining_rank,
+        }
+    }
+
+    #[must_use]
+    pub const fn reset_at(self) -> Option<SystemTime> {
+        self.reset_at
+    }
+
+    #[must_use]
+    pub const fn remaining_rank(self) -> Option<u64> {
+        self.remaining_rank
+    }
+}
+
+/// 账号持久事实与可重建运行信号的请求级组合
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountCandidate {
+    /// 本次选号已确认的上游默认上限，与本地可编辑覆盖独立
+    pub inherited_concurrency: Option<super::AccountConcurrencyLimit>,
+    pub account: ProviderAccount,
+    pub signals: AccountRuntimeSignals,
+}
+
+/// 一次账号选择看到的可调度并发槽快照
+///
+/// `used_slots` 包含刚刚获取成功的当前请求；快照只覆盖本次请求范围内、
+/// 模型可用且未被显式排除的账号池
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AccountCapacitySnapshot {
+    used_slots: u64,
+    total_slots: u64,
+}
+
+impl AccountCapacitySnapshot {
+    #[must_use]
+    pub const fn used_slots(self) -> u64 {
+        self.used_slots
+    }
+
+    #[must_use]
+    pub const fn total_slots(self) -> u64 {
+        self.total_slots
+    }
+
+    #[must_use]
+    pub fn with_acquired_request(self) -> Self {
+        Self {
+            used_slots: self.used_slots.saturating_add(1).min(self.total_slots),
+            total_slots: self.total_slots,
+        }
+    }
+}
+
+/// 一次账号选择使用的全局策略快照
+#[derive(Debug, Clone)]
+pub struct AccountSelectionContext {
+    pub policy: AccountSelectionPolicy,
+    pub now: SystemTime,
+    pub excluded_accounts: BTreeSet<ProviderAccountId>,
+    /// 租约争用或队列让位只阻止立即选号，不排除等待资格
+    pub busy_accounts: BTreeSet<ProviderAccountId>,
+    pub preferred_account: Option<ProviderAccountId>,
+    /// 优先账号可调度时，是否优先于其它账号的持久权重
+    pub preferred_account_overrides_weight: bool,
+    pub round_robin_cursor: u64,
+    pub eligibility: AccountEligibilityPolicy,
+    pub account_scope: Option<std::sync::Arc<crate::account::scope::FrozenAccountScope>>,
+    /// 本请求使用的独立预留池上限，由 Provider 按请求类别决定；0 表示使用普通账号池
+    pub reserved_concurrency: u32,
+}
+
+impl AccountSelectionContext {
+    /// 本请求在该账号上可使用的并发上限；资格判断、租约与策略投影必须共用这一口径
+    #[must_use]
+    pub fn concurrency_limit(&self, candidate: &AccountCandidate) -> AccountConcurrency {
+        if self.reserved_concurrency > 0 {
+            AccountConcurrency::new(self.reserved_concurrency)
+        } else {
+            let default = candidate
+                .inherited_concurrency
+                .map_or(self.policy.max_concurrent_per_account(), |limit| {
+                    limit.into_non_zero().into()
+                });
+            candidate.account.effective_concurrency(default)
+        }
+    }
+}
+
+/// 选择账号时是否执行本地调度资格投影
+///
+/// 管理端对指定账号执行诊断时，会直接向上游确认实际状态；该模式跳过
+/// `enabled`、可用性、冷却和 token 到期等本地投影，仍保留租约和并发
+/// 约束，且只能与固定账号约束组合使用
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccountEligibilityPolicy {
+    #[default]
+    Enforce,
+    BypassForDiagnostic,
+    FreezeRecovery,
+}
+
+impl AccountEligibilityPolicy {
+    #[must_use]
+    pub const fn bypasses_local_eligibility(self) -> bool {
+        !matches!(self, Self::Enforce)
+    }
+
+    /// 恢复探测只验证上游结果，不能通过回写 Cookie 或刷新凭据提前解除冻结
+    #[must_use]
+    pub const fn allows_account_state_mutation(self, enabled: bool) -> bool {
+        match self {
+            Self::Enforce => true,
+            Self::BypassForDiagnostic => enabled,
+            Self::FreezeRecovery => false,
+        }
+    }
+}
+
+/// 候选账号未进入调度池的约束
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSchedulingBlocker {
+    OutsideClientScope,
+    LocalAvailability,
+    Excluded,
+    ConcurrencyLimit,
+    LowerWeight,
+}
+
+/// 优先账号在本次选择中的处理结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferredAccountSelection {
+    NotRequested,
+    Hit,
+    OverriddenByPolicy,
+    Missing,
+    Blocked(AccountSchedulingBlocker),
+}
+
+/// 一次完整账号选择；同时保留优先账号决策，供 Provider 记录调度遥测
+#[derive(Debug, Clone, Copy)]
+pub struct AccountSelection<'a> {
+    candidate: &'a AccountCandidate,
+    preferred: PreferredAccountSelection,
+    policy_choice: bool,
+}
+
+impl<'a> AccountSelection<'a> {
+    #[must_use]
+    pub const fn candidate(self) -> &'a AccountCandidate {
+        self.candidate
+    }
+
+    #[must_use]
+    pub const fn preferred(self) -> PreferredAccountSelection {
+        self.preferred
+    }
+
+    /// 显式策略选号不受 Provider 的软亲和等待覆盖；委托内置选号不属于显式选择
+    #[must_use]
+    pub const fn is_policy_choice(self) -> bool {
+        self.policy_choice
+    }
+}
+
+/// 同一 target 内唯一的账号排序器
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AccountSelector;
+
+impl AccountSelector {
+    /// 策略同时约束立即选号与等待，候选保留仅因本地容量受阻的账号
+    #[must_use]
+    pub(crate) fn policy_candidates<'a>(
+        &self,
+        candidates: &'a [AccountCandidate],
+        context: &AccountSelectionContext,
+    ) -> Vec<&'a AccountCandidate> {
+        candidates
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    self.scheduling_blocker(candidate, context),
+                    None | Some(AccountSchedulingBlocker::ConcurrencyLimit)
+                )
+            })
+            .collect()
+    }
+
+    /// 对插件返回的 ID 再执行同一资格判断，并保留原有亲和遥测结果
+    #[must_use]
+    pub(crate) fn select_policy_candidate<'a>(
+        &self,
+        candidates: &'a [AccountCandidate],
+        context: &AccountSelectionContext,
+        account_id: &ProviderAccountId,
+    ) -> Option<AccountSelection<'a>> {
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.account.id() == account_id)?;
+        if self.scheduling_blocker(candidate, context).is_some() {
+            return None;
+        }
+        let (preferred, _) = self.preferred_decision(candidates, context);
+        let preferred = if preferred == PreferredAccountSelection::Hit
+            && context.preferred_account.as_ref() != Some(account_id)
+        {
+            PreferredAccountSelection::OverriddenByPolicy
+        } else {
+            preferred
+        };
+        Some(AccountSelection {
+            candidate,
+            preferred,
+            policy_choice: true,
+        })
+    }
+
+    /// 汇总与本次调度约束一致的并发容量，供请求级观测使用
+    #[must_use]
+    pub fn capacity_snapshot(
+        &self,
+        candidates: &[AccountCandidate],
+        context: &AccountSelectionContext,
+    ) -> Option<AccountCapacitySnapshot> {
+        let (used_slots, total_slots) = candidates
+            .iter()
+            .filter(|candidate| {
+                !matches!(
+                    self.scheduling_blocker(candidate, context),
+                    Some(
+                        AccountSchedulingBlocker::OutsideClientScope
+                            | AccountSchedulingBlocker::LocalAvailability
+                            | AccountSchedulingBlocker::Excluded
+                    )
+                )
+            })
+            .try_fold((0_u64, 0_u64), |(used, total), candidate| {
+                let capacity = u64::from(context.concurrency_limit(candidate).limit()?.get());
+                Some((
+                    used.saturating_add(u64::from(candidate.signals.in_flight)),
+                    total.saturating_add(capacity),
+                ))
+            })?;
+        (total_slots > 0).then_some(AccountCapacitySnapshot {
+            used_slots: used_slots.min(total_slots),
+            total_slots,
+        })
+    }
+
+    /// 从可调度账号中确定一个候选；这里只消费 Provider 已解析的额度投影
+    #[must_use]
+    pub fn select<'a>(
+        &self,
+        candidates: &'a [AccountCandidate],
+        context: &AccountSelectionContext,
+    ) -> Option<AccountSelection<'a>> {
+        let mut eligible = candidates
+            .iter()
+            .filter(|candidate| self.scheduling_blocker(candidate, context).is_none())
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            return None;
+        }
+        let highest_weight = eligible
+            .iter()
+            .map(|candidate| candidate.account.weight())
+            .max()?;
+        let (mut preferred, preferred_candidate) = self.preferred_decision(candidates, context);
+        if let Some(candidate) = preferred_candidate {
+            if !context.preferred_account_overrides_weight
+                && candidate.account.weight() < highest_weight
+            {
+                preferred =
+                    PreferredAccountSelection::Blocked(AccountSchedulingBlocker::LowerWeight);
+            } else {
+                return Some(AccountSelection {
+                    candidate,
+                    preferred: PreferredAccountSelection::Hit,
+                    policy_choice: false,
+                });
+            }
+        }
+        eligible.retain(|candidate| candidate.account.weight() == highest_weight);
+
+        let candidate = match context.policy.strategy() {
+            RotationStrategy::QuotaResetPriority => {
+                eligible.sort_by(|left, right| {
+                    (
+                        left.signals.quota_reset_at.is_none(),
+                        left.signals.quota_reset_at,
+                    )
+                        .cmp(&(
+                            right.signals.quota_reset_at.is_none(),
+                            right.signals.quota_reset_at,
+                        ))
+                        .then_with(|| {
+                            capacity_utilization(left, context)
+                                .total_cmp(&capacity_utilization(right, context))
+                        })
+                        .then_with(|| {
+                            left.signals
+                                .last_started_at
+                                .cmp(&right.signals.last_started_at)
+                        })
+                        .then_with(|| left.account.id().cmp(right.account.id()))
+                });
+                eligible.first().copied()?
+            }
+            RotationStrategy::RoundRobin => {
+                eligible.sort_by_key(|candidate| candidate.account.id().clone());
+                let index = context.round_robin_cursor as usize % eligible.len();
+                eligible.get(index).copied()?
+            }
+            RotationStrategy::Smart => select_smart_candidate(&eligible, context)?,
+            RotationStrategy::Sticky => {
+                eligible.sort_by_key(|candidate| {
+                    (
+                        Reverse(candidate.signals.last_started_at),
+                        candidate.account.id().clone(),
+                    )
+                });
+                eligible.first().copied()?
+            }
+        };
+        Some(AccountSelection {
+            candidate,
+            preferred,
+            policy_choice: false,
+        })
+    }
+
+    fn preferred_decision<'a>(
+        &self,
+        candidates: &'a [AccountCandidate],
+        context: &AccountSelectionContext,
+    ) -> (PreferredAccountSelection, Option<&'a AccountCandidate>) {
+        let Some(preferred) = context.preferred_account.as_ref() else {
+            return (PreferredAccountSelection::NotRequested, None);
+        };
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.account.id() == preferred)
+        else {
+            return (PreferredAccountSelection::Missing, None);
+        };
+        match self.scheduling_blocker(candidate, context) {
+            Some(blocker) => (PreferredAccountSelection::Blocked(blocker), None),
+            None => (PreferredAccountSelection::Hit, Some(candidate)),
+        }
+    }
+
+    /// 只有本地并发可等待；账号权限、失效、额度与上游冷却仍立即排除
+    #[must_use]
+    pub fn wait_candidates(
+        &self,
+        candidates: &[AccountCandidate],
+        context: &AccountSelectionContext,
+    ) -> Vec<ProviderAccountId> {
+        let mut candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    self.scheduling_blocker(candidate, context),
+                    None | Some(AccountSchedulingBlocker::ConcurrencyLimit)
+                )
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|candidate| {
+            (
+                context.preferred_account.as_ref() != Some(candidate.account.id()),
+                Reverse(candidate.account.weight()),
+                candidate.account.id().clone(),
+            )
+        });
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.account.id().clone())
+            .collect()
+    }
+
+    /// Provider 先投影续写范围与资格，再将等待候选交给共用评分规则选择队列
+    pub async fn wait_for_capacity(
+        &self,
+        waiting: &mut CapacityWait<'_, ProviderAccountId>,
+        keys: &[ProviderAccountId],
+        candidates: &[AccountCandidate],
+        context: &AccountSelectionContext,
+    ) -> Result<(), QueueRejection> {
+        let config = context.policy.smart_scheduling();
+        let queue_weight = config.weights()[5];
+        if context.policy.strategy() != RotationStrategy::Smart || queue_weight == 0.0 {
+            return waiting.wait(keys).await;
+        }
+        // 账号信号在队列锁外评分，锁内只读取实时队长并查表，避免扫描候选阻塞其他等待者
+        let scores = candidates
+            .iter()
+            .map(|candidate| (candidate.account.id(), smart_score(candidate, context)))
+            .collect::<HashMap<_, _>>();
+        waiting
+            .wait_with_priority(keys, |key, count| {
+                scores[key] + queue_weight / (1.0 + count as f64)
+            })
+            .await
+    }
+
+    pub(crate) fn scheduling_blocker(
+        &self,
+        candidate: &AccountCandidate,
+        context: &AccountSelectionContext,
+    ) -> Option<AccountSchedulingBlocker> {
+        if context
+            .account_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.allows(candidate.account.id()))
+        {
+            return Some(AccountSchedulingBlocker::OutsideClientScope);
+        }
+        if !context.eligibility.bypasses_local_eligibility() {
+            let status = candidate
+                .account
+                .status_projection(context.now, candidate.signals.cooldown)
+                .status;
+            if status != AccountStatus::Normal {
+                return Some(AccountSchedulingBlocker::LocalAvailability);
+            }
+        }
+        if context.excluded_accounts.contains(candidate.account.id()) {
+            return Some(AccountSchedulingBlocker::Excluded);
+        }
+        if context.busy_accounts.contains(candidate.account.id()) {
+            return Some(AccountSchedulingBlocker::ConcurrencyLimit);
+        }
+        if context
+            .concurrency_limit(candidate)
+            .limit()
+            .is_some_and(|limit| candidate.signals.in_flight >= limit.get())
+        {
+            return Some(AccountSchedulingBlocker::ConcurrencyLimit);
+        }
+        None
+    }
+}
+
+// 首输出 10 秒时延迟得分减半；固定尺度不随其他候选账号变化
+const SMART_LATENCY_HALF_SCORE_MS: f64 = 10_000.0;
+// 距重置一小时时得分减半；未知和已过期时间不提供重置奖励
+const SMART_RESET_HALF_SCORE_SECONDS: f64 = 3_600.0;
+
+fn capacity_utilization(candidate: &AccountCandidate, context: &AccountSelectionContext) -> f64 {
+    context
+        .concurrency_limit(candidate)
+        .limit()
+        .map_or(0.0, |limit| {
+            f64::from(candidate.signals.in_flight) / f64::from(limit.get())
+        })
+}
+
+fn select_smart_candidate<'a>(
+    candidates: &[&'a AccountCandidate],
+    context: &AccountSelectionContext,
+) -> Option<&'a AccountCandidate> {
+    let mut ranked = candidates
+        .iter()
+        .map(|candidate| (*candidate, smart_score(candidate, context)))
+        .collect::<Vec<_>>();
+    let best_score = ranked
+        .iter()
+        .map(|(_, score)| *score)
+        .max_by(f64::total_cmp)?;
+    ranked.retain(|(_, score)| {
+        best_score - score <= context.policy.smart_scheduling().score_tolerance()
+    });
+    // 轮换顺序保持稳定，避免分数轻微交错与 cursor 同步后仍反复命中同一账号
+    ranked.sort_unstable_by(|(left, _), (right, _)| left.account.id().cmp(right.account.id()));
+    let index = (context.round_robin_cursor % ranked.len() as u64) as usize;
+    Some(ranked[index].0)
+}
+
+pub(crate) fn smart_score(candidate: &AccountCandidate, context: &AccountSelectionContext) -> f64 {
+    let config = context.policy.smart_scheduling();
+    let now = context.now;
+    let load = 1.0 - capacity_utilization(candidate, context).clamp(0.0, 1.0);
+    let quota = candidate
+        .signals
+        .quota_remaining_rank
+        .map_or(0.5, |quota| quota.min(10_000) as f64 / 10_000.0);
+    let failure = 1.0
+        - f64::from(
+            candidate
+                .signals
+                .failure_rate_basis_points
+                .unwrap_or_default()
+                .min(10_000),
+        ) / 10_000.0;
+    let latency = candidate
+        .signals
+        .first_output_latency_ms
+        .filter(|latency| *latency > 0)
+        .map_or(1.0, |latency| {
+            SMART_LATENCY_HALF_SCORE_MS / (SMART_LATENCY_HALF_SCORE_MS + latency as f64)
+        });
+
+    let reset = candidate
+        .signals
+        .quota_reset_at
+        .and_then(|reset| reset.duration_since(now).ok())
+        .filter(|remaining| !remaining.is_zero())
+        .map_or(0.0, |remaining| {
+            SMART_RESET_HALF_SCORE_SECONDS
+                / (SMART_RESET_HALF_SCORE_SECONDS + remaining.as_secs_f64())
+        });
+    let [
+        load_weight,
+        quota_weight,
+        health_weight,
+        latency_weight,
+        reset_weight,
+        _,
+    ] = config.weights();
+    load_weight * load
+        + quota_weight * quota
+        + health_weight * failure
+        + latency_weight * latency
+        + reset_weight * reset
+}

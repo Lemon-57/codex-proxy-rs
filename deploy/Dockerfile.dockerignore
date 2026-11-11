@@ -1,0 +1,41 @@
+# Build outputs and dependency caches.
+**/target/
+**/node_modules/
+**/.pnpm-store/
+**/.pnpm-cache/
+frontend/dist/
+frontend/.vite/
+dist/*
+!dist/docker/
+!dist/docker/**
+
+# Application runtime state.
+.runtime/
+data/
+logs/
+deploy/data/
+deploy/logs/
+*.log
+
+# Local configuration.
+local.yaml
+local.yml
+.env
+.env.*
+config.yaml
+deploy/config.yaml
+deploy/.env
+
+# Local workspaces and tooling state.
+.git/
+.codegraph/
+.worktrees/
+worktrees/
+.codex-ws-audit/
+.agents/
+.cargo/
+.reasonix/
+*.tmp
+
+# 独立源码仓库仅用于联调，发行构建消费锁定依赖。
+modules/

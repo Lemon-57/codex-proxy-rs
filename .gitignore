@@ -1,0 +1,47 @@
+# Rust
+/backend/**/target/
+*.profraw
+*.profdata
+
+# Frontend
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.pnpm-store/
+/frontend/.pnpm-cache/
+*.tsbuildinfo
+
+# Release artifacts
+/dist/
+
+# Runtime data
+/.runtime/
+*.log
+
+# Local planning documents
+/docs/plans/
+
+# Local configuration and secrets
+/deploy/config.yaml
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Local tools and worktrees
+/.codegraph/
+/.playwright-cli/
+/.codex-ws-audit/
+/.reasonix/
+/.claude
+/.worktrees/
+/worktrees/
+/.cargo/
+*.tmp

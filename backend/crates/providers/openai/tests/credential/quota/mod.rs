@@ -1,0 +1,1025 @@
+//! OpenAI 额度事实边界与展示快照回归
+
+mod credits;
+mod initial_sync;
+mod recovery;
+mod refresh_timing;
+mod reset_credits;
+mod reset_recovery;
+mod revoked;
+mod scheduling;
+mod slots;
+mod snapshot;
+mod subscription;
+mod warmup;
+
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use chrono::{TimeZone as _, Utc};
+use gateway_core::account::{
+    AccountStateChange, AccountStatus, CredentialState, ProviderAccount, ProviderAccountStore as _,
+    QuotaAccessChange, QuotaAccessState, QuotaEvidence, QuotaState,
+};
+use gateway_protocol::openai::events::parse_rate_limits_event;
+use provider_openai::OFFICIAL_CODEX_BASE_URL;
+use provider_openai::credential::{
+    CodexCredentialQuotaError, CodexCredentialQuotaService, ImportCodexOAuthCredential,
+};
+use provider_openai::transport::profile::{CodexWireProfile, CodexWireProfileState};
+use serde_json::json;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use crate::support::{MemoryAccountStore, profile, secret};
+
+fn wire_profile() -> CodexWireProfileState {
+    CodexWireProfileState::new(CodexWireProfile {
+        client_kind: provider_openai::transport::profile::selection::ClientKind::Desktop,
+        originator: "codex_cli_rs".to_owned(),
+        codex_version: "0.144.0".to_owned(),
+        desktop_version: "1.0.0".to_owned(),
+        desktop_build: "1".to_owned(),
+        os_type: "linux".to_owned(),
+        os_version: "6.8".to_owned(),
+        arch: "x86_64".to_owned(),
+        terminal: "quota-contract".to_owned(),
+        exact_user_agent: None,
+        installation_seed: None,
+        residency: None,
+        account_routing_override: None,
+        verified_at: Utc
+            .with_ymd_and_hms(2026, 7, 18, 0, 0, 0)
+            .single()
+            .expect("fixture time"),
+    })
+}
+
+fn quota_service(store: &Arc<MemoryAccountStore>) -> CodexCredentialQuotaService {
+    quota_service_with_base_url(
+        store,
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client"),
+        OFFICIAL_CODEX_BASE_URL.to_owned(),
+    )
+}
+
+pub(super) fn quota_service_with_base_url(
+    store: &Arc<MemoryAccountStore>,
+    http: reqwest::Client,
+    base_url: String,
+) -> CodexCredentialQuotaService {
+    // 首查随机启动延迟只在 initial_sync 专项测试中注入非零值
+    // 其余测试固定为零，避免计时抖动影响业务断言
+    quota_service_with_initial_delays(store, http, base_url, Arc::new(|| Duration::ZERO))
+}
+
+pub(super) fn quota_service_with_initial_delays(
+    store: &Arc<MemoryAccountStore>,
+    http: reqwest::Client,
+    base_url: String,
+    delays: provider_openai::credential::CodexInitialSyncDelays,
+) -> CodexCredentialQuotaService {
+    CodexCredentialQuotaService::new(
+        store.repository(),
+        wire_profile(),
+        http,
+        base_url,
+        Arc::new(crate::support::MemoryCooldownPort::new()),
+        crate::support::runtime_policy(),
+    )
+    .with_initial_sync_delays(delays)
+}
+
+async fn create_account(store: &Arc<MemoryAccountStore>, account_id: &str) {
+    create_account_with_enabled(store, account_id, true).await;
+}
+
+async fn create_account_with_enabled(
+    store: &Arc<MemoryAccountStore>,
+    account_id: &str,
+    enabled: bool,
+) {
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: account_id.to_owned(),
+            name: account_id.to_owned(),
+            secret: secret(&format!("token-{account_id}")),
+            verified_account: profile(&format!("chatgpt-{account_id}")),
+            next_refresh_at: Some(Utc::now() + chrono::Duration::minutes(30)),
+            enabled,
+        })
+        .await;
+}
+
+async fn persist_credential_state(
+    store: &MemoryAccountStore,
+    account: &ProviderAccount,
+    credential_state: CredentialState,
+) {
+    store
+        .apply_state_change(AccountStateChange {
+            account_id: account.id().clone(),
+            expected_revision: account.revision(),
+            credential_state,
+            observed_at: SystemTime::now(),
+            error_reason: credential_state.error_reason(),
+            message: None,
+        })
+        .await
+        .expect("persist credential state");
+}
+
+async fn persist_quota_state(
+    store: &MemoryAccountStore,
+    account: &ProviderAccount,
+    state: QuotaState,
+) {
+    store
+        .apply_quota_access(QuotaAccessChange {
+            account_id: account.id().clone(),
+            expected_revision: account.revision(),
+            state,
+        })
+        .await
+        .expect("persist quota state");
+}
+
+fn exhausted_quota(reset_at: Option<SystemTime>) -> QuotaState {
+    QuotaState::exhausted(
+        QuotaEvidence::UsageLimitReached,
+        SystemTime::now(),
+        reset_at,
+    )
+}
+
+#[tokio::test]
+async fn successful_inference_at_the_subscription_limit_stops_further_scheduling() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_passive_allowed";
+    create_account(&store, account_id).await;
+    let account = store.account(account_id).expect("account");
+    persist_quota_state(&store, &account, exhausted_quota(None)).await;
+    let service = quota_service(&store);
+    let headers = vec![
+        ("x-codex-active-limit".to_owned(), "codex".to_owned()),
+        ("x-codex-primary-used-percent".to_owned(), "100".to_owned()),
+        ("x-codex-limit-reached".to_owned(), "true".to_owned()),
+    ];
+
+    assert!(
+        service
+            .synchronize_passive_headers(&account, &headers)
+            .await
+            .expect("passive quota")
+    );
+    let current = store.account(account_id).expect("updated account");
+    let snapshot = service
+        .read_account(account.id())
+        .await
+        .expect("read quota")
+        .expect("quota snapshot");
+
+    assert_eq!(snapshot.fact().remaining_percent(), Some(0));
+    assert_eq!(snapshot.quota().access(), QuotaAccessState::Exhausted);
+    assert_eq!(current.quota().access(), QuotaAccessState::Exhausted);
+    assert_eq!(
+        current.status_projection(SystemTime::now(), None).status,
+        AccountStatus::QuotaExhausted
+    );
+}
+
+#[tokio::test]
+async fn passive_quota_updates_keep_core_and_model_specific_buckets_independent() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_independent_passive_buckets";
+    create_account(&store, account_id).await;
+    let account = store.account(account_id).expect("account");
+    let service = quota_service(&store);
+    let initial_headers = vec![
+        ("x-codex-active-limit".to_owned(), "codex".to_owned()),
+        ("x-codex-primary-used-percent".to_owned(), "81".to_owned()),
+        (
+            "x-codex-primary-window-minutes".to_owned(),
+            "10080".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-used-percent".to_owned(),
+            "0".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-window-minutes".to_owned(),
+            "10080".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-limit-name".to_owned(),
+            "GPT-5.3-Codex-Spark".to_owned(),
+        ),
+    ];
+    service
+        .synchronize_passive_headers(&account, &initial_headers)
+        .await
+        .expect("initial passive quota");
+
+    let spark_headers = vec![
+        // 生产响应会把当前具名桶同时复制到旧版 `x-codex-*` 默认头；这个
+        // 兼容别名不能覆盖已有的账号 core 桶
+        ("x-codex-active-limit".to_owned(), "codex".to_owned()),
+        ("x-codex-primary-used-percent".to_owned(), "1".to_owned()),
+        (
+            "x-codex-primary-window-minutes".to_owned(),
+            "10080".to_owned(),
+        ),
+        (
+            "x-codex-primary-reset-at".to_owned(),
+            "1900000100".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-used-percent".to_owned(),
+            "1".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-window-minutes".to_owned(),
+            "10080".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-reset-at".to_owned(),
+            "1900000100".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-limit-name".to_owned(),
+            "GPT-5.3-Codex-Spark".to_owned(),
+        ),
+    ];
+    service
+        .synchronize_passive_headers(&account, &spark_headers)
+        .await
+        .expect("Spark passive quota");
+
+    let snapshot = service
+        .read_account(account.id())
+        .await
+        .expect("read Spark quota")
+        .expect("Spark quota snapshot");
+    let core = snapshot
+        .windows()
+        .iter()
+        .find(|window| window.source() == "codex")
+        .expect("core quota window");
+    let spark = snapshot
+        .windows()
+        .iter()
+        .find(|window| window.source() == "codex_bengalfox")
+        .expect("Spark quota window");
+    assert_eq!(core.used_percent(), Some(81.0));
+    assert_eq!(spark.used_percent(), Some(1.0));
+
+    let core_headers = vec![
+        // 文本响应的活动标记不是独立额度头，通用周窗口仍应更新原来的账号额度
+        ("x-codex-active-limit".to_owned(), "premium".to_owned()),
+        ("x-codex-primary-used-percent".to_owned(), "82".to_owned()),
+        (
+            "x-codex-primary-window-minutes".to_owned(),
+            "10080".to_owned(),
+        ),
+    ];
+    service
+        .synchronize_passive_headers(&account, &core_headers)
+        .await
+        .expect("core passive quota");
+
+    let snapshot = service
+        .read_account(account.id())
+        .await
+        .expect("read core quota")
+        .expect("core quota snapshot");
+    let core = snapshot
+        .windows()
+        .iter()
+        .find(|window| window.source() == "codex")
+        .expect("core quota window");
+    let spark = snapshot
+        .windows()
+        .iter()
+        .find(|window| window.source() == "codex_bengalfox")
+        .expect("Spark quota window");
+    assert_eq!(core.used_percent(), Some(82.0));
+    assert_eq!(spark.used_percent(), Some(1.0));
+
+    let persisted = store.quota_json(account_id).expect("persisted quota");
+    let by_limit_id = persisted
+        .get("rate_limits_by_limit_id")
+        .and_then(serde_json::Value::as_object)
+        .expect("rate-limit map");
+    assert_eq!(
+        by_limit_id.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["codex", "codex_bengalfox"]
+    );
+    assert!(persisted.get("rate_limit").is_none());
+    assert!(persisted.get("additional_rate_limits").is_none());
+}
+
+#[tokio::test]
+async fn websocket_additional_rate_limit_resolves_by_name_without_touching_core() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_websocket_additional_limit";
+    create_account(&store, account_id).await;
+    let account = store.account(account_id).expect("account");
+    let service = quota_service(&store);
+    let initial_headers = vec![
+        ("x-codex-active-limit".to_owned(), "codex".to_owned()),
+        ("x-codex-primary-used-percent".to_owned(), "84".to_owned()),
+        (
+            "x-codex-primary-window-minutes".to_owned(),
+            "10080".to_owned(),
+        ),
+        (
+            "x-codex-primary-reset-at".to_owned(),
+            "1900000000".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-used-percent".to_owned(),
+            "0".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-window-minutes".to_owned(),
+            "10080".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-reset-at".to_owned(),
+            "1900000100".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-limit-name".to_owned(),
+            "GPT-5.3-Codex-Spark".to_owned(),
+        ),
+    ];
+    service
+        .synchronize_passive_headers(&account, &initial_headers)
+        .await
+        .expect("initial quota metadata");
+
+    let event = json!({
+        "type": "codex.rate_limits",
+        "plan_type": "pro",
+        "rate_limits": {
+            "allowed": true,
+            "limit_reached": false,
+            "primary": {
+                "used_percent": 2,
+                "window_minutes": 10080,
+                "reset_at": 1900000100
+            },
+            "secondary": null
+        },
+        "additional_rate_limits": {
+            "GPT-5.3-Codex-Spark": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary": {
+                    "used_percent": 2,
+                    "window_minutes": 10080,
+                    "reset_at": 1900000100
+                },
+                "secondary": null
+            }
+        },
+        "credits": null
+    });
+    let observation = parse_rate_limits_event(&event).expect("WebSocket rate-limit event");
+    service
+        .synchronize_passive_rate_limits(&account, std::slice::from_ref(&observation))
+        .await
+        .expect("WebSocket passive quota");
+
+    let persisted = store.quota_json(account_id).expect("persisted quota");
+    let by_limit_id = persisted["rate_limits_by_limit_id"]
+        .as_object()
+        .expect("rate-limit map");
+    assert_eq!(
+        by_limit_id["codex"]["primary_window"]["used_percent"],
+        json!(84.0)
+    );
+    assert_eq!(
+        by_limit_id["codex_bengalfox"]["primary_window"]["used_percent"],
+        json!(2.0)
+    );
+    assert_eq!(persisted["active_limit"], json!("codex_bengalfox"));
+    assert_eq!(by_limit_id.len(), 2);
+}
+
+#[tokio::test]
+async fn quota_refresh_synchronizes_plan_changes_without_losing_subtypes() {
+    for (current_plan, observed_plan, expected) in [
+        (None, Some("free"), "free"),
+        (Some("plus"), Some("pro"), "pro"),
+        (Some("pro"), Some("plus"), "plus"),
+        (Some("plus"), Some("free"), "free"),
+        (Some("unknown"), Some("pro"), "pro"),
+        (Some("plus"), Some("  PRO  "), "pro"),
+        (Some("pro"), None, "pro"),
+        (Some("pro"), Some("unknown"), "pro"),
+        (Some("pro"), Some("  "), "pro"),
+        (
+            Some("self_serve_business_prolite"),
+            Some("team"),
+            "self_serve_business_prolite",
+        ),
+        (
+            Some("self_serve_business_usage_based"),
+            Some("team"),
+            "self_serve_business_usage_based",
+        ),
+        (
+            Some("enterprise_cbp_usage_based"),
+            Some("business"),
+            "enterprise_cbp_usage_based",
+        ),
+        (Some("edu_plus"), Some("edu"), "edu_plus"),
+        (Some("self_serve_business_prolite"), Some("pro"), "pro"),
+        (
+            Some("team"),
+            Some("self_serve_business_prolite"),
+            "self_serve_business_prolite",
+        ),
+        (Some("plus"), Some("future_plan"), "future_plan"),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = "acct_plan_refresh";
+        let mut verified_account = profile("chatgpt-plan-refresh");
+        verified_account.plan_type = current_plan.map(str::to_owned);
+        store
+            .seed_oauth_credential(ImportCodexOAuthCredential {
+                account_id: account_id.to_owned(),
+                name: account_id.to_owned(),
+                secret: secret("plan-refresh-token"),
+                verified_account,
+                next_refresh_at: None,
+                enabled: true,
+            })
+            .await;
+        let before = store.account(account_id).unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "plan_type": observed_plan,
+                "rate_limit": { "allowed": true, "primary_window": {"used_percent": 12} }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let service = quota_service_with_base_url(
+            &store,
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            server.uri(),
+        );
+        service
+            .refresh_account(before.id())
+            .await
+            .expect("refresh plan and quota");
+        let after = store.account(account_id).unwrap();
+        assert_eq!(
+            after.plan_type(),
+            Some(expected),
+            "{current_plan:?} -> {observed_plan:?}"
+        );
+        assert_eq!(after.revision(), before.revision());
+        assert_eq!(after.email(), before.email());
+        assert_eq!(after.upstream_user_id(), before.upstream_user_id());
+        assert_eq!(after.upstream_account_id(), before.upstream_account_id());
+    }
+}
+
+#[tokio::test]
+async fn passive_quota_observation_preserves_account_egress() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_passive_quota_egress";
+    create_account(&store, account_id).await;
+    let proxy = gateway_core::account::OutboundProxy::parse("http://127.0.0.1:8080").unwrap();
+    let location = serde_json::from_value::<gateway_core::account::RequestLocation>(json!({
+        "country": "US", "region": "New York", "city": "New York",
+        "timezone": "America/New_York"
+    }))
+    .unwrap();
+    store.set_egress(account_id, Some(proxy.clone()), Some(location.clone()));
+    let account = store.account(account_id).unwrap();
+    let observation = parse_rate_limits_event(&json!({
+        "type": "codex.rate_limits",
+        "plan_type": "pro",
+        "rate_limits": {"primary": {"used_percent": 5, "window_minutes": 300, "reset_at": 1900000000}}
+    }))
+    .unwrap();
+
+    quota_service(&store)
+        .synchronize_passive_rate_limits(&account, &[observation])
+        .await
+        .unwrap();
+
+    let updated = store.account(account_id).unwrap();
+    assert!(store.quota_json(account_id).is_some());
+    assert_eq!(updated.outbound_proxy(), Some(&proxy));
+    assert_eq!(updated.request_location(), Some(&location));
+}
+
+#[tokio::test]
+async fn passive_plan_observations_update_account_without_replaying_stale_plan() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_passive_plan").await;
+    let original = store.account("acct_passive_plan").unwrap();
+    let service = quota_service(&store);
+    service
+        .synchronize_passive_headers(
+            &original,
+            &[
+                ("x-codex-plan-type".to_owned(), "plus".to_owned()),
+                ("x-codex-primary-used-percent".to_owned(), "5".to_owned()),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.account("acct_passive_plan").unwrap().plan_type(),
+        Some("plus")
+    );
+    let upgrade = parse_rate_limits_event(&json!({
+        "type": "codex.rate_limits",
+        "plan_type": "pro",
+        "rate_limits": {"primary": {"used_percent": 5, "window_minutes": 300, "reset_at": 1900000000}}
+    })).unwrap();
+    service
+        .synchronize_passive_rate_limits(&original, &[upgrade])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.account("acct_passive_plan").unwrap().plan_type(),
+        Some("pro")
+    );
+    service
+        .synchronize_passive_headers(
+            &original,
+            &[("x-codex-primary-used-percent".to_owned(), "6".to_owned())],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.account("acct_passive_plan").unwrap().plan_type(),
+        Some("pro")
+    );
+    assert_eq!(
+        store.account("acct_passive_plan").unwrap().revision(),
+        original.revision()
+    );
+    let state = exhausted_quota(None);
+    persist_quota_state(&store, &original, state).await;
+    // 仅有套餐的新观察不能清除既有额度耗尽结论
+    service
+        .synchronize_passive_headers(
+            &original,
+            &[("x-codex-plan-type".to_owned(), "plus".to_owned())],
+        )
+        .await
+        .unwrap();
+    let changed = store.account("acct_passive_plan").unwrap();
+    assert_eq!(changed.plan_type(), Some("plus"));
+    assert_eq!(changed.quota(), state);
+    // 后台 RT 刷新拿着旧账号快照返回时，仍要提交新 token 并保留刚观测的套餐
+    store
+        .repository()
+        .rotate_refreshed_oauth_secret(
+            &original,
+            secret("rotated-after-plan-update"),
+            original.access_token_expires_at(),
+            None,
+        )
+        .await
+        .expect("quota changes must not invalidate credential rotation");
+    assert_eq!(
+        store.account("acct_passive_plan").unwrap().plan_type(),
+        Some("plus")
+    );
+}
+
+#[tokio::test]
+async fn initial_quota_worker_synchronizes_account_plan() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_worker_plan").await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "plan_type": "plus", "rate_limit": {"allowed": true, "primary_window": {"used_percent": 10}}
+        })))
+        .expect(1).mount(&server).await;
+    let service = quota_service_with_base_url(
+        &store,
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        server.uri(),
+    );
+    assert_eq!(service.synchronize().await.unwrap().updated, 1);
+    assert_eq!(
+        store.account("acct_worker_plan").unwrap().plan_type(),
+        Some("plus")
+    );
+}
+
+#[tokio::test]
+async fn concurrent_named_usage_preserves_newly_paused_general_window() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let id = "acct_concurrent_threshold";
+    create_account(&store, id).await;
+    store.set_quota_limits(
+        id,
+        serde_json::from_value(json!({"codex:18000s": 95})).unwrap(),
+    );
+    let account = store.account(id).unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rate_limit": {"primary_window": {"limit_window_seconds": 18000, "used_percent": 96}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let service = quota_service_with_base_url(
+        &store,
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        server.uri(),
+    );
+    let named = [
+        (
+            "x-codex-bengalfox-primary-used-percent".to_owned(),
+            "13".to_owned(),
+        ),
+        (
+            "x-codex-bengalfox-primary-window-minutes".to_owned(),
+            "300".to_owned(),
+        ),
+    ];
+    // 刷新先发起，两次读取都看到空快照，但刷新先写入达限结论
+    let (read, commit_refresh) = store.hold_next_quota_read();
+    let mut refresh = std::pin::pin!(service.refresh_account(account.id()));
+    tokio::select! {
+        result = &mut refresh => panic!("refresh finished before merge: {result:?}"),
+        ready = read => ready.unwrap(),
+    }
+    let (read, commit_passive) = store.hold_next_quota_read();
+    let mut passive = std::pin::pin!(service.synchronize_passive_headers(&account, &named));
+    tokio::select! {
+        result = &mut passive => panic!("passive write finished before merge: {result:?}"),
+        ready = read => ready.unwrap(),
+    }
+    commit_refresh.send(()).unwrap();
+    refresh.await.unwrap();
+    assert!(store.account(id).unwrap().quota_paused());
+    commit_passive.send(()).unwrap();
+    assert!(passive.await.unwrap());
+
+    assert!(store.account(id).unwrap().quota_paused());
+    let snapshot = service.read_account(account.id()).await.unwrap().unwrap();
+    for (source, percent) in [("codex", 96.0), ("codex_bengalfox", 13.0)] {
+        assert!(
+            snapshot
+                .windows()
+                .iter()
+                .any(|w| w.source() == source && w.used_percent() == Some(percent))
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_window_keeps_its_confirmed_limit_across_refresh_and_restart() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let id = "acct_partial_threshold";
+    create_account(&store, id).await;
+    store.set_quota_limits(
+        id,
+        serde_json::from_value(json!({"codex:604800s":95})).unwrap(),
+    );
+    let server = MockServer::start().await;
+    let service = quota_service_with_base_url(
+        &store,
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        server.uri(),
+    );
+    for (rate, blocked) in [
+        (
+            json!({"secondary_window":{"limit_window_seconds":604800,"used_percent":95}}),
+            true,
+        ),
+        (
+            json!({"primary_window":{"limit_window_seconds":18000,"used_percent":8}}),
+            true,
+        ),
+        (
+            json!({"secondary_window":{"limit_window_seconds":604800,"used_percent":0}}),
+            false,
+        ),
+    ] {
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"rate_limit":rate})))
+            .mount(&server)
+            .await;
+        if blocked {
+            service
+                .refresh_account(store.account(id).unwrap().id())
+                .await
+                .unwrap();
+        } else {
+            let result = service.synchronize_at(SystemTime::now()).await.unwrap();
+            assert_eq!(result.updated, 1);
+        }
+        let account = store.account(id).unwrap();
+        let restarted = quota_service(&store);
+        restarted
+            .prepare_scheduling(std::slice::from_ref(&account))
+            .await;
+        assert_eq!(
+            account.status_projection(SystemTime::now(), None).status == AccountStatus::QuotaPaused,
+            blocked
+        );
+    }
+}
+
+#[tokio::test]
+async fn quota_refresh_persists_explicit_provider_denial() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_explicit_quota_denial";
+    create_account(&store, account_id).await;
+    let account = store.account(account_id).expect("account");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .and(header(
+            "authorization",
+            format!("Bearer token-{account_id}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rate_limit": {
+                "allowed": false,
+                "primary_window": {"used_percent": 8, "reset_at": 1_900_000_000}
+            }
+        })))
+        .mount(&server)
+        .await;
+    let service = quota_service_with_base_url(
+        &store,
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client"),
+        server.uri(),
+    );
+
+    let snapshot = service
+        .refresh_account(account.id())
+        .await
+        .expect("refresh quota");
+    let current = store.account(account_id).expect("updated account");
+
+    assert_eq!(snapshot.fact().remaining_percent(), Some(92));
+    assert_eq!(snapshot.quota().access(), QuotaAccessState::Exhausted);
+    assert_eq!(
+        snapshot.quota().evidence(),
+        Some(QuotaEvidence::ProviderDenied)
+    );
+    assert_eq!(
+        current.status_projection(SystemTime::now(), None).status,
+        AccountStatus::QuotaExhausted
+    );
+    let persisted = store.quota_json(account_id).expect("persisted quota");
+    assert!(
+        persisted
+            .get("rate_limits_by_limit_id")
+            .and_then(|limits| limits.get("codex"))
+            .is_some()
+    );
+    assert!(persisted.get("rate_limit").is_none());
+}
+
+#[tokio::test]
+async fn quota_endpoint_auth_rejections_do_not_reclassify_credentials_or_quota() {
+    for status in [401, 403, 429, 503] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = format!("acct_quota_rejection_{status}");
+        create_account(&store, &account_id).await;
+        let account = store.account(&account_id).expect("account");
+        persist_quota_state(&store, &account, exhausted_quota(None)).await;
+        let before = store
+            .account(&account_id)
+            .expect("account before rejection");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/codex/usage"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let service = quota_service_with_base_url(
+            &store,
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("client"),
+            server.uri(),
+        );
+
+        assert!(matches!(
+            service.refresh_account(account.id()).await,
+            Err(CodexCredentialQuotaError::Upstream { .. })
+        ));
+        let current = store.account(&account_id).expect("preserved account");
+        assert_eq!(current, before);
+        assert_eq!(
+            service.synchronize().await.expect("quota cycle").transient,
+            1
+        );
+        assert_eq!(
+            store
+                .account(&account_id)
+                .expect("account after quota cycle"),
+            before
+        );
+    }
+}
+
+#[tokio::test]
+async fn quota_endpoint_revoked_token_marks_error_and_allows_in_flight_refresh_commit() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_quota_rejection_detail";
+    create_account(&store, account_id).await;
+    let account = store.account(account_id).expect("account");
+    persist_quota_state(&store, &account, exhausted_quota(None)).await;
+    let before = store.account(account_id).expect("account before rejection");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {
+                "code": "token_revoked",
+                "message": "Encountered invalidated oauth token for user, failing request"
+            }
+        })))
+        .mount(&server)
+        .await;
+    let service = quota_service_with_base_url(
+        &store,
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client"),
+        server.uri(),
+    );
+
+    match service.refresh_account(account.id()).await {
+        Err(CodexCredentialQuotaError::Upstream { status, code, .. }) => {
+            assert_eq!(status, Some(401));
+            assert_eq!(code.as_deref(), Some("token_revoked"));
+        }
+        other => panic!("expected upstream rejection, got {other:?}"),
+    }
+    let current = store.account(account_id).expect("account after refresh");
+    assert_eq!(current.credential_state(), CredentialState::Invalid);
+    assert_eq!(current.revision(), before.revision());
+    assert_eq!(current.quota(), before.quota());
+    assert_eq!(current.enabled(), before.enabled());
+    assert_eq!(
+        current.last_error_reason(),
+        Some(gateway_core::account::AccountErrorReason::CredentialInvalid)
+    );
+    assert_eq!(
+        current.last_error_message(),
+        Some("访问令牌已被撤销，请刷新凭据或重新授权")
+    );
+    assert_eq!(
+        current.status_projection(SystemTime::now(), None).status,
+        AccountStatus::Error
+    );
+    // 已开始的 RT exchange 仍可按原 revision 提交，并恢复新凭据状态
+    store
+        .repository()
+        .rotate_refreshed_oauth_secret(
+            &before,
+            secret("rotated-after-revocation-observation"),
+            before.access_token_expires_at(),
+            None,
+        )
+        .await
+        .expect("revocation observation must not discard a successful credential rotation");
+    let rotated = store.account(account_id).expect("rotated account");
+    assert_eq!(rotated.credential_state(), CredentialState::Ready);
+    assert_eq!(rotated.last_error_reason(), None);
+    assert_eq!(rotated.last_error_message(), None);
+}
+
+#[tokio::test]
+async fn payment_required_is_authoritative_quota_exhaustion_without_fabricated_usage() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_payment_required";
+    create_account(&store, account_id).await;
+    let account = store.account(account_id).expect("account");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(402).set_body_json(json!({
+            "detail": {"code": "billing_required"}
+        })))
+        .mount(&server)
+        .await;
+    let service = quota_service_with_base_url(
+        &store,
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client"),
+        server.uri(),
+    );
+
+    assert!(service.refresh_account(account.id()).await.is_err());
+    let current = store.account(account_id).expect("updated account");
+    assert_eq!(current.quota().access(), QuotaAccessState::Exhausted);
+    assert_eq!(
+        current.quota().evidence(),
+        Some(QuotaEvidence::PaymentRequired)
+    );
+    assert!(!store.has_quota(account_id));
+}
+
+#[tokio::test]
+async fn quota_refresh_preserves_disabled_and_credential_error_facts() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_disabled_credential_error";
+    create_account_with_enabled(&store, account_id, false).await;
+    let account = store.account(account_id).expect("account");
+    persist_credential_state(&store, &account, CredentialState::Expired).await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rate_limit": {"allowed": true, "primary_window": {"used_percent": 1}}
+        })))
+        .mount(&server)
+        .await;
+    let service = quota_service_with_base_url(
+        &store,
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client"),
+        server.uri(),
+    );
+
+    service
+        .refresh_account(account.id())
+        .await
+        .expect("refresh quota");
+    let current = store.account(account_id).expect("updated account");
+
+    assert!(!current.enabled());
+    assert_eq!(current.credential_state(), CredentialState::Expired);
+    assert_eq!(current.quota().access(), QuotaAccessState::Allowed);
+    assert_eq!(
+        current.status_projection(SystemTime::now(), None).status,
+        AccountStatus::Disabled
+    );
+}
+
+#[tokio::test]
+async fn passive_credit_updates_replace_balance_without_changing_quota_access() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_passive_credits").await;
+    let account = store.account("acct_passive_credits").unwrap();
+    let service = quota_service(&store);
+    let initial = parse_rate_limits_event(&json!({
+        "type": "codex.rate_limits",
+        "rate_limits": {"primary": {"used_percent": 28, "window_minutes": 300}},
+        "credits": {"has_credits": true, "unlimited": false, "balance": "62500"}
+    }))
+    .unwrap();
+    service
+        .synchronize_passive_rate_limits(&account, &[initial])
+        .await
+        .unwrap();
+    for (wire, expected) in [
+        (
+            json!({"has_credits": false, "unlimited": false, "balance": "0"}),
+            Some("0"),
+        ),
+        (json!({"has_credits": true, "unlimited": false}), None),
+    ] {
+        let update =
+            parse_rate_limits_event(&json!({"type": "codex.rate_limits", "credits": wire}))
+                .unwrap();
+        service
+            .synchronize_passive_rate_limits(&account, &[update])
+            .await
+            .unwrap();
+        let snapshot = service.read_account(account.id()).await.unwrap().unwrap();
+        assert_eq!(snapshot.credits().unwrap().balance.as_deref(), expected);
+        assert_eq!(snapshot.windows()[0].used_percent(), Some(28.0));
+        assert_eq!(snapshot.quota().access(), QuotaAccessState::Allowed);
+    }
+}

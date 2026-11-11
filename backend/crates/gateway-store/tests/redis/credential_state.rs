@@ -1,0 +1,28 @@
+//! 验证凭据状态与目录缓存保持 Provider 中立的键和值合同
+
+use chrono::Utc;
+use gateway_store::{
+    Revision,
+    redis::{CredentialStateCache, RedisProviderCatalogCacheKey},
+};
+
+#[test]
+fn credential_state_rejects_provider_specific_status() {
+    let state = CredentialStateCache {
+        provider_account_id: "account-1".to_owned(),
+        revision: Revision::new(1).expect("positive revision"),
+        enabled: true,
+        credential_state: "codex_special".to_owned(),
+        observed_at: Utc::now(),
+    };
+    assert!(state.validate().is_err());
+}
+
+#[test]
+fn provider_catalog_cache_key_requires_provider_and_scope() {
+    let key = RedisProviderCatalogCacheKey {
+        provider_kind: "xai".to_owned(),
+        catalog_scope: String::new(),
+    };
+    assert!(key.validate().is_err());
+}

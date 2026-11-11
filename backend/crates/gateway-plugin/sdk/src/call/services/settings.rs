@@ -1,0 +1,427 @@
+//! 宿主设置服务的操作标识与请求、响应数据合同
+//!
+//! 从宿主设置类型与 public_service/settings.rs 生成；更新命令见 SDK 维护说明
+use super::Operation;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
+pub type ProviderRequestProfiles = BTreeMap<String, serde_json::Map<String, serde_json::Value>>;
+pub type ProviderRequestProfileUpdates =
+    BTreeMap<String, Option<serde_json::Map<String, serde_json::Value>>>;
+pub type ModelMappings = BTreeMap<String, String>;
+pub type Revision = NonZeroU64;
+pub type RotationStrategy = String;
+pub type AccountAffinity = String;
+pub type PricingOverrides = BTreeMap<String, BTreeMap<String, ModelPriceOverride>>;
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountErrorProtection {
+    pub enabled: bool,
+    pub rules: Vec<AccountErrorRule>,
+    pub threshold: u32,
+    pub window_seconds: u64,
+    pub duration_seconds: u64,
+    pub probe_enabled: bool,
+    pub probe_model: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountErrorRule {
+    pub id: String,
+    pub name: String,
+    pub conditions: Vec<AccountErrorCondition>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountErrorCondition {
+    pub field: AccountErrorField,
+    pub operator: AccountErrorOperator,
+    pub values: Vec<Option<String>>,
+    #[serde(default)]
+    pub ignore_case: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountErrorField {
+    Provider,
+    Status,
+    Code,
+    Type,
+    Message,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountErrorOperator {
+    Equals,
+    Contains,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodexPrivacyPolicy {
+    pub enabled: bool,
+    pub on_error: PrivacyFailureMode,
+    pub rules: Vec<PrivacyRule>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyFailureMode {
+    SkipRule,
+    RejectRequest,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyScope {
+    TurnMetadata,
+    DesktopGitContext,
+    EnvironmentText,
+    RequestBody,
+    RequestHeader,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyAction {
+    RegexReplace,
+    SetValue,
+    RenameKey,
+    RemoveField,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrivacyRule {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub steps: Vec<PrivacyStep>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrivacyStep {
+    pub scope: PrivacyScope,
+    pub selector: String,
+    pub action: PrivacyAction,
+    /// 删除动作的 null 表示无条件删除，字符串模式只匹配目标字符串值
+    pub pattern: Option<String>,
+    pub replacement: String,
+    pub value: serde_json::Value,
+    pub replace_all: bool,
+    pub case_insensitive: bool,
+    pub multi_line: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivacyRuleOutcome {
+    pub rule_id: String,
+    pub matches: usize,
+    pub status: String,
+    pub reason: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrivacyPreviewRequest {
+    pub policy: CodexPrivacyPolicy,
+    pub body: serde_json::Value,
+    pub headers: BTreeMap<String, Vec<String>>,
+    pub turn_metadata: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivacyPreviewResult {
+    pub body: serde_json::Value,
+    pub headers: BTreeMap<String, Vec<String>>,
+    pub turn_metadata: Option<String>,
+    pub outcomes: Vec<PrivacyRuleOutcome>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSettings {
+    pub codex_privacy_policy: CodexPrivacyPolicy,
+    pub request_location_enabled: bool,
+    pub request_location: RequestLocation,
+    pub refresh_margin_seconds: u64,
+    pub refresh_concurrency: u32,
+    pub max_concurrent_per_account: u32,
+    pub max_waiting_per_key: u32,
+    pub max_waiting_per_account: u32,
+    pub key_queue_timeout_seconds: u32,
+    pub account_queue_timeout_seconds: u32,
+    pub switch_account_on_queue_failure: bool,
+    pub max_retry_after_seconds: u32,
+    pub openai_guardian_reserved_concurrency: u32,
+    pub openai_account_affinity: AccountAffinity,
+    pub max_account_rotations: u32,
+    pub openai_session_affinity_ttl_hours: u32,
+    pub responses_max_decompressed_body_bytes: u64,
+    pub smart_scheduling: SmartSchedulingConfig,
+    pub min_codex_desktop_version: Option<String>,
+    pub min_codex_cli_version: Option<String>,
+    pub usage_retention_days: u32,
+    pub ops_event_retention_days: u32,
+    pub audit_retention_days: u32,
+    pub account_error_protection: AccountErrorProtection,
+    pub account_warmup_enabled: bool,
+    pub account_warmup_cron: String,
+    pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_default_enabled: bool,
+    #[serde(default)]
+    pub reset_credit_on_low_weekly_quota: bool,
+    pub reset_credit_lead_minutes: u32,
+    pub reset_credit_max_weekly_remaining_percent: Option<u32>,
+    pub request_profiles: ProviderRequestProfiles,
+    pub config_revision: Revision,
+    pub model_mappings: ModelMappings,
+    pub rotation_strategy: RotationStrategy,
+    pub updated_at: String,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceRuntimeSettings {
+    pub codex_privacy_policy: CodexPrivacyPolicy,
+    pub request_location_enabled: bool,
+    pub request_location: RequestLocation,
+    pub refresh_margin_seconds: u64,
+    pub refresh_concurrency: u32,
+    pub max_concurrent_per_account: u32,
+    pub max_waiting_per_key: u32,
+    pub max_waiting_per_account: u32,
+    pub key_queue_timeout_seconds: u32,
+    pub account_queue_timeout_seconds: u32,
+    pub switch_account_on_queue_failure: bool,
+    pub max_retry_after_seconds: u32,
+    pub openai_guardian_reserved_concurrency: u32,
+    pub openai_account_affinity: AccountAffinity,
+    pub max_account_rotations: u32,
+    pub openai_session_affinity_ttl_hours: u32,
+    pub responses_max_decompressed_body_bytes: u64,
+    pub smart_scheduling: SmartSchedulingConfig,
+    pub min_codex_desktop_version: Option<String>,
+    pub min_codex_cli_version: Option<String>,
+    pub usage_retention_days: u32,
+    pub ops_event_retention_days: u32,
+    pub audit_retention_days: u32,
+    pub account_error_protection: AccountErrorProtection,
+    pub account_warmup_enabled: bool,
+    pub account_warmup_cron: String,
+    pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_default_enabled: bool,
+    #[serde(default)]
+    pub reset_credit_on_low_weekly_quota: bool,
+    pub reset_credit_lead_minutes: u32,
+    pub reset_credit_max_weekly_remaining_percent: Option<u32>,
+    /// 读取设置时的版本；与写入在同一事务内比较，防止覆盖并发更新
+    pub expected_revision: Revision,
+    /// 只覆盖提交的 Provider；未提交项保留当前持久值
+    pub request_profile_updates: ProviderRequestProfileUpdates,
+    pub model_mappings: ModelMappings,
+    pub rotation_strategy: RotationStrategy,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminApiKeyMutation {
+    pub config_revision: Revision,
+    pub exists: bool,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegeneratedAdminApiKey {
+    pub mutation: AdminApiKeyMutation,
+    pub key: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MutationActor {
+    AdminSession { admin_user_id: String },
+    AdminApiKey,
+    System,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct MutationContext {
+    pub actor: MutationActor,
+    pub request_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestLocation {
+    pub country: String,
+    pub region: String,
+    pub city: String,
+    pub timezone: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SmartSchedulingConfig {
+    pub load_weight: f64,
+    pub quota_weight: f64,
+    pub health_weight: f64,
+    pub latency_weight: f64,
+    pub reset_weight: f64,
+    pub queue_weight: f64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TokenPriceOverride {
+    pub input: String,
+    pub output: String,
+    pub cache_read: String,
+    pub cache_write: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelPriceOverride {
+    pub multiplier_bps: u32,
+    pub bands: BTreeMap<String, TokenPriceOverride>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PricingCatalog {
+    pub defaults: PricingOverrides,
+    pub overrides: PricingOverrides,
+    pub synced: PricingOverrides,
+    pub synced_at: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PricingSyncPreview {
+    pub prices: PricingOverrides,
+    pub skipped: Vec<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SyncPricing {
+    pub preview: PricingSyncPreview,
+    pub models: BTreeMap<String, BTreeSet<String>>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PricingChange {
+    Replace(ModelPriceOverride),
+    Multiplier(u32),
+    Reset,
+    Delete,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdatePricing {
+    pub provider: String,
+    pub models: Vec<String>,
+    pub change: PricingChange,
+}
+pub struct Load;
+impl Operation for Load {
+    const NAME: &'static str = "settings.load";
+    type Input = ();
+    type Output = RuntimeSettings;
+}
+pub struct PreviewPrivacyPolicy;
+impl Operation for PreviewPrivacyPolicy {
+    const NAME: &'static str = "settings.preview_privacy_policy";
+    type Input = PrivacyPreviewRequest;
+    type Output = PrivacyPreviewResult;
+}
+pub struct Replace;
+impl Operation for Replace {
+    const NAME: &'static str = "settings.replace";
+    type Input = (MutationContext, ReplaceRuntimeSettings);
+    type Output = RuntimeSettings;
+}
+pub struct ApiKeyExists;
+impl Operation for ApiKeyExists {
+    const NAME: &'static str = "settings.admin_api_key_exists";
+    type Input = ();
+    type Output = bool;
+}
+pub struct RegenerateApiKey;
+impl Operation for RegenerateApiKey {
+    const NAME: &'static str = "settings.regenerate_admin_api_key";
+    type Input = MutationContext;
+    type Output = RegeneratedAdminApiKey;
+}
+pub struct DeleteApiKey;
+impl Operation for DeleteApiKey {
+    const NAME: &'static str = "settings.delete_admin_api_key";
+    type Input = MutationContext;
+    type Output = AdminApiKeyMutation;
+}
+pub struct Pricing;
+impl Operation for Pricing {
+    const NAME: &'static str = "settings.pricing";
+    type Input = ();
+    type Output = PricingCatalog;
+}
+pub struct PreviewPricingSync;
+impl Operation for PreviewPricingSync {
+    const NAME: &'static str = "settings.preview_pricing_sync";
+    type Input = ();
+    type Output = PricingSyncPreview;
+}
+pub struct Sync;
+impl Operation for Sync {
+    const NAME: &'static str = "settings.sync_pricing";
+    type Input = (MutationContext, SyncPricing);
+    type Output = ();
+}
+pub struct Update;
+impl Operation for Update {
+    const NAME: &'static str = "settings.update_pricing";
+    type Input = (MutationContext, UpdatePricing);
+    type Output = ();
+}
+pub struct ClientProfileOptions;
+impl Operation for ClientProfileOptions {
+    const NAME: &'static str = "settings.client_profile_options";
+    type Input = String;
+    type Output = serde_json::Map<String, serde_json::Value>;
+}
+pub struct PreviewClientProfile;
+impl Operation for PreviewClientProfile {
+    const NAME: &'static str = "settings.preview_client_profile";
+    type Input = (String, Option<serde_json::Map<String, serde_json::Value>>);
+    type Output = serde_json::Map<String, serde_json::Value>;
+}
+impl From<RuntimeSettings> for ReplaceRuntimeSettings {
+    fn from(settings: RuntimeSettings) -> Self {
+        Self {
+            codex_privacy_policy: settings.codex_privacy_policy,
+            request_location_enabled: settings.request_location_enabled,
+            request_location: settings.request_location,
+            refresh_margin_seconds: settings.refresh_margin_seconds,
+            refresh_concurrency: settings.refresh_concurrency,
+            max_concurrent_per_account: settings.max_concurrent_per_account,
+            max_waiting_per_key: settings.max_waiting_per_key,
+            max_waiting_per_account: settings.max_waiting_per_account,
+            key_queue_timeout_seconds: settings.key_queue_timeout_seconds,
+            account_queue_timeout_seconds: settings.account_queue_timeout_seconds,
+            switch_account_on_queue_failure: settings.switch_account_on_queue_failure,
+            max_retry_after_seconds: settings.max_retry_after_seconds,
+            openai_guardian_reserved_concurrency: settings.openai_guardian_reserved_concurrency,
+            openai_account_affinity: settings.openai_account_affinity,
+            max_account_rotations: settings.max_account_rotations,
+            openai_session_affinity_ttl_hours: settings.openai_session_affinity_ttl_hours,
+            responses_max_decompressed_body_bytes: settings.responses_max_decompressed_body_bytes,
+            smart_scheduling: settings.smart_scheduling,
+            min_codex_desktop_version: settings.min_codex_desktop_version,
+            min_codex_cli_version: settings.min_codex_cli_version,
+            usage_retention_days: settings.usage_retention_days,
+            ops_event_retention_days: settings.ops_event_retention_days,
+            audit_retention_days: settings.audit_retention_days,
+            account_error_protection: settings.account_error_protection,
+            account_warmup_enabled: settings.account_warmup_enabled,
+            account_warmup_cron: settings.account_warmup_cron,
+            account_warmup_model: settings.account_warmup_model,
+            reset_credit_default_enabled: settings.reset_credit_default_enabled,
+            reset_credit_on_low_weekly_quota: settings.reset_credit_on_low_weekly_quota,
+            reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
+            reset_credit_max_weekly_remaining_percent: settings
+                .reset_credit_max_weekly_remaining_percent,
+            expected_revision: settings.config_revision,
+            request_profile_updates: settings
+                .request_profiles
+                .into_iter()
+                .map(|(provider, value)| (provider, Some(value)))
+                .collect(),
+            model_mappings: settings.model_mappings,
+            rotation_strategy: settings.rotation_strategy,
+        }
+    }
+}

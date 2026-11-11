@@ -1,0 +1,161 @@
+<script setup lang="ts">
+import type { AccountErrorReason, AccountProtectionRule, AccountQuota, AccountStatus } from '@/api'
+
+import { ZPopover, ZScrollbar } from '@codex-proxy/ui'
+import { computed } from 'vue'
+
+import { useI18n } from 'vue-i18n'
+import { resolveAccountStatusPresentation } from './presenter'
+import { useStatusClock } from './useStatusClock'
+
+const props = withDefaults(
+  defineProps<{
+    quota?: AccountQuota
+    status: AccountStatus
+    errorReason?: AccountErrorReason | null
+    errorMessage?: string | null
+    rateLimitRecoveryDisplay?: string | null
+    rateLimitReason?: 'upstream_rate_limit' | 'error_protection' | null
+    protectionRules?: AccountProtectionRule[]
+    recoveryProbeRequired?: boolean
+    nextRefreshAt?: string | null
+    nextRefreshAtDisplay?: string | null
+    variant?: 'inline' | 'pill'
+  }>(),
+  {
+    errorReason: null,
+    errorMessage: null,
+    rateLimitRecoveryDisplay: null,
+    rateLimitReason: null,
+    protectionRules: () => [],
+    recoveryProbeRequired: false,
+    nextRefreshAt: null,
+    nextRefreshAtDisplay: null,
+    variant: 'inline',
+  },
+)
+
+const { t } = useI18n({ useScope: 'global' })
+
+const now = useStatusClock()
+const presentation = computed(() =>
+  resolveAccountStatusPresentation({
+    quota: props.quota,
+    status: props.status,
+    errorReason: props.errorReason,
+    errorMessage: props.errorMessage,
+    rateLimitRecoveryDisplay: props.rateLimitRecoveryDisplay,
+    rateLimitReason: props.rateLimitReason,
+    protectionRules: props.protectionRules,
+    recoveryProbeRequired: props.recoveryProbeRequired,
+    nextRefreshAt: props.nextRefreshAt,
+    nextRefreshAtDisplay: props.nextRefreshAtDisplay,
+    now: now.value.getTime(),
+  }),
+)
+</script>
+
+<template>
+  <ZPopover :disabled="!presentation.hasDetail" trigger="hover-click" placement="top-start">
+    <template #reference="{ open }">
+      <component
+        :is="presentation.hasDetail ? 'button' : 'span'"
+        :type="presentation.hasDetail ? 'button' : undefined"
+        :aria-label="presentation.hasDetail ? presentation.triggerLabel : undefined"
+        :aria-expanded="presentation.hasDetail ? open : undefined"
+        :aria-haspopup="presentation.hasDetail ? 'dialog' : undefined"
+        class="group inline-flex min-w-0 cursor-default border-0 bg-transparent p-0 text-left outline-none"
+      >
+        <span
+          v-if="variant === 'pill'"
+          class="inline-flex h-7 shrink-0 items-center rounded-full px-2.5 text-z-sm leading-none font-heavy transition-colors duration-150 motion-reduce:transition-none"
+          :class="presentation.statusStyle.text"
+        >
+          {{ presentation.label }}
+        </span>
+        <span
+          v-else
+          class="inline-flex items-center gap-1.5 text-z-sm leading-none font-emphasis transition-colors duration-150 motion-reduce:transition-none"
+          :class="presentation.statusStyle.text"
+        >
+          <span class="size-1.5 rounded-full" :class="presentation.statusStyle.dot" />
+          <span>{{ presentation.label }}</span>
+        </span>
+      </component>
+    </template>
+
+    <section class="w-88 overflow-hidden rounded-z-lg">
+      <header class="flex items-start gap-3 bg-z-popover-header-bg px-4 py-3">
+        <span
+          class="inline-flex size-9 shrink-0 items-center justify-center rounded-z"
+          :class="presentation.statusStyle.icon"
+        >
+          <component :is="presentation.icon" class="size-4.5" />
+        </span>
+
+        <div class="min-w-0 flex-1">
+          <p class="m-0 text-z-xs leading-none font-heavy tracking-[0.08em] text-z-text-tertiary">
+            {{ t('accounts.status.accountStatus') }}
+          </p>
+          <h3 class="mt-1.5 mb-0 text-z-lg leading-5 font-heavy text-z-text text-balance">
+            {{ presentation.title }}
+          </h3>
+        </div>
+
+        <span
+          class="inline-flex h-5 shrink-0 items-center rounded-full px-2 text-[10px] leading-none font-heavy"
+          :class="presentation.statusStyle.badge"
+        >
+          {{ presentation.label }}
+        </span>
+      </header>
+
+      <div class="grid gap-3 px-4 py-3 text-z-sm leading-5">
+        <p class="m-0 text-pretty font-emphasis text-z-text-secondary">
+          {{ presentation.description }}
+        </p>
+
+        <div v-if="presentation.protectionRules.length" class="grid gap-1.5">
+          <span class="text-z-xs font-emphasis text-z-text-tertiary">{{ t('accounts.status.matchedProtectionRules') }}</span>
+          <ul class="m-0 list-none space-y-1 p-0 text-z-text">
+            <li v-for="rule in presentation.protectionRules" :key="rule.id" class="wrap-anywhere">
+              {{ rule.name }}
+            </li>
+          </ul>
+        </div>
+
+        <div
+          v-for="time in presentation.times"
+          :key="time.key"
+          class="flex items-center justify-between gap-3 rounded-z bg-z-fill-quaternary px-3 py-2"
+        >
+          <span class="font-heavy text-z-text-tertiary">{{ time.label }}</span>
+          <span class="font-mono font-emphasis tabular-nums text-z-text">{{ time.value }}</span>
+        </div>
+
+        <div class="rounded-z bg-z-fill-quaternary px-3 py-2.5">
+          <p class="m-0 text-z-xs leading-none font-heavy text-z-text-tertiary">
+            {{ t('accounts.status.recommendedAction') }}
+          </p>
+          <p class="mt-1.5 mb-0 text-pretty font-emphasis text-z-text">
+            {{ presentation.recoveryHint }}
+          </p>
+        </div>
+
+        <div v-if="presentation.errorText" class="overflow-hidden rounded-z bg-z-fill-tertiary">
+          <div class="flex items-center justify-between gap-3 px-3 pt-2.5 pb-1.5">
+            <span class="text-z-xs leading-none font-heavy text-z-text-tertiary">{{ t('accounts.status.upstreamOriginalFeedback') }}</span>
+            <span class="shrink-0 text-[10px] leading-none font-emphasis text-z-text-quaternary">{{ t('accounts.status.forTroubleshootingOnly') }}</span>
+          </div>
+          <ZScrollbar class="bg-z-fill-quaternary" max-height="124px">
+            <div class="px-3 py-2">
+              <pre
+                class="m-0 whitespace-pre-wrap wrap-break-word font-mono text-z-xs leading-[1.55] font-emphasis text-z-text-secondary"
+              >{{ presentation.errorText }}</pre>
+            </div>
+          </ZScrollbar>
+        </div>
+      </div>
+    </section>
+  </ZPopover>
+</template>
