@@ -1304,7 +1304,8 @@ async fn protection_revision_tracks_only_policy_changes_and_survives_return_to_p
     let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
     let initial = repository.load_runtime_settings().await.unwrap();
     assert!(!initial.values.account_error_protection.enabled);
-    assert!(initial.values.account_error_protection.rules.is_empty());
+    // 现有迁移预置保护规则，但默认保持关闭；策略修订测试保留该初始配置。
+    assert!(!initial.values.account_error_protection.rules.is_empty());
     let a = settings_with_margin(300);
     repository.update_runtime_settings(a.clone()).await.unwrap();
     let first = repository.load_runtime_settings().await.unwrap();
