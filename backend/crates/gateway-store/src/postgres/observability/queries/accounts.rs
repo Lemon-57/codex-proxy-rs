@@ -14,7 +14,10 @@ pub(crate) async fn provider_account_usage(
     }
 
     // 账号卡片先确定有限候选，避免为少量账号聚合整个历史范围
-    let mut statement = QueryBuilder::<Postgres>::new("select pa.* from provider_accounts pa");
+    // 显式投影保持共享库新增账号列时的预编译查询结果类型
+    let mut statement = QueryBuilder::<Postgres>::new(
+        "select pa.id, pa.provider_kind, pa.authentication_kind, pa.name, pa.email, pa.notes, pa.plan_type from provider_accounts pa",
+    );
     if let Some(account_ids) = &query.account_ids {
         statement
             .push(" where pa.id=any(")
