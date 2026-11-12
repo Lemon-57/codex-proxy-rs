@@ -406,6 +406,64 @@ async fn extrema_rebuild_reads_only_its_bucket_when_history_is_large() {
     database.close().await;
 }
 
+#[tokio::test]
+async fn maintenance_memory_is_local_to_committed_and_failed_transactions() {
+    let Some(database) = TestDatabase::create("analytics_local_memory").await else {
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(database.pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    sqlx::raw_sql("create table maintenance_memory_audit(bytes bigint); create function audit_maintenance_memory() returns trigger language plpgsql as $$begin insert into maintenance_memory_audit values(pg_size_bytes(current_setting('work_mem'))); return new; end$$; create trigger audit_maintenance_memory before insert or update on request_analytics_15m for each row execute function audit_maintenance_memory()")
+        .execute(&pool).await.unwrap();
+    let worker = PgRequestAnalyticsRepository::new(pool.clone(), observability_query_budget());
+    for (configured, expected) in [(4_i64, 32_i64), (64, 64)] {
+        sqlx::query("select set_config('work_mem',$1,false)")
+            .bind(format!("{configured}MB"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("truncate maintenance_memory_audit")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let id = format!("memory_{configured}");
+        seed(&pool, &id, hour(), &[]).await;
+        drain_analytics(&pool).await;
+        let observed: Vec<i64> =
+            sqlx::query_scalar("select distinct bytes from maintenance_memory_audit")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(observed, vec![expected * 1024 * 1024]);
+        let restored: i64 = sqlx::query_scalar("select pg_size_bytes(current_setting('work_mem'))")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(restored, configured * 1024 * 1024);
+        sqlx::raw_sql("create function reject_memory_summary() returns trigger language plpgsql as $$begin raise exception 'test rollback'; end$$; create trigger reject_memory_summary before insert or update on request_analytics_15m for each row execute function reject_memory_summary()")
+            .execute(&pool).await.unwrap();
+        sqlx::query("update model_requests set total_tokens=240 where id=$1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(worker.maintain(10).await.is_err());
+        let restored: i64 = sqlx::query_scalar("select pg_size_bytes(current_setting('work_mem'))")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(restored, configured * 1024 * 1024);
+        sqlx::raw_sql("drop trigger reject_memory_summary on request_analytics_15m; drop function reject_memory_summary()")
+            .execute(&pool).await.unwrap();
+        drain_analytics(&pool).await;
+    }
+    pool.close().await;
+    database.close().await;
+}
+
 async fn sequentially_read_facts(pool: &sqlx::PgPool) -> i64 {
     sqlx::query("select pg_stat_force_next_flush()")
         .execute(pool)

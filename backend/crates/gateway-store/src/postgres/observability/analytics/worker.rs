@@ -78,6 +78,7 @@ impl PgRequestAnalyticsRepository {
             let acquired: bool = sqlx::query_scalar("select pg_try_advisory_xact_lock(hashtextextended(current_schema()::text,382032))")
                 .fetch_one(&mut *transaction).await.map_err(|error| postgres_unavailable("claim analytics maintenance", error))?;
             if !acquired { return Ok(AnalyticsMaintenance::default()); }
+            maintenance_memory(&mut transaction).await?;
             if reset_obsolete_batch(&mut transaction, batch_size).await? {
                 transaction.commit().await.map_err(|error| postgres_unavailable("save analytics reset progress", error))?;
                 return Ok(AnalyticsMaintenance { reset_progress: true, ..Default::default() });
@@ -122,6 +123,7 @@ impl PgRequestAnalyticsRepository {
             let acquired: bool = sqlx::query_scalar("select pg_try_advisory_xact_lock(hashtextextended(current_schema()::text,382032))")
                 .fetch_one(&mut *transaction).await.map_err(|error| postgres_unavailable("claim analytics bucket maintenance", error))?;
             if !acquired { return Ok(result); }
+            maintenance_memory(&mut transaction).await?;
             let reset_in_progress: bool = sqlx::query_scalar("select reset_phase <> 0 or schema_version <> $1 or histogram_version <> $2 from request_analytics_build_state where singleton")
                 .bind(SCHEMA_VERSION).bind(HISTOGRAM_VERSION).fetch_one(&mut *transaction).await.map_err(|error|postgres_unavailable("check analytics rebuild epoch",error))?;
             if reset_in_progress { return Ok(result); }
@@ -267,6 +269,16 @@ impl PgRequestAnalyticsRepository {
             .bind(request_ids).bind(standard).bind(no_cache).execute(&mut **tx).await.map_err(|error| postgres_unavailable("persist analytics billing projections",error))?;
         Ok(())
     }
+}
+
+async fn maintenance_memory(tx: &mut sqlx::Transaction<'_, Postgres>) -> StoreResult<()> {
+    // 只在持有维护锁的事务内扩大聚合预算，避免样本物化反复写临时文件
+    // 提交或回滚后恢复连接原值，管理员设置的更高预算保持不变
+    sqlx::query("select set_config('work_mem','32MB',true) where pg_size_bytes(current_setting('work_mem')) < 33554432")
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| postgres_unavailable("set analytics maintenance memory", error))?;
+    Ok(())
 }
 
 pub(super) async fn status(
