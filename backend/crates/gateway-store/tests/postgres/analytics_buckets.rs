@@ -350,7 +350,8 @@ async fn projection_work_mem_is_local_to_the_worker_transaction() {
     let original = session().fetch_one(&pool).await.unwrap();
     for (worker, expected) in [
         (worker.clone(), "2MB"),
-        (worker.with_projection_work_mem_mb(Some(8)), "8MB"),
+        (worker.clone().with_projection_work_mem_mb(Some(8)), "8MB"),
+        (worker.with_projection_work_mem_mb(Some(32)), "32MB"),
     ] {
         seed(&pool, expected, hour(), &[]).await;
         assert_eq!(worker.maintain(10).await.unwrap().projected_requests, 1);
@@ -492,8 +493,9 @@ async fn maintenance_memory_is_local_to_committed_and_failed_transactions() {
         .unwrap();
     sqlx::raw_sql("create table maintenance_memory_audit(bytes bigint); create function audit_maintenance_memory() returns trigger language plpgsql as $$begin insert into maintenance_memory_audit values(pg_size_bytes(current_setting('work_mem'))); return new; end$$; create trigger audit_maintenance_memory before insert or update on request_analytics_15m for each row execute function audit_maintenance_memory()")
         .execute(&pool).await.unwrap();
-    let worker = PgRequestAnalyticsRepository::new(pool.clone(), observability_query_budget());
-    for (configured, expected) in [(4_i64, 32_i64), (64, 64)] {
+    for (configured, projection, expected) in [(4_i64, Some(32), 32_i64), (64, None, 64)] {
+        let worker = PgRequestAnalyticsRepository::new(pool.clone(), observability_query_budget())
+            .with_projection_work_mem_mb(projection);
         sqlx::query("select set_config('work_mem',$1,false)")
             .bind(format!("{configured}MB"))
             .execute(&pool)
@@ -505,7 +507,8 @@ async fn maintenance_memory_is_local_to_committed_and_failed_transactions() {
             .unwrap();
         let id = format!("memory_{configured}");
         seed(&pool, &id, hour(), &[]).await;
-        drain_analytics(&pool).await;
+        worker.maintain(1000).await.unwrap();
+        assert_eq!(worker.status().await.unwrap().pending_requests, 0);
         let observed: Vec<i64> =
             sqlx::query_scalar("select distinct bytes from maintenance_memory_audit")
                 .fetch_all(&pool)
@@ -532,7 +535,8 @@ async fn maintenance_memory_is_local_to_committed_and_failed_transactions() {
         assert_eq!(restored, configured * 1024 * 1024);
         sqlx::raw_sql("drop trigger reject_memory_summary on request_analytics_15m; drop function reject_memory_summary()")
             .execute(&pool).await.unwrap();
-        drain_analytics(&pool).await;
+        worker.maintain(1000).await.unwrap();
+        assert_eq!(worker.status().await.unwrap().pending_requests, 0);
     }
     pool.close().await;
     database.close().await;
