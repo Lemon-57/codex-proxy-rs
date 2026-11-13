@@ -86,7 +86,6 @@ impl PgRequestAnalyticsRepository {
             let acquired: bool = sqlx::query_scalar("select pg_try_advisory_xact_lock(hashtextextended(current_schema()::text,382032))")
                 .fetch_one(&mut *transaction).await.map_err(|error| postgres_unavailable("claim analytics maintenance", error))?;
             if !acquired { return Ok(AnalyticsMaintenance::default()); }
-            maintenance_memory(&mut transaction).await?;
             if reset_obsolete_batch(&mut transaction, batch_size).await? {
                 transaction.commit().await.map_err(|error| postgres_unavailable("save analytics reset progress", error))?;
                 return Ok(AnalyticsMaintenance { reset_progress: true, ..Default::default() });
