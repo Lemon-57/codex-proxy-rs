@@ -25,7 +25,9 @@ const modes = computed(() => [
 <template>
   <ZCard id="reset-credits" :title="t('settings.quotaReset.title')" :description="t('settings.quotaReset.enableHelp')">
     <ZSwitch v-model="defaultEnabled" class="mb-4" :label="t('settings.quotaReset.defaultEnabled')" />
-    <p class="mb-4 text-z-sm text-z-text-secondary">{{ t('settings.quotaReset.defaultHelp') }}</p>
+    <p class="mb-4 text-z-sm text-z-text-secondary">
+      {{ t('settings.quotaReset.defaultHelp') }}
+    </p>
     <div class="grid min-w-0 max-w-6xl gap-4.5 sm:grid-cols-2">
       <ZSegmented
         :model-value="onLowWeeklyQuota ? 'weekly' : 'expiry'"

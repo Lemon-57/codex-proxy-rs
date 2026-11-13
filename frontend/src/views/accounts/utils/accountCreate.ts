@@ -40,7 +40,7 @@ export function emptyAccountCreateForm(): AccountCreateForm {
     mode: 'oauth',
     importTexts: { access_token: '', refresh_token: '', json: '' },
     refreshTokenEmail: '',
-    proxyMode: 'direct',
+    proxyMode: 'deployment',
     proxyId: '',
   }
 }

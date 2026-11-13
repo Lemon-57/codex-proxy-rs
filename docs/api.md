@@ -343,12 +343,12 @@ Chat 沿用 [Client Key 鉴权](#数据面客户端接口)、[请求期限](#请
 [请求头与身份](#请求头与身份)及[隐私策略](#隐私策略)。隐私策略的 `request_body` 面向目标上游正文，
 Responses 上游使用 `$.input`，Messages 上游使用 `$.messages`
 
-转换后的请求按选中的 Provider 执行。OpenAI 的字段处理见[正文兼容](#正文兼容)；
-输出上限原值交给上游校验，低于模型下限时会收到上游错误
+转换后的请求按选中的 Provider 执行。OpenAI Responses 上游忽略客户端的输出上限，见[正文兼容](#正文兼容)
 
 ### Messages 请求
 
 `POST /v1/messages` 接受非空字符串 `model`、非空 `messages` 数组和非负整数 `max_tokens`。
+转向 OpenAI Responses 上游时，`max_tokens` 仍为入站必填字段，但不限制实际输出。
 消息角色为 `user`、`assistant` 或 `system`，`content` 为字符串或内容块数组；初始系统指令放在顶层 `system`，
 会话中的 `system` 消息保留其位置，具体模型支持情况由上游校验。
 `stream` 缺省或 `false` 返回 JSON，`true` 返回 SSE。每轮由客户端携带所需的完整上下文。Claude Code 用 `--resume` 恢复本地会话后，仍通过 `messages` 发送上下文；网关不缓存对话正文用于下一轮。
@@ -538,8 +538,9 @@ Images 的 `x-codex-image-turn-id` 和 Desktop 自动 Git 上下文的 `clientUs
 
 #### 正文兼容
 
-OpenAI Provider 的 Responses 上游编码会移除 Codex 不接受的顶层 `temperature` 和 `prompt_cache_retention`，
-并保留调用方指定的 `max_output_tokens`。缺少顶层 `store` 时补齐 `false`，与官方 Codex 客户端一致；
+发往 OpenAI Responses 上游（OAuth 或 API Key）的生成请求会省略顶层 `max_output_tokens`、`max_completion_tokens`
+和 `max_tokens`，输出可能超过客户端指定的上限。编码时也会移除 Codex 不接受的顶层 `temperature`
+和 `prompt_cache_retention`。缺少顶层 `store` 时补齐 `false`，与官方 Codex 客户端一致；
 显式提供的值保持原样。顶层 `input` 为字符串时按公开 Responses API 的语义展开为一条
 `user` 文本消息条目（`{"type": "message", "role": "user", "content": [{"type": "input_text", ...}]}`），
 因为 Codex 后端只接受条目数组；数组及其他类型原样透传。`input` 数组中显式指定 `type: "message"`
@@ -561,7 +562,6 @@ WebSocket 优先依据逐帧 `client_metadata.ws_request_header_x_openai_interna
 | `top_p`、`frequency_penalty`、`presence_penalty`、`chat_template_kwargs`、`user`、`metadata`、`safety_identifier` | 省略；采样参数取默认值时也省略 |
 | `stream_options.include_usage` | 省略该成员，保留其他流式选项 |
 | `truncation`、`stop_sequences`、`prompt_cache_options` | 分别仅在值为 `"disabled"`、`[]`、`{}` 时省略；显式策略交给上游校验 |
-| `max_completion_tokens`、`max_tokens` | 转为 `max_output_tokens`。原生字段优先，其次按左列顺序取首个非 `null` 值 |
 
 Codex/OAuth 上游的历史回填按字段形状兼容，不以 User-Agent 品牌区分：显式 `type: "reasoning"`
 的 `input` 项移除顶层 `status`；该项具有非空字符串 `encrypted_content` 时，还会移除非空数组
@@ -642,13 +642,13 @@ OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选
 `400 unsupported_prewarm`，不会将其当作普通生成调用。`generate=true` 或省略该字段正常执行；
 客户端可跳过预热继续正式请求，外部插件 adapter 按各自的协议能力处理
 
-Codex OAuth backend 的候选上游为 WS 时，无 `previous_response_id` 的普通新链若规范化
-`response.create` 达到 15.5 MiB，发送前选择 HTTP/SSE；HTTP 和 WS 入站均适用。能关联到客户端线程时，
-后续完整新链沿用 HTTP/SSE，直到帧长低于 13.5 MiB 再尝试 WS。预热和增量帧不改变此大小判断。
-该阈值为已观察到的上游消息大小边界预留余量，不是网关输入长度上限或 OpenAI 公布的统一限制；
-API Key 账号、小请求、显式 warmup、未知外部 previous ID 和持久化续接不因该大小策略改用 HTTP
+OpenAI Responses 上游 WS 按握手响应头 `x-codex-websocket-max-message-bytes` 声明的上限，
+检查最终 `response.create` 文本的 UTF-8 字节数。超过上限时，新链、持久化续接和未知外部 previous ID
+在上传正文前改用 HTTP/SSE；等于上限仍可发送。OAuth 和 API Key 账号、HTTP 和 WS 入站均适用。
+该上限只属于当前上游连接；响应头缺失或无效时不预判超限。显式 warmup 保持 WS 合同，超限时
+返回 `websocket_message_too_large`，不重复发送或改用 HTTP
 
-OAuth 的大 connection-local WS 续接，以及 HTTP `store=false` 成功后标记为 `ReplayRequired`
+超过当前连接上限的 connection-local WS 续接，以及 HTTP `store=false` 成功后标记为 `ReplayRequired`
 的 WS 增量，均在发送前返回 `status: 400 / previous_response_not_found`。客户端应清除旧 ID，
 携带完整历史及工具调用／输出重试。官方 Codex 支持重连 WS 后完整重发，也可能按自身重试预算
 切到 HTTP；其他客户端需要自行实现此合同。代理不缓存 transcript，不把增量输入当作独立新链，
@@ -1311,7 +1311,7 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 `outboundProxyId` 绑定已保存的代理，不要求出口测试成功；省略或 `null` 保留当前绑定，空字符串清除绑定。
 `outboundProxyUrl` 兼容 HTTP、HTTPS、SOCKS5、SOCKS5H 代理 URL，可带用户名和密码；不能与 ID 同时设置。
-编辑时省略或 `null` 表示保持原配置，空字符串表示清除代理并直连。列表和详情返回绑定的
+编辑时省略或 `null` 表示保持原配置，空字符串表示清除绑定并使用部署默认出口。列表和详情返回绑定的
 `outboundProxyId`（未绑定时为 `null`，禁用代理仍保留 ID）和不含认证信息的 `outboundProxyEndpoint`
 （未配置时为 `null`）；只有显式敏感导出包含完整 URL。
 指定代理后，推理、OAuth 服务端交换/刷新及账号辅助请求使用同一出口；代理失败不会退回直连。
@@ -1387,11 +1387,9 @@ Key 预算及其访问状态随互联默认公开，不要求开启 `shareQuota`
 例如 Plus 设置 `allowlist` 并选中 luna 的实际 ID，Pro 设置 `denylist` 并选中同一 ID，即可严格分流；
 Pro 使用 `all` 时也能参与 luna 调度。套餐名称不自动生成或修改规则
 
-原生 Responses 默认排除有效目录未列出目标模型的账号。OpenAI OAuth 或 API Key 账号的白名单精确包含映射后的上游 ID 时，
-允许通过该账号请求目录外模型，由上游确认是否可用。此设置只对配置它的账号生效，已有白名单同样适用。
-账号禁用、Key 分组、认证类型、黑名单和模型冷却仍参与选号。xAI 账号使用有效套餐目录与账号模型政策的交集。
-OpenAI 只使用该账号当前凭据和套餐对应、最近 30 分钟内同步的目录，不借用同套餐其他账号的模型。
-没有有效账号目录时交由上游验证，仍执行 `modelAccess`。xAI 使用已知套餐的有效目录缓存
+原生 OpenAI Responses 按账号当前凭据和套餐最近一次成功同步的目录选号。目录未列出的模型在刷新期间或刷新失败后仍被排除。
+账号白名单精确包含映射后的上游 ID 时，允许该账号尝试目录外模型；当前凭据和套餐没有目录时，也可在账号模型政策允许的范围内交由上游验证。
+账号禁用、Key 分组、认证类型、黑名单和模型冷却仍参与选号。xAI 按账号模型政策与有效的套餐目录筛选
 
 原生 OpenAI Responses 上游返回 `error.code=model_not_found`，且状态为 400／403／404 或流内错误未提供状态时，
 该账号与模型组合冷却 30 分钟；其他模型仍可使用该账号。仅消息提及模型不支持不触发冷却；
@@ -1422,11 +1420,11 @@ Search 的选号限制不约束插件在选号后主动改写正文。
 | `POST` | `/api/admin/proxies/accounts/remove` | `{ proxyId, accountId }` | `{ configRevision }` |
 | `POST` | `/api/admin/proxies/create` | `[{ name, proxyUrl, location?, autoLocation?, maxWebsocketConnections? }]` | 逐项结果数组，成功项的 `data` 为 `{ record, configRevision }` |
 | `POST` | `/api/admin/proxies/update` | `{ id, revision, name, enabled?, proxyUrl?, location?, autoLocation?, maxWebsocketConnections? }` | `{ record, configRevision }` |
-| `POST` | `/api/admin/proxies/probe` | `{ proxyUrl, detectLocation? }` | 测试未保存的地址或服务器直连出口，返回连通性及可选位置结果，不创建代理 |
+| `POST` | `/api/admin/proxies/probe` | `{ proxyUrl, useDeploymentProxy?, detectLocation? }` | 测试未保存的地址、部署默认出口或服务器直连出口，返回连通性及可选位置结果，不创建代理 |
 | `POST` | `/api/admin/proxies/test` | `[{ id, revision, detectLocation? }]` | 逐项结果数组，成功项的 `data` 为最新代理记录 |
 | `POST` | `/api/admin/proxies/delete` | `{ id, revision }` | `{ configRevision }` |
 
-`probe` 的 `proxyUrl` 必填，空字符串表示服务器直连；非空值须为合法代理 URL，`null`、省略或非法地址均拒绝。
+`probe` 的 `proxyUrl` 必填，空字符串默认测试服务器直连，同时传 `useDeploymentProxy: true` 则测试部署默认出口。指定代理地址时不能同时传 `useDeploymentProxy: true`；非空值须为合法代理 URL，`null`、省略或非法地址均拒绝。
 探测不创建代理或修改账号绑定
 
 添加与测试统一接收 1–100 项数组，单条操作传一个元素，响应 `data` 按输入顺序返回等长数组。
@@ -1451,9 +1449,9 @@ Search 的选号限制不约束插件在选号后主动改写正文。
 
 `upstream` 复用账号列表的互联观测结构和发现状态语义，只读取本地观测，不触发远端刷新
 
-移除关联账号只清除指定账号的代理绑定与连接地址，使其改为直连，保留凭据、调度参数与分组。
+移除关联账号只清除指定账号的代理绑定与连接地址，使其使用部署默认出口，保留凭据、调度参数与分组。
 若账号已不再绑定请求中的代理，则返回 409
-删除代理会自动解除全部关联账号的代理绑定与连接地址，账号保留其余设置并改为直连。
+删除代理会自动解除全部关联账号的代理绑定与连接地址，账号保留其余设置并使用部署默认出口。
 代理仍被插件来源或插件包引用时返回 409，账号绑定保持不变
 
 `maxWebsocketConnections` 为此代理的 OpenAI Responses 上游 WS 连接上限，范围 0–4294967295，0 表示不限制。
@@ -1463,7 +1461,7 @@ Search 的选号限制不约束插件在选号后主动改写正文。
 更新省略 `proxyUrl` 保留认证；连接配置改变时清除测试结果并更新所有绑定账号。
 测试结果只在请求中的版本仍匹配时保存
 
-代理默认启用，更新 `enabled: false` 后保留配置、测试结果和账号绑定，关联账号的新请求改为直连，
+代理默认启用，更新 `enabled: false` 后保留配置、测试结果和账号绑定，关联账号的新请求使用部署默认出口，
 不应用该代理的位置覆盖；重新启用后恢复原出口及位置规则。省略 `enabled` 保留当前状态。
 禁用代理仍可执行连接测试，但不能以 ID 选择用于账号绑定、新的账号授权、导入或插件下载
 
@@ -2201,8 +2199,8 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 
 ### 账号预热
 
-定时账号预热默认关闭。`accountWarmupCron` 使用部署时区的五段 Cron 表达式，
-顺序为分、时、日、月、星期，总长度不超过 255 字节，默认空字符串，关闭时允许留空。
+定时账号预热默认关闭。`accountWarmupCron` 是字符串，使用半角分号（`;`）分隔多条五段 Cron 表达式，总长度（含分隔符）不超过 255 字节，各条不可留空。默认空字符串，关闭时允许留空。
+每条规则按部署时区依次匹配分、时、日、月、星期。任一规则命中即执行，例如 `"58 5 * * *;59 10 * * *"` 只在每天 05:58 和 10:59 触发。
 支持列表、范围和步长，例如 `0 8,13,19 * * *` 每天执行三次，`0 8 * * MON-FRI` 在工作日 08:00 执行。
 星期可用 `SUN` 至 `SAT` 或数字 1 至 7（日到六），同时指定日与星期时两者均须满足。
 同一分钟只领取一次；`accountWarmupModel` 默认 `null`，开启前必须填写有效表达式并显式选择模型。
@@ -2369,16 +2367,18 @@ Chat Completions 和 Responses 通过原生 OpenAI Provider 选号时，缺少�
   "healthWeight": 1.0,
   "latencyWeight": 0.5,
   "resetWeight": 0.0,
-  "queueWeight": 0.0
+  "queueWeight": 0.0,
+  "resetWindowWeights": { "fiveHour": 0.0, "weekly": 0.0, "monthly": 0.0 }
 }
 ```
 
 六项系数分别调整负载、剩余额度、健康、首个有效输出延迟、额度重置和排队压力的评分偏好，范围 `0～10`、最多一位小数，
 至少一项大于 `0`。`0` 仅关闭对应评分维度，不放宽账号资格、额度或并发限制；系数不表示流量百分比。
-缺字段、`null`、未知字段及无效数值均返回 `422`，不写入配置。读取设置额外返回只读
+缺少必填系数、系数为 `null`、未知字段及无效数值均返回 `422`，不写入配置。读取设置额外返回只读
 `smartSchedulingDefaults`，内容为上述默认对象，用于恢复默认与自定义状态比较，不可提交到更新接口
 
-`resetWeight` 越大越偏向即将重置额度的账号，复用已有有效重置时间，未知或已过期时不加分。
+`resetWeight` 控制重置分在总评分中的比重。`resetWindowWeights` 中的 `fiveHour`、`weekly`、`monthly` 分别表示 5 小时、周和月的相对系数。三项均为 0～10、最多一位小数。默认均为 0，旧配置省略整个字段时也取 0；全部为 0 时不计重置分。设为 `{"fiveHour":0,"weekly":1,"monthly":0}` 可只按周重置评分。只计算账号通用窗口，未知、缺失或已过期的周期贡献为零；独立的 `quota_reset_priority` 策略仍按最早有效重置时间排序
+
 `queueWeight` 只在没有可立即使用的账号、需要选择等待队列时参与评分，越大越偏向等待人数少的账号。
 设为 `0` 时沿用最短队列规则；启用后结合其余五项评分选择队列。队列人数限于当前进程，只有开启账号排队才会生效，
 不影响已入队请求的位置、队内 FIFO、容量上限或等待超时。两项默认均为 `0`
@@ -3218,7 +3218,7 @@ GitHub 的 `location` 使用 `kind: "github"`、`repository: "owner/repo"`、`ta
 来源 URL 使用 HTTPS，不包含用户信息、查询参数或片段；回环地址允许 HTTP，供本机来源使用
 
 查询、校验和远程安装的 `outboundProxyId` 指向已保存的出站代理，与下载凭据独立，公开来源也可选择代理。
-省略或 `null` 表示直连，不继承进程环境代理；代理失败不会回退直连。查询与下载期间代理配置变化时返回 `409`，需重新操作。
+省略或 `null` 表示使用部署默认出口；代理失败不会回退直连。查询与下载期间代理配置变化时返回 `409`，需重新操作。
 查询缓存与限流按凭据及代理身份隔离。制品历史 `source.outbound_proxy` 只保存下载时的 `{ id, revision }`，不返回代理地址或认证信息。
 仍被更新来源或制品引用的代理不能删除；修改后续来源不会清除已安装制品的历史引用
 
@@ -3227,7 +3227,7 @@ GitHub 的 `location` 使用 `kind: "github"`、`repository: "owner/repo"`、`ta
 修改更新来源请求为 `{ "pluginId": "acme.example", "source": { "kind": "github", "repository": "owner/repo" }, "policy": { "kind": "stable" }, "outboundProxyId": null }`；
 其他可选来源为 `upload` 或带 `url` 的 `url`。`policy` 省略时为 `manual`；GitHub 还支持 `stable`（最新稳定版）和
 `{ "kind": "pinned", "tag": "v2.0.0-rc.1", "allow_prerelease": true }`。其他来源只支持 `manual`。
-来源、策略和代理选择一同持久化与审计；代理字段省略或 `null` 明确保存为直连。`upload` 和 `builtin` 不接受代理。
+来源、策略和代理选择一同持久化与审计；代理字段省略或 `null` 保存为部署默认出口。`upload` 和 `builtin` 不接受代理。
 变更不改变已安装包的历史来源，不自动下载、接受制品或切换实例版本
 
 检查更新请求为 `{ "pluginId": "acme.example", "credentialIds": [] }`，返回 `binding` 和 `release`。
@@ -3307,7 +3307,7 @@ GitHub 的 `location` 使用 `kind: "github"`、`repository: "owner/repo"`、`ta
 
 回调保持类型、期限、取消、实例 revision、资源归属和事务一致性检查。模型调用可显式选择 Key，按所选 Key 的准入、预算、用量与计费合同执行；省略 Key 时继承现有模型父请求身份
 
-受管 HTTP 不限制插件目标地址段。宿主解析 DNS，连接保留原始 Host 与 TLS 域名校验；出口可继承调用范围、指定账号或按代理 ID 选择，连接失败不自动回退直连，重定向不自动跟随。
+受管 HTTP 不限制插件目标地址段。宿主解析 DNS，连接保留原始 Host 与 TLS 域名校验；出口可继承调用范围、指定账号或按代理 ID 选择，无显式代理时使用部署默认出口，连接失败不自动回退直连，重定向不自动跟随。
 显式代理选择与目录查询见 [SDK 网络回调](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#网络)
 
 #### 能力绑定与范围

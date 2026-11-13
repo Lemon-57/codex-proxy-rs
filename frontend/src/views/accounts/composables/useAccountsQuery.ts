@@ -71,7 +71,9 @@ export function useAccountsQuery() {
     try {
       const firstPage = await getAccounts({ page: 1, pageSize: 200 })
       const pages = await Promise.all(
-        Array.from({ length: Math.max(0, firstPage.page.totalPages - 1) }, (_, index) => getAccounts({ page: index + 2, pageSize: 200 })),
+        Array.from({
+          length: Math.max(0, firstPage.page.totalPages - 1),
+        }, (_, index) => getAccounts({ page: index + 2, pageSize: 200 })),
       )
       const values = new Set(
         [firstPage, ...pages]
@@ -109,7 +111,12 @@ export function useAccountsQuery() {
     onCleanup(() => clearTimeout(timer))
   })
 
-  watch([providerQuery, statusQuery, groupQuery, planTypeQuery], () => {
+  watch([
+    providerQuery,
+    statusQuery,
+    groupQuery,
+    planTypeQuery,
+  ], () => {
     void query.reloadFromStart()
   })
 

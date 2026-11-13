@@ -41,20 +41,55 @@ export const accountColumns = computed(() => (defineTableColumns<Account>([
     kind: 'meta',
     size: 'md',
     align: 'center',
-    formatter: value => formatProviderLabel(typeof value === 'string' ? value : null),
+    formatter: value => formatProviderLabel(typeof value === 'string'
+      ? value
+      : null),
   },
-  { key: 'status', label: t('common.fields.status'), kind: 'status', align: 'left', sortable: true },
-  { key: 'planType', label: t('accounts.profile.subscription.label'), kind: 'status', size: 'sm', sortable: true },
-  { key: 'usage', label: t('usage.usage'), kind: 'custom', size: '2xl', sortable: true },
-  { key: 'groups', label: t('accounts.fields.accountGrouping'), kind: 'status', size: 'sm' },
-  { key: 'supplier', label: '供应商', kind: 'custom', size: 'lg' },
+  {
+    key: 'status',
+    label: t('common.fields.status'),
+    kind: 'status',
+    align: 'left',
+    sortable: true,
+  },
+  {
+    key: 'planType',
+    label: t('accounts.profile.subscription.label'),
+    kind: 'status',
+    size: 'sm',
+    sortable: true,
+  },
+  {
+    key: 'usage',
+    label: t('usage.usage'),
+    kind: 'custom',
+    size: '2xl',
+    sortable: true,
+  },
+  {
+    key: 'groups',
+    label: t('accounts.fields.accountGrouping'),
+    kind: 'status',
+    size: 'sm',
+  },
+  {
+    key: 'supplier',
+    label: '供应商',
+    kind: 'custom',
+    size: 'lg',
+  },
   {
     key: 'manualStartsAtDisplay',
     label: '开始时间',
     kind: 'datetime',
     emptyText: '',
   },
-  { key: 'manualExpiresAtDisplay', label: '到期时间', kind: 'datetime', emptyText: '' },
+  {
+    key: 'manualExpiresAtDisplay',
+    label: '到期时间',
+    kind: 'datetime',
+    emptyText: '',
+  },
   {
     key: 'lastUsedAt',
     label: t('accounts.fields.lastUsed'),
@@ -71,12 +106,38 @@ export const accountColumns = computed(() => (defineTableColumns<Account>([
     formatter: value => optionalAccountCell(value),
     emptyText: '',
   },
-  { key: 'actions', label: t('common.fields.actions'), kind: 'actions', size: 'lg', hideable: false },
+  {
+    key: 'actions',
+    label: t('common.fields.actions'),
+    kind: 'actions',
+    size: 'lg',
+    hideable: false,
+  },
 ])))
 
 export const subscriptionOptions = [
   { label: '全部订阅', value: '' },
-  ...[['free', 'Free'], ['plus', 'Plus'], ['team', 'Team'], ['business', 'Business'], ['pro', 'Pro'], ['prolite', 'ProLite'], ['promax', 'ProMax'], ['go', 'Go'], ['enterprise', 'Enterprise'], ['edu', 'Edu'], ['edu_plus', 'Edu Plus'], ['edu_pro', 'Edu Pro'], ['ent26', 'Ent26'], ['self_serve_business_prolite', 'Self Serve Business ProLite'], ['self_serve_business_usage_based', 'Self Serve Business Usage Based'], ['enterprise_cbp_automation', 'Enterprise Cbp Automation'], ['enterprise_cbp_usage_based', 'Enterprise Cbp Usage Based'], ['api', 'API'], ['unknown', '未知套餐']].map(([value, label]) => ({ value: value!, label: label! })),
+  ...[
+    ['free', 'Free'],
+    ['plus', 'Plus'],
+    ['team', 'Team'],
+    ['business', 'Business'],
+    ['pro', 'Pro'],
+    ['prolite', 'ProLite'],
+    ['promax', 'ProMax'],
+    ['go', 'Go'],
+    ['enterprise', 'Enterprise'],
+    ['edu', 'Edu'],
+    ['edu_plus', 'Edu Plus'],
+    ['edu_pro', 'Edu Pro'],
+    ['ent26', 'Ent26'],
+    ['self_serve_business_prolite', 'Self Serve Business ProLite'],
+    ['self_serve_business_usage_based', 'Self Serve Business Usage Based'],
+    ['enterprise_cbp_automation', 'Enterprise Cbp Automation'],
+    ['enterprise_cbp_usage_based', 'Enterprise Cbp Usage Based'],
+    ['api', 'API'],
+    ['unknown', '未知套餐'],
+  ].map(([value, label]) => ({ value: value!, label: label! })),
 ]
 
 export const statusLabels = computed<Record<AccountStatus, string>>(() => ({
@@ -98,7 +159,10 @@ export const statusTones: Record<AccountStatus, 'success' | 'danger' | 'warning'
 }
 
 export const accountStatusFilterOptions = computed(() => ([
-  { label: t('common.status.all'), value: '' },
+  {
+    label: t('common.status.all'),
+    value: '',
+  },
   { label: statusLabels.value.normal, value: 'normal' },
   { label: statusLabels.value.quota_paused, value: 'quota_paused' },
   { label: statusLabels.value.quota_exhausted, value: 'quota_exhausted' },
@@ -120,7 +184,9 @@ export function visibleSummaryQuotaWindows(windows: AccountQuotaWindow[]) {
   const known = [...windows]
     .filter(window => window.group !== 'other')
     .sort(compareQuotaWindows)
-  return known.length > 0 ? known : [...windows].sort(compareQuotaWindows)
+  return known.length > 0
+    ? known
+    : [...windows].sort(compareQuotaWindows)
 }
 
 export function orderedPanelQuotaWindows(windows: AccountQuotaWindow[]) {
@@ -134,7 +200,11 @@ export function groupedAccountQuotaWindows(windows: AccountQuotaWindow[]) {
   for (const window of windows) {
     const limitLabel = quotaLimitLabel(window)
     if (!window.limitId || !limitLabel) {
-      entries.push({ key: window.key, label: null, windows: [window] })
+      entries.push({
+        key: window.key,
+        label: null,
+        windows: [window],
+      })
       continue
     }
 
@@ -216,5 +286,7 @@ function quotaLimitLabel(window: AccountQuotaWindow) {
 }
 
 function optionalAccountCell(value: unknown) {
-  return value === '—' || value === '-' ? '' : value
+  return value === '—' || value === '-'
+    ? ''
+    : value
 }

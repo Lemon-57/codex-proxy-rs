@@ -82,19 +82,15 @@ pub(super) fn build_account_http_client_with_timeout(
     }
 
     // TCP、HTTP/2 保活沿用原画像；代理的空闲隧道不能按单客户端的无限池保留
-    let mut builder = Client::builder()
-        .no_proxy()
+    let mut builder = gateway_egress::http_client(proxy)
+        .map_err(|_| CustomCaError::ProxyConfiguration)?
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(timeout)
         .connector_layer(super::connection::ConnectionLayer);
-    if let Some(proxy) = proxy {
+    if proxy.is_some() {
         builder = builder
             .pool_max_idle_per_host(4)
-            .pool_idle_timeout(Duration::from_secs(30))
-            .proxy(
-                reqwest::Proxy::all(proxy.expose_url())
-                    .map_err(|_| CustomCaError::ProxyConfiguration)?,
-            );
+            .pool_idle_timeout(Duration::from_secs(30));
     }
     let client = build_reqwest_client_with_custom_ca(builder)?;
     let mut clients = cache
@@ -113,7 +109,7 @@ fn egress_key(account_id: &str, proxy: Option<&gateway_core::account::OutboundPr
     hash.update([0]);
     hash.update(
         proxy
-            .map_or("direct", |proxy| proxy.expose_url())
+            .map_or("deployment", |proxy| proxy.expose_url())
             .as_bytes(),
     );
     hex::encode(hash.finalize())
@@ -593,6 +589,7 @@ pub enum CodexTransportDecision {
     ExactWebSocket,
     RequiredWebSocket,
     Http2WebSocketBudgetExhausted,
+    Http2WebSocketMessageTooLarge,
     Http2LocalConnectionCapacity,
     Http2BreakerOpen,
     Http2PoolUnavailable,
@@ -607,6 +604,7 @@ impl CodexTransportDecision {
             Self::ExactWebSocket => "ws_exact_required",
             Self::RequiredWebSocket => "ws_required",
             Self::Http2WebSocketBudgetExhausted => "http2_ws_budget_exhausted",
+            Self::Http2WebSocketMessageTooLarge => "http2_ws_message_too_large",
             Self::Http2LocalConnectionCapacity => "http2_local_connection_capacity",
             Self::Http2BreakerOpen => "http2_breaker_open",
             Self::Http2PoolUnavailable => "http2_pool_unavailable",
@@ -711,7 +709,7 @@ pub struct CodexBackendClient {
     pub(super) timezone: gateway_core::time::DeploymentTimeZone,
     pub(super) connection_budget: Option<gateway_core::engine::connection::ConnectionBudget>,
     pub(super) client: Client,
-    pub(super) direct_client: Client,
+    pub(super) default_client: Client,
     pub(super) base_url: String,
     pub(super) official_base_url: String,
     pub(super) protocol: OpenAiUpstreamProtocol,
@@ -749,7 +747,7 @@ impl CodexBackendClient {
             privacy: None,
             timezone: Default::default(),
             connection_budget: None,
-            direct_client: client.clone(),
+            default_client: client.clone(),
             client,
             websocket_origin_key: websocket_origin_key(&base_url),
             outbound_proxy: None,
@@ -911,7 +909,7 @@ impl CodexBackendClient {
         client.client = if account.outbound_proxy().is_some() {
             build_account_http_client(account.id().as_str(), account.outbound_proxy())?
         } else {
-            self.direct_client.clone()
+            self.default_client.clone()
         };
         Ok(client)
     }
