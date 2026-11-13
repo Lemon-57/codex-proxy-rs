@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Instant};
 
 use futures::{StreamExt, TryStreamExt};
 use gateway_protocol::openai::{
-    X_OPENAI_MEMGEN_REQUEST_HEADER,
+    X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER, X_OPENAI_MEMGEN_REQUEST_HEADER,
     events::{self, retry_after_seconds_from_body},
     sse::{SseEventDecoder, SseFrame},
 };
@@ -82,6 +82,13 @@ impl CodexBackendClient {
             context.installation_id,
         );
         self.apply_privacy(&mut upstream_body, &mut headers)?;
+        crate::compat::normalize_responses_lite_body(
+            &mut upstream_body,
+            self.protocol == OpenAiUpstreamProtocol::Codex
+                && headers
+                    .get(X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER)
+                    .is_some_and(|value| value == "true"),
+        );
         let body =
             serde_json::to_vec(&upstream_body).map_err(CodexClientError::RequestBodyEncode)?;
         let trace = context
@@ -274,6 +281,22 @@ impl CodexBackendClient {
         super::correlation::scope_request(&mut body, &mut headers, context.installation_id);
         let original_headers = self.privacy.as_ref().map(|_| headers.clone());
         self.apply_privacy(&mut body, &mut headers)?;
+        // WS 逐帧 Lite 标记来自 metadata；缺少投影时才采用握手头
+        let responses_lite = body
+            .pointer("/client_metadata/ws_request_header_x_openai_internal_codex_responses_lite")
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(
+                || {
+                    headers
+                        .get(X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER)
+                        .is_some_and(|value| value == "true")
+                },
+                |value| value == "true",
+            );
+        crate::compat::normalize_responses_lite_body(
+            &mut body,
+            self.protocol == OpenAiUpstreamProtocol::Codex && responses_lite,
+        );
         if let Some(body) = body.as_object() {
             super::diagnostics::evidence::record_request(
                 &context.trace.cloned().unwrap_or_default(),

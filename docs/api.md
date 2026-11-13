@@ -549,6 +549,11 @@ OpenAI Provider 的 Responses 上游编码会移除 Codex 不接受的顶层 `te
 不删除工具参数 schema、输入内容或 `client_metadata` 内的同名业务字段；其他未知字段继续透传。
 `prompt_cache_key` 不用于补造会话或线程请求头；客户端未提供缓存键、会话或线程身份时保持缺省
 
+Codex/OAuth 的 Responses Lite 请求在出站时显式使用 `parallel_tool_calls: false`，
+包括无工具、顶层 `tools` 和 `input` 内 `additional_tools` 声明。HTTP 依据实际 Lite 请求头，
+WebSocket 优先依据逐帧 `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`，
+缺少该投影时采用握手头。普通非 Lite 请求及 API Key 上游保留原并行工具语义
+
 发往 Codex/OAuth 的 Responses 请求另按下表处理；API Key 上游保留这些字段。规则只匹配表中列出的位置
 
 | 请求字段 | Codex/OAuth 出站行为 |

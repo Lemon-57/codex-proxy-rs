@@ -3,6 +3,78 @@
 use super::*;
 
 #[tokio::test]
+async fn lite_disables_parallel_calls_in_actual_http_and_websocket_payloads() {
+    for websocket in [false, true] {
+        for declaration in ["none", "top", "input"] {
+            for parallel in [None, Some(false), Some(true)] {
+                let mut body = json!({
+                    "model":"gpt-5.4", "input":[{"role":"user","content":"Synthetic Lite request"}],
+                    "reasoning":{"effort":"low","context":"all_turns"},
+                    "future_field":{"keep":true}
+                });
+                let tools =
+                    json!([{"type":"function","name":"echo","parameters":{"type":"object"}}]);
+                match declaration {
+                    "top" => body["tools"] = tools,
+                    "input" => body["input"].as_array_mut().unwrap().insert(
+                        0,
+                        json!({"type":"additional_tools","role":"developer","tools":tools}),
+                    ),
+                    _ => {}
+                }
+                if let Some(parallel) = parallel {
+                    body["parallel_tool_calls"] = json!(parallel);
+                }
+                let sent = capture_downstream_request(body.clone(), false, websocket, true).await;
+                assert_eq!(
+                    sent["parallel_tool_calls"], false,
+                    "websocket={websocket}, declaration={declaration}, parallel={parallel:?}"
+                );
+                for field in ["input", "tools", "reasoning", "future_field"] {
+                    assert_eq!(sent.get(field), body.get(field), "{field}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn non_lite_and_api_key_requests_keep_parallel_tool_semantics() {
+    for websocket in [false, true] {
+        for (api_key, lite) in [(false, false), (true, false), (true, true)] {
+            for parallel in [None, Some(false), Some(true)] {
+                let mut body = json!({"model":"gpt-5.4","input":[]});
+                if let Some(parallel) = parallel {
+                    body["parallel_tool_calls"] = json!(parallel);
+                }
+                let sent = capture_downstream_request(body.clone(), api_key, websocket, lite).await;
+                assert_eq!(
+                    sent.get("parallel_tool_calls"),
+                    body.get("parallel_tool_calls"),
+                    "websocket={websocket}, api_key={api_key}, lite={lite}, parallel={parallel:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn websocket_lite_uses_the_actual_per_frame_marker() {
+    for (projected, context_lite) in [("true", false), ("false", true)] {
+        let body = json!({
+            "model":"gpt-5.4", "input":[], "parallel_tool_calls":true,
+            "client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":projected}
+        });
+        let sent = capture_downstream_request(body, false, true, context_lite).await;
+        assert_eq!(sent["parallel_tool_calls"], projected != "true");
+        assert_eq!(
+            sent["client_metadata"]["ws_request_header_x_openai_internal_codex_responses_lite"],
+            projected
+        );
+    }
+}
+
+#[tokio::test]
 async fn responses_options_follow_the_selected_upstream_on_both_transports() {
     let oauth_omissions = json!({
         "frequency_penalty": 0, "presence_penalty": 0, "top_p": 1,

@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 
 pub(crate) use headers::is_non_codex_request_header;
 pub(crate) use messages::{add_translated_fast_beta, normalize_translated_codex_service_tier};
-pub(crate) use request::normalize_codex_request_body;
+pub(crate) use request::{normalize_codex_request_body, normalize_responses_lite_body};
 pub(crate) use search_tools::declares_hosted_search;
 
 /// 选定 Codex/OAuth 上游后处理客户端正文兼容

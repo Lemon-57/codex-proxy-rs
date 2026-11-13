@@ -2,6 +2,14 @@
 
 use serde_json::{Map, Value, json};
 
+/// 按实际 Lite 标记约束最终出站正文，不依赖工具声明的位置或数量
+pub(crate) fn normalize_responses_lite_body(body: &mut Value, responses_lite: bool) {
+    if responses_lite && let Some(body) = body.as_object_mut() {
+        // 官方 Lite 客户端始终显式禁用并行工具；缺字段也会被上游拒绝
+        body.insert("parallel_tool_calls".to_owned(), Value::Bool(false));
+    }
+}
+
 /// 非官方客户端及跨客户端历史回填的兼容入口；调用方必须已选定 Codex/OAuth 上游
 /// 只处理已验证被拒绝的字段，不根据客户端品牌推断整份历史是否合法
 pub(super) fn normalize_non_codex_request_body(body: &mut Map<String, Value>) {
