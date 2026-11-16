@@ -903,8 +903,24 @@ fn cargo_metadata_json() -> &'static serde_json::Value {
             "cargo metadata failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        serde_json::from_slice(&output.stdout).expect("parse cargo metadata")
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse cargo metadata");
+        // 文件扫描与 Cargo 使用同一规范化路径，避免 Windows 设备路径前缀造成误判
+        for package in metadata["packages"].as_array_mut().expect("Cargo packages") {
+            canonicalize_metadata_path(&mut package["manifest_path"]);
+            for target in package["targets"].as_array_mut().expect("Cargo targets") {
+                canonicalize_metadata_path(&mut target["src_path"]);
+            }
+        }
+        metadata
     })
+}
+
+fn canonicalize_metadata_path(value: &mut serde_json::Value) {
+    let path = Path::new(value.as_str().expect("Cargo source path"))
+        .canonicalize()
+        .expect("canonical Cargo source path");
+    *value = serde_json::Value::String(path.to_string_lossy().into_owned());
 }
 
 /// 复用 Cargo 解析后的实际包名，覆盖重命名依赖与平台条件，排除测试和构建依赖
