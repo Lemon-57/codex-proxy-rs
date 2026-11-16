@@ -580,7 +580,7 @@ mod provider {
             },
             account: AccountRecord {
                 quota_paused: false,
-                quota_limits: Default::default(),
+                quota_settings: Default::default(),
                 auto_use_quota_credits: false,
                 supplier: None,
                 manual_starts_at: None,

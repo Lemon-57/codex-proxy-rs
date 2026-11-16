@@ -674,7 +674,7 @@ impl AccountStore for PgAdminAccountStore {
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 account_ids: vec![command.account_id.clone()],
                 pauses: Default::default(),
-                quota_limits: None,
+                quota_settings: None,
                 auto_use_quota_credits: None,
                 name: command.name,
                 notes: command.notes,
@@ -763,7 +763,7 @@ impl AccountStore for PgAdminAccountStore {
         };
         let mut changed_fields = Vec::new();
         for (changed, field) in [
-            (command.quota_limits.is_some(), "quota_limits"),
+            (command.quota_settings.is_some(), "quota_settings"),
             (
                 command.auto_use_quota_credits.is_some(),
                 "auto_use_quota_credits",
@@ -791,7 +791,7 @@ impl AccountStore for PgAdminAccountStore {
                 manual_expires_at: None,
                 account_ids: command.account_ids,
                 pauses,
-                quota_limits: command.quota_limits,
+                quota_settings: command.quota_settings,
                 auto_use_quota_credits: command.auto_use_quota_credits,
                 name: None,
                 notes: None,

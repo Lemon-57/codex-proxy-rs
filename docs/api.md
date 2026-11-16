@@ -354,6 +354,11 @@ Responses 上游使用 `$.input`，Messages 上游使用 `$.messages`
 `stream` 缺省或 `false` 返回 JSON，`true` 返回 SSE。每轮由客户端携带所需的完整上下文。Claude Code 用 `--resume` 恢复本地会话后，仍通过 `messages` 发送上下文；网关不缓存对话正文用于下一轮。
 Messages 没有服务端历史续接或 WebSocket 入口
 
+Messages 生成请求通过 OpenAI Provider 选号时，优先使用 `x-claude-code-session-id` 识别 Claude Code 会话，
+缺少有效头部时读取 `metadata.user_id` JSON 字符串中的 `session_id` 或旧格式 `_session_<id>` 后缀。
+会话标识最长 256 字节，不接受控制字符；普通用户标识和对话内容不用于绑定账号。
+同一 Client Key 下的会话沿用[账号亲和与换号](#账号亲和与换号)设置，转向 Responses 上游时也适用
+
 ```bash
 curl https://gateway.example.com/v1/messages \
   -H "x-api-key: ${CPR_CLIENT_KEY}" \
@@ -769,9 +774,11 @@ xAI 的 `reasoning.effort` 接受 `none / minimal / low / medium / high / xhigh 
 
 #### 容量拒绝与重试
 
-OpenAI HTTP 明确未发送的瞬时建连失败（含 TLS 握手 EOF）在单请求内共享最多 4 次 opening、30 秒预算。
-先在原账号上退避恢复；允许换号且至少剩余两次 opening 时，本次恢复最多使用一半剩余时间，并保留一次 opening。
-再次建连失败才按调度规则重选账号，选号不可用时使用原账号的剩余预算；固定账号或换号预算不足时仅在原账号恢复。
+OpenAI HTTP 与 WebSocket 在单请求内共享最多 4 次建连、30 秒预算。
+HTTP 瞬时建连失败（含 TLS 握手 EOF），或 WebSocket 新请求在发送前遇到连接拒绝、网络不可达等瞬时建连失败时，使用同一换号规则：
+先在原账号上退避重试；允许换号且至少还能建连两次时，这次重试最多使用一半剩余时间，给重选账号留一次建连机会。
+再次建连失败才按调度规则重选账号。如果确认连不上账号绑定的代理入口，本请求后续选号会跳过绑定同一主机和端口的账号；没有其他可用账号时返回原错误。新请求重新按正常规则选号。
+其他瞬时建连失败在没有替代账号时仍可使用原账号的剩余预算；固定账号或换号预算不足时仅在原账号恢复。
 证书、TLS 协议及配置错误不进入该恢复，取消与请求截止时间优先终止等待
 
 客户端推理请求提供有效逻辑线程、轮次及 `request_kind=turn` 时，网关按 Client Key 隔离短期失败状态。
@@ -802,7 +809,7 @@ SSE 注释和 WebSocket Ping/Pong 不重置官方 Codex 客户端的事件空闲
 其 `stream_idle_timeout_ms` 默认是 300 秒；长请求需持续收到真实事件，
 或同时调整客户端与上游传输的空闲等待预算，单独缩短心跳间隔不能延长业务等待
 
-WebSocket 在交付有效输出前断线或超时，可按 `stream_max_retries` 做同账号、有退避的尽力重试
+WebSocket 已连接、尚未交付有效输出时断线或超时，可按 `stream_max_retries` 做同账号、有退避的尽力重试
 （默认最多 5 次），耗尽后仅在请求允许时改用 HTTP。已发送或发送结果不明不单独阻止这项恢复；
 次数限制不保证上游只执行一次，诊断保留原始发送状态。精确连接续接、显式终止拒绝、已观测的
 外部副作用和下游提交仍限制恢复；取消与请求截止时间随时终止等待
@@ -819,14 +826,16 @@ OpenAI 仅在允许安全重放且尚未交付不可重放输出时执行下表�
 重试受[请求总尝试次数](#账号亲和与换号)约束。
 
 `maxRetryAfterSeconds` 限制网关接受的单次服务器建议等待，默认 240 秒，取值 0～4,294,967,295。
-建议时间超过上限时跳过同账号等待，按原有耗尽动作安全换号或返回错误；无可用账号时返回最后一次上游错误，
-保留原始 `Retry-After`。等于上限仍可等待，0 表示不接受正数等待；未提供有效建议时继续使用本地退避。
-该设置不限制请求总时长，不改变已交付不可重放输出、续接绑定和换号次数等限制；保存后对新请求生效。
+建议时间超过上限时跳过同账号等待，按原有耗尽动作安全换号或返回错误；无可用账号时返回最后一次上游错误。
+具有会话绑定的 OpenAI 原生续接在有效输出前遇到可安全重放的容量拒绝时，先按换号预算排除原账号并迁移绑定，
+再返回 `previous_response_not_found`，由客户端携带完整历史在替代账号开启新链。
+等于上限仍可等待，0 表示不接受正数等待；未提供有效建议时继续使用本地退避。
+该设置不限制请求总时长，不改变已交付不可重放输出、指定账号和换号次数等限制；保存后对新请求生效。
 
 上游错误对象 headers 中的 `x-retry-metadata: NO_MORE_RETRY` 表示拒绝继续重试当前账号。
 此时无论 `Retry-After` 长短，都跳过同账号退避和同账号传输恢复，并立即执行上表的耗尽动作：
 允许换号的容量拒绝按调度换号，`server_error` 直接返回该次上游错误。
-没有其他可重试账号、换号预算或安全重放条件时，同样返回该次上游错误，并保留原始 `Retry-After`。
+没有其他可重试账号、换号预算或安全重放条件时，同样返回该次上游错误。
 
 已发送的容量失败计入[智能调度健康分](architecture.md#智能调度)，可用账号的会话亲和优先。
 容量不足不触发 Provider 全局熔断，也不作为账号额度耗尽；账号冷却由独立的[错误保护规则](#账号错误保护)决定。
@@ -834,8 +843,9 @@ OpenAI 仅在允许安全重放且尚未交付不可重放输出时执行下表�
 投影为 `server_error`，HTTP 错误状态及 WS 包装错误的数字状态投影为 `503`，让客户端执行自己的
 有界重试。Provider 已确认容量不足的初始失败，即使没有这两个错误码，也返回 `503`。
 SSE/WS 的 `response.failed` 保留原消息、响应 ID 与其他业务字段；客户端无法消费的裸 `error`
-继续按现有规则投影为 `response.failed`。`Retry-After` 等允许下发的响应头保留，
-其他错误码不受影响。内部上游状态、错误码、原始事件及计量事实保持不变；已开始输出的请求由
+继续按现有规则投影为 `response.failed`。容量错误的 `Retry-After`、`retry-after-ms` 从响应头及错误事件的
+headers 中移除，避免客户端再次等待旧账号；关联 ID 等其他响应头保留，其他错误码不受影响。
+内部上游状态、等待提示、错误码、原始事件及计量事实保持不变；已开始输出的请求由
 客户端决定如何恢复，代理不因此重放已提交的请求。
 `flex_unavailable` 是当前请求的终止拒绝，保留原始错误，不自动重试、切换传输或冷却账号
 
@@ -1266,10 +1276,18 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 未要求探测时，该字段表示冷却结束时间。`protectionRules` 返回触发时的规则快照 `[{ id, name }]`，
 没有保护原因时为空数组，修改或删除当前规则不改写此快照。错误保护与上游限流独立恢复，解除保护不保证其他限制已经解除
 
-OpenAI OAuth 账号的 `capabilities.quotaLimitsSupported` 为真。通过 `POST /api/admin/accounts/batch-update`
-提交 `{"accountIds":["acct_1"],"quotaLimits":{"codex:18000s":99,"codex:604800s":95}}`。
-键取自该账号 `quota.windows` 中 `accountWide: true` 的窗口 `key`，值是 1～100 的整数使用率。
-提交的映射替换全部窗口上限；省略字段保留原配置，空对象关闭全部上限。账号视图以 `quotaLimits` 返回配置
+OpenAI OAuth 账号的 `capabilities.quotaSettingsSupported` 为真。通过 `POST /api/admin/accounts/batch-update`
+提交 `{"accountIds":["acct_1"],"quotaSettings":{"codex:18000s":{"limitPercent":99,"warmup":null},"codex:604800s":{"limitPercent":95,"warmup":{"model":"gpt-5.5"}}}}`。
+键取自该账号 `quota.windows` 中 `accountWide: true` 的窗口 `key`，这里只配置通用额度桶。
+`limitPercent` 为 1～100 的整数，省略或 `null` 表示不设上限；`warmup` 省略或为 `null` 表示关闭预热，开启时 `model` 必须是非空且不超过 128 字节的模型 ID。
+映射替换该账号全部桶设置；省略 `quotaSettings` 保留原配置，空对象关闭全部上限和桶预热。账号视图以 `quotaSettings` 返回配置
+
+桶预热独立于全局 Cron 开关，默认关闭。记录已观测的窗口重置时间，满 5 分钟后复查额度；
+该轮存在对应通用桶的请求使用证据或新窗口非零用量时跳过，不把重置前的使用或具名桶用量算入本轮。
+正常请求的额度反馈即使用量取整为 0% 也保留使用证据，主动额度刷新不会清除；成功的账号预热同样计入。
+无重置时间时等待后续观测，不通过空闲窗口滚动的倒计时推迟已登记的边界。
+同批到期的通用窗口合并一次请求，领取进度跨重启保留；已领取请求发生超时或取消时不自动重放。
+账号停用、凭据不可用、额度耗尽或达到调度上限时不执行；复查失败最多每 5 分钟重查
 
 任一已设限通用窗口的实际使用率达到或超过上限，该账号暂停接收新请求，在途请求继续。账号状态为 `quota_paused`，可按此状态筛选；停用、凭据错误、上游额度耗尽和限流优先显示。
 `quota.pausedWindows` 列出触发窗口的键，已知重置时间见对应窗口的 `resetAtDisplay`。
@@ -2183,7 +2201,7 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 | [并发与排队](#并发与排队) | `maxConcurrentPerAccount`、`maxWaitingPerKey`、`maxWaitingPerAccount`、`openaiGuardianReservedConcurrency`、`keyQueueTimeoutSeconds`、`accountQueueTimeoutSeconds`、`switchAccountOnQueueFailure` |
 | [上游重试等待](#容量拒绝与重试) | `maxRetryAfterSeconds` |
 | [亲和与换号](#账号亲和与换号) | `openaiAccountAffinity`、`openaiSessionAffinityTtlHours`、`maxAccountRotations` |
-| [调度策略](#智能调度) | `rotationStrategy`、`smartScheduling` |
+| [调度策略](#智能调度) | `rotationStrategy`、`smartScheduling`、`quotaResetWindowWeights` |
 | [请求解压](#请求解压上限) | `responsesMaxDecompressedBodyBytes` |
 | [客户端门禁](#1-鉴权与公共约定) | `minCodexDesktopVersion`、`minCodexCliVersion` |
 | [历史保留](#历史保留) | `usageRetentionDays`、`opsEventRetentionDays`、`auditRetentionDays` |
@@ -2322,7 +2340,7 @@ Guardian 以 `subagent_kind` 或 `client_metadata.x-openai-subagent` 值 `guardi
 
 ### 账号亲和与换号
 
-`openaiAccountAffinity` 控制 Codex 账号亲和，默认 `strict`（严格）：
+`openaiAccountAffinity` 控制 OpenAI Provider 的账号亲和，包括带明确 Claude Code 会话身份的 [Messages 请求](#messages-请求)，默认 `strict`（严格）：
 
 - `relaxed`（宽松）：会话内请求直接按 `rotationStrategy` 选号，不优先主账号
 - `preferred`（优先）优先使用会话主账号，短时满载、限流或模型不匹配时临时分流，后备按同一会话的稳定顺序参与既有调度
@@ -2345,7 +2363,7 @@ Chat Completions 和 Responses 通过原生 OpenAI Provider 选号时，缺少�
 
 `maxAccountRotations` 是单请求最大换号次数，默认 3，取值 0～31；0 表示不换号。
 首次选号、同账号重试和选号时过滤不可用候选不计入换号次数，总路由尝试仍最多 32 次。
-提高该值允许请求尝试更多账号，但不放宽安全重放或交付后的重试限制。
+例如设为 2，A 遇到限流后换到 B 只计 1 次，A、B 可以使用同一代理。实际换号次数仍受可用账号、建连预算和安全重放条件限制。
 设置更新请求须包含账号亲和、亲和时长与最大换号次数，保存后对新请求生效，执行中请求及其重试沿用冻结值
 
 ### 请求解压上限
@@ -2383,13 +2401,26 @@ Chat Completions 和 Responses 通过原生 OpenAI Provider 选号时，缺少�
 缺少必填系数、系数为 `null`、未知字段及无效数值均返回 `422`，不写入配置。读取设置额外返回只读
 `smartSchedulingDefaults`，内容为上述默认对象，用于恢复默认与自定义状态比较，不可提交到更新接口
 
-`resetWeight` 控制重置分在总评分中的比重。`resetWindowWeights` 中的 `fiveHour`、`weekly`、`monthly` 分别表示 5 小时、周和月的相对系数。三项均为 0～10、最多一位小数。默认均为 0，旧配置省略整个字段时也取 0；全部为 0 时不计重置分。设为 `{"fiveHour":0,"weekly":1,"monthly":0}` 可只按周重置评分。只计算账号通用窗口，未知、缺失或已过期的周期贡献为零；独立的 `quota_reset_priority` 策略仍按最早有效重置时间排序
+`resetWeight` 控制重置分在总评分中的比重。`resetWindowWeights` 中的 `fiveHour`、`weekly`、`monthly` 分别表示 5 小时、周和月的相对系数。三项均为 0～10、最多一位小数。默认均为 0，旧配置省略整个字段时也取 0；全部为 0 时不计重置分。设为 `{"fiveHour":0,"weekly":1,"monthly":0}` 可只按周重置评分。只计算账号通用窗口，未知、缺失或已过期的周期贡献为零
 
 `queueWeight` 只在没有可立即使用的账号、需要选择等待队列时参与评分，越大越偏向等待人数少的账号。
 设为 `0` 时沿用最短队列规则；启用后结合其余五项评分选择队列。队列人数限于当前进程，只有开启账号排队才会生效，
 不影响已入队请求的位置、队内 FIFO、容量上限或等待超时。两项默认均为 `0`
 
-没有可用亲和时，在最高可用权重层内按配置评分。原生续写账号绑定仍是硬约束。
+额度调度 `quota_reset_priority` 使用独立的必填完整对象 `quotaResetWindowWeights`，与智能调度分别保存：
+
+```json
+{ "fiveHour": 0.0, "weekly": 0.0, "monthly": 0.0 }
+```
+
+三项范围均为 `0～10`、最多一位小数，全部为 `0` 时按账号最早有效重置时间排序。
+任一项大于 `0` 时，只比较所选窗口的加权重置分，严格优先最高分，不混入其他评分维度，也不轮换近似同分账号。
+设为 `{"fiveHour":0,"weekly":1,"monthly":0}` 即可优先周重置更早的账号；只有一项非零时，调大该系数不会改变排序。
+缺失或已过期的所选窗口不加分，不回退到未启用窗口。同分时依次比较并发占用、上次使用时间和账号 ID。
+读取设置额外返回只读 `quotaResetWindowWeightsDefaults`，内容为上述全零对象，更新时不可提交该只读字段
+
+两种策略均在没有可用亲和时，于最高可用权重层内选择账号，继续遵守账号资格、额度和并发限制。
+原生续写账号绑定仍是硬约束。
 配置随运行设置原子保存和发布，新请求使用新值，已开始请求及其重试沿用原快照，无需重启
 
 ### 模型定价
@@ -2491,13 +2522,14 @@ TUI 默认标识为 `codex-tui`，Exec 为 `codex_exec`，入口后缀使用同�
 因此 Desktop 预设保持默认即可；CLI 预设建议配置真实值，多 Key 可通过各自的画像覆盖差异化
 
 `versionLag` 让 `latest` 模式跟随官方发布但滞后 N 个已观察版本采用，省略时采用最新版本。
-档位基于网关观察到的发布序列解析：启动种子与历次 24 小时检查的核验版本按时间倒序构成历史，
+档位基于网关观察到的发布序列解析：启动种子与历次检查的核验版本按时间倒序构成历史，
 取第 N 项；序列不足时回退最旧已核验版本，不会因此解析失败。历史仅保留在进程内，
 重启后从启动种子与制品缓存重新积累
 
 六套预设均支持自动更新：macOS Desktop 支持 arm64，Windows/Linux Desktop 及三套 CLI 支持 arm64、x86_64。
 预设接口的 `automaticAvailable`、`reason` 表示当前组合的可用性；自定义架构可能使自动解析不可用。
-每 24 小时后台检查官方稳定发布，失败保留同组合上次有效版本；固定值不受后台更新影响。
+启动时立即检查官方稳定发布，之后每轮检查完成等待 1 小时再检查。
+版本变化后提取并更新画像，失败保留同组合上次有效版本，下一轮重试；固定值不受后台更新影响。
 Desktop 的应用版本、Core 和构建号来自同一平台、架构的官方制品：macOS ZIP、Windows MSIX、Linux DEB。
 Windows/Linux 通过 ETag 检查更新，未变化时复用已核验版本；CLI 依据官方 npm 稳定标签和对应平台依赖
 
@@ -2508,6 +2540,7 @@ Windows/Linux 通过 ETag 检查更新，未变化时复用已核验版本；CLI
 完整自定义配置不携带官方制品核验时间。
 客户端画像配置控制应用层请求字段，不切换操作系统的 TLS 实现。默认 HTTP 使用 native TLS，
 WebSocket 使用 rustls；配置自定义 CA 时 HTTP 也使用 rustls。TLS 指纹需按实际部署平台与传输路径核验。
+版本未变化时只更新 `checkedAt`，保留 `verifiedAt`；缓存续期不改写核验时间。
 未完成本次启动检查时 `checkedAt` 为 `null`。非法或当前不可用的选择返回 `400`，保存失败不提交其他修改
 
 Responses 的自动 Desktop Git 上下文与请求头使用同一画像快照：已有 `appServerVersion` 同步为 Core 版本，

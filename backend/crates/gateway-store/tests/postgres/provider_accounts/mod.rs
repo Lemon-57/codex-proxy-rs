@@ -1620,7 +1620,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
-                quota_limits: None,
+                quota_settings: None,
                 auto_use_quota_credits: None,
                 account_ids: vec!["acct_notes".to_owned()],
                 enabled: Some(false),
@@ -1882,7 +1882,7 @@ async fn account_enable_preserves_facts_and_explicit_recovery_clears_them() {
     let enabled = store
         .batch_update_accounts(
             BatchUpdateAccounts {
-                quota_limits: None,
+                quota_settings: None,
                 auto_use_quota_credits: None,
                 account_ids: vec!["acct_recovery".to_owned()],
                 enabled: Some(true),
@@ -2009,7 +2009,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
     let result = store
         .batch_update_accounts(
             BatchUpdateAccounts {
-                quota_limits: None,
+                quota_settings: None,
                 auto_use_quota_credits: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
@@ -2049,7 +2049,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
-                quota_limits: None,
+                quota_settings: None,
                 auto_use_quota_credits: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
@@ -2792,7 +2792,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
     let revision = repository
         .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
             pauses: Default::default(),
-            quota_limits: None,
+            quota_settings: None,
             auto_use_quota_credits: None,
             supplier: None,
             manual_starts_at: None,
@@ -3840,7 +3840,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
     .expect("policy");
     let store = admin_account_store(&database.pool);
     let command = BatchUpdateAccounts {
-        quota_limits: None,
+        quota_settings: None,
         auto_use_quota_credits: None,
         account_ids: vec![input.id.clone()],
         enabled: None,
@@ -3986,7 +3986,7 @@ async fn disabling_quota_credits_revokes_credit_only_access_even_with_a_late_obs
     let set_policy = async |enabled| {
         let command = BatchUpdateAccounts {
             account_ids: vec![input.id.clone()],
-            quota_limits: None,
+            quota_settings: None,
             auto_use_quota_credits: Some(enabled),
             enabled: None,
             concurrency_limit: None,

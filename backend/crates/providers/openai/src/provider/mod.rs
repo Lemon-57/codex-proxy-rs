@@ -673,8 +673,7 @@ impl Provider for CodexProvider {
         {
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
-        // 其他协议必须先取得真实账号，再按固定 attempt 阶段调用转换器；选号前不能
-        // 把未知正文当成 OpenAI wire 解释会话、亲和或传输字段
+        // 跨协议转换必须在选号后执行；选号前只按各自协议读取明确会话身份
         let upstream = (generate.protocol_payload().protocol() == OPENAI_PROTOCOL)
             .then(|| encode_generate_request(generate, upstream_model.as_str(), None))
             .transpose()
@@ -726,10 +725,27 @@ impl Provider for CodexProvider {
                     requires_websocket,
                 )
             });
-        // 内容亲和只交给选号器；中间件复验、轮次关联和原生续接仍只认真实会话
+        let messages_affinity = crate::credential::derive_messages_session_affinity(
+            generate.protocol_payload(),
+            &[],
+            context.client_api_key_ref(),
+        );
+        if context.continuation_attempt() == ContinuationAttempt::RotateForClientReplay
+            && (selection_session_affinity.is_none()
+                || context.account_selection_policy().openai_account_affinity()
+                    == AccountAffinity::Relaxed)
+        {
+            // 没有可持续的会话绑定就无法保证完整历史使用替代账号，交回原始容量错误
+            return Err(provider_error(
+                ProviderErrorKind::NoEligibleAccount,
+                UpstreamSendState::NotSent,
+            ));
+        }
+        // Messages 身份与内容亲和仅交给选号器，不建立 OpenAI 轮次或原生续接关联
         let account_affinity = selection_session_affinity
             .as_ref()
-            .or(cache_preference.as_ref());
+            .or(cache_preference.as_ref())
+            .or(messages_affinity.as_ref());
         let selection_started_at = Instant::now();
         let selection = async {
             self.selector
@@ -760,6 +776,11 @@ impl Provider for CodexProvider {
         };
         let account_selection_wait_ms =
             u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if context.continuation_attempt() == ContinuationAttempt::RotateForClientReplay {
+            // Core 已确认允许换号；选号器迁移共享绑定后，完整历史仍须由客户端提供
+            // 不将旧账号的 previous_response_id 或增量输入发送给替代账号
+            return Err(continuation_replay_required_error("account_rotated"));
+        }
         let adapter = context.upstream_adapter_for_account(
             candidate.provider(),
             upstream_model,
@@ -944,7 +965,9 @@ impl CodexProvider {
                         ContinuationAttempt::ReplayOwner | ContinuationAttempt::ReplayAny => {
                             PreviousResponseScope::ExternalUnknown
                         }
-                        ContinuationAttempt::None => PreviousResponseScope::ExternalUnknown,
+                        ContinuationAttempt::None | ContinuationAttempt::RotateForClientReplay => {
+                            PreviousResponseScope::ExternalUnknown
+                        }
                     };
                     upstream_request.set_previous_response_id(Some(
                         continuation.upstream_response_id().as_str().to_owned(),

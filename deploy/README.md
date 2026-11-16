@@ -20,10 +20,11 @@
 | --- | --- | --- |
 | `deploy/config.yaml` | 监听、数据库/Redis 连接、部署凭据、时区、日志与可选内存分配策略等启动配置 | 从模板创建，已有部署合并修改，不覆盖原文件 |
 | `deploy/compose.yaml` | 镜像、容器网络、端口、挂载、PostgreSQL 启动参数与资源限制 | 调整 Compose 并重建受影响容器 |
+| `frontend/.env` | 前端部署前缀 | 通过 `.env.local` 覆盖后重新构建，详见 [URL 子路径部署](#url-子路径部署) |
 | PostgreSQL | 账号、Key、运行设置、上游身份、插件配置等业务数据 | 管理端或管理 API |
 | 浏览器本地 | 主题和界面偏好 | 当前浏览器的主题设置 |
 
-项目不使用 `.env` 配置文件。Compose 环境变量用于容器地址、镜像选择和构建发布；
+后端不使用 `.env` 配置文件。Compose 环境变量用于容器地址、镜像选择和构建发布；
 可选的内存分配策略由 `config.yaml` 的 `services.app-runtime` 桥接到应用容器。
 配置加载会忽略未知字段，并在启动控制台提示字段名；不输出对应值。缺少必填字段时会指出缺项并停止启动，
 已知字段的类型和取值仍需合法；可选字段省略时使用默认值
@@ -390,6 +391,8 @@ PostgreSQL/Redis 启动密码。日常校验使用 `config --quiet`
 
 使用 Chrome、Edge 等支持 PWA 的浏览器访问管理端，可通过地址栏或浏览器菜单安装应用，安装后以独立窗口打开站点首页，沿用现有登录流程
 
+首次在 Chrome 中安装时，系统标题栏可能显示应用名称。可用窗口右上角的标题栏按钮隐藏名称，隐藏后仍可拖动顶部空白区域移动窗口
+
 安装入口要求 HTTPS，或本机的 `http://localhost`、`http://127.0.0.1`；普通 HTTP 局域网地址不满足条件。入口是否显示还取决于浏览器、访问交互及是否已安装。应用需要联网访问网关，不提供离线使用
 
 ### 启动后的运行设置
@@ -544,6 +547,55 @@ Ping/Pong 不延长空闲期限；默认每 5 秒扫描，通常在空闲 300～
 `downstream.body.closed` 和反向代理日志判断断开位置，不能仅凭此消息认定是 JSON 格式错误。
 SSE 注释保活用于防止传输链路空闲断开，不会重置 Codex 等待完整 SSE 事件的超时；
 若报错为 `idle timeout waiting for SSE`，再检查客户端的 `stream_idle_timeout_ms`
+
+### URL 子路径部署
+
+源码构建可通过 `CPR_WEB_BASE_PATH` 指定前端部署前缀，默认值为 `/`。
+管理端请求和生成的客户端地址沿用同一前缀，前缀以 `/` 开头和结尾，例如部署到 `https://example.com/proxy/`：
+
+```bash
+CPR_IMAGE=codex-proxy-rs:subpath CPR_WEB_BASE_PATH=/proxy/ \
+  docker compose -f deploy/compose.yaml build codex-proxy-rs
+CPR_IMAGE=codex-proxy-rs:subpath \
+  docker compose -f deploy/compose.yaml up -d --no-build --wait codex-proxy-rs
+```
+
+直接构建前端时，默认值来自所有模式共用的 `frontend/.env`。
+在不纳入 Git 的 `frontend/.env.local` 中配置以下内容，再执行 `pnpm --dir frontend build`：
+
+```dotenv
+CPR_WEB_BASE_PATH=/proxy/
+```
+
+进程环境中的同名变量优先于 env 文件，Docker 构建使用上方 Compose 构建参数。
+路径在构建时确定，修改运行时环境变量或只转发路径不会改变已发布镜像中的前端资源。
+
+后端仍按根路径提供服务，反向代理需要剥除请求前缀，并为登录和刷新 Cookie 的 `Path`、
+站内根相对 `Location` 补回前缀，保证 Realtime 客户端沿返回地址连接和挂断。
+以下 Caddy 示例适用于 Caddy 在宿主机、应用使用默认本机端口的部署：
+
+```caddyfile
+example.com {
+    redir /proxy /proxy/ 308
+
+    handle_path /proxy/* {
+        reverse_proxy 127.0.0.1:8080 {
+            header_down Set-Cookie "(?i)(;[[:space:]]*Path=)/([^;]*)" "${1}/proxy/${2}"
+            # 仅改写站内根相对路径，保留外部 URL
+            header_down Location "^/([^/].*)?$" "/proxy/${1}"
+            flush_interval -1
+        }
+    }
+}
+```
+
+Caddy 与应用同在容器网络时，将回源地址改为 `codex-proxy-rs:8080`。
+合并到已有站点时，将子路径处理放在兜底路由之前，保留浏览器的 `Origin` 和鉴权头。
+管理入口为 `/proxy/`，模型客户端使用 `/proxy/v1`。
+
+系统在线更新会替换前端资源。子路径部署在 `config.yaml` 的 `host` 下配置
+`system_update.update_repository: null`，通过重新构建镜像升级。
+验收时检查子页面刷新、登录续期、头像和插件资源、SSE 与 WebSocket，并保留默认根路径部署的验证。
 
 ## 客户端配置
 
@@ -843,6 +895,9 @@ OAuth 恢复开关为 `host.logging.oauth_recovery`，默认关闭，与普通�
 ## 镜像升级与源码构建
 
 本定制部署的迁移 0001–0036 保持冻结，CPR 互联及账号名称迁移使用 0037、0038。已有运行设置、账号并发和插件状态保持各实例原值，互联共享默认关闭。在线切换须启动隔离候选、核验摘要及功能后仅切换新连接，旧进程保留至 HTTP、SSE 和 WebSocket 自然排空。
+
+额度桶设置通过追加迁移保留 `quota_limits` 和 `quota_settings` 两列，并在同一账号事务内同步上限。
+旧版本修改上限时保留桶预热配置，预热默认关闭。旧进程可以继续排空已有请求；冷启动回退须使用包含相同迁移清单的兼容成品，不能直接启动缺少已登记迁移的历史二进制。
 
 
 每个 Release 独立提供 `config.example.yaml`、默认镜像固定到该版本的 `compose.yaml` 和校验和；
