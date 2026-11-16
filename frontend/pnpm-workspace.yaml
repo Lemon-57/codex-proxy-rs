@@ -6,5 +6,5 @@ allowBuilds:
   esbuild@0.25.12: true
 
 onlyBuiltDependencies:
-  - "@codex-proxy/ui@https://codeload.github.com/zyycn/codex-proxy-ui/tar.gz/46ade64479009ab9bc7cb1c8ec6d143fbd0a3b6c"
+  - "@codex-proxy/ui@https://codeload.github.com/zyycn/codex-proxy-ui/tar.gz/68458e62e7fb9fadbacea75ce48522f2ba85b8b2"
   - esbuild
