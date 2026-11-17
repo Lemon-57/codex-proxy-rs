@@ -8962,7 +8962,7 @@ async fn capacity_http_and_websocket_opening_rejections_use_bounded_business_ret
 }
 
 #[tokio::test]
-async fn request_rejections_should_not_retry_or_cool_down_accounts() {
+async fn request_rejections_keep_distinct_replay_policies_without_account_cooldown() {
     use gateway_core::provider_ports::ProviderCooldownPort as _;
     for (use_websocket, (code, expected_kind)) in [false, true].into_iter().flat_map(|websocket| {
         [
@@ -9016,9 +9016,12 @@ async fn request_rejections_should_not_retry_or_cool_down_accounts() {
         assert_eq!(error.kind(), expected_kind);
         assert_eq!(error.upstream_code().map(|code| code.as_str()), Some(code));
         assert_eq!(error.retry_after(), Some(Duration::from_secs(300)));
-        assert!(!error.replay_is_safe());
+        assert_eq!(error.replay_is_safe(), code == "turn_rate_limit_exceeded");
         assert!(error.pre_delivery_retry().is_none());
-        assert!(error.retry_is_prohibited());
+        assert_eq!(
+            error.retry_is_prohibited(),
+            code != "turn_rate_limit_exceeded"
+        );
         assert!(!provider_openai::openai_failure_affects_account_score(
             &error
         ));
@@ -9340,15 +9343,20 @@ async fn stream_failures_preserve_error_fields_independent_of_retry_classificati
             .map(|case| (websocket, case))
         })
     {
-        for semantic_output in [false, true] {
+        for blocking_event in [
+            None,
+            Some(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hello"})),
+            Some(json!({"type":"response.function_call_arguments.delta","item_id":"call_fixture","output_index":0,"delta":"{\"value\":1}"})),
+        ] {
+            let semantic_output = blocking_event.is_some();
             let store = Arc::new(MemoryAccountStore::default());
             create_account(&store, "acct_provider_contract").await;
             let cooldowns = Arc::new(MemoryCooldownPort::new());
             let mut events = vec![
                 json!({"type": "response.created", "response": {"id": "resp_capacity", "model": "gpt-5.4"}}),
             ];
-            if semantic_output {
-                events.push(json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "hello"}));
+            if let Some(event) = blocking_event {
+                events.push(event);
             }
             let mut original = json!({"type": "response.failed", "response": {"id": "resp_capacity", "error": {"code": code, "message": message}}});
             if code == "unsupported_parameter" {
@@ -9436,10 +9444,13 @@ async fn stream_failures_preserve_error_fields_independent_of_retry_classificati
                 expected_kind,
                 "unexpected error for {code}, websocket={use_websocket}, semantic_output={semantic_output}: {error:?}"
             );
-            assert_eq!(error.replay_is_safe(), capacity && !semantic_output);
+            assert_eq!(
+                error.replay_is_safe(),
+                (capacity || code == "turn_rate_limit_exceeded") && !semantic_output
+            );
             assert_eq!(error.upstream_status(), expected_status);
             if code == "turn_rate_limit_exceeded" {
-                assert!(error.retry_is_prohibited());
+                assert!(!error.retry_is_prohibited());
                 assert_eq!(error.retry_after(), Some(Duration::from_secs(7)));
             }
             assert_eq!(

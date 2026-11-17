@@ -48,7 +48,7 @@ pub enum CodexFailureCategory {
     /// 当前用量窗口已经耗尽，但存在自动恢复的重置时间
     UsageLimitExhausted,
     RateLimited,
-    /// 当前 turn 的限流交给客户端等待，不据此推导账号级冷却
+    /// 当前 turn 的明确拒绝允许请求内安全换号，不据此推导账号级冷却
     TurnRateLimited,
     QuotaExhausted,
     CloudflareChallenge,
@@ -224,6 +224,7 @@ impl CodexUpstreamFailure {
                         | CodexFailureCategory::Banned
                         | CodexFailureCategory::UsageLimitExhausted
                         | CodexFailureCategory::RateLimited
+                        | CodexFailureCategory::TurnRateLimited
                         | CodexFailureCategory::QuotaExhausted
                         | CodexFailureCategory::CloudflareChallenge
                         | CodexFailureCategory::CloudflarePathBlocked

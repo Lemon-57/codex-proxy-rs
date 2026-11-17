@@ -3968,6 +3968,7 @@ fn native_continuation_explicit_429_is_not_retried() {
             UpstreamSendState::Sent,
         )
         .with_status(429)
+        .with_session_binding_recovery()
         .with_replay_safe())],
         Some(ContinuationBinding::Pinned(continuation)),
     );
@@ -3987,6 +3988,7 @@ fn external_continuation_explicit_429_is_not_retried() {
             UpstreamSendState::Sent,
         )
         .with_status(429)
+        .with_session_binding_recovery()
         .with_replay_safe())],
         Some(continuation),
     );

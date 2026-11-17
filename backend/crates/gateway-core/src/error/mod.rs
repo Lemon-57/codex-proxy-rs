@@ -543,6 +543,7 @@ struct ProviderErrorUpstreamValues {
 #[derive(Clone, Default)]
 struct ProviderErrorFailureObservation {
     unreachable_proxy: Option<crate::upstream::ProxyEndpoint>,
+    session_binding_recovery: bool,
     continuation_unavailable_reason: Option<&'static str>,
     connection: Option<ProviderConnectionObservation>,
 }
@@ -682,6 +683,20 @@ impl ProviderError {
     fn failure_observation_mut(&mut self) -> &mut ProviderErrorFailureObservation {
         self.failure_observation
             .get_or_insert_with(|| Box::new(ProviderErrorFailureObservation::default()))
+    }
+
+    /// 请求在安全换号后由新账号接管会话绑定，不改变账号全局状态
+    #[must_use]
+    pub fn with_session_binding_recovery(mut self) -> Self {
+        self.failure_observation_mut().session_binding_recovery = true;
+        self
+    }
+
+    #[must_use]
+    pub fn requests_session_binding_recovery(&self) -> bool {
+        self.failure_observation
+            .as_deref()
+            .is_some_and(|observation| observation.session_binding_recovery)
     }
 
     /// 标记 Provider 已证明本次失败可在下游提交前安全重放

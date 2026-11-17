@@ -1119,7 +1119,13 @@ where
         .with_credential_recovery_attempted(pinned_account.as_ref().is_some_and(|account| {
             self.credential_recovery_attempted_accounts
                 .contains(account)
-        }));
+        }))
+        .with_session_binding_recovery_from(
+            self.last_retryable_failure
+                .as_ref()
+                .filter(|failure| failure.requests_session_binding_recovery())
+                .and_then(|_| self.last_attempt_account.clone()),
+        );
         account_context
             .excluded_proxy_endpoints
             .clone_from(&self.excluded_proxy_endpoints);

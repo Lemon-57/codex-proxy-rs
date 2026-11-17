@@ -1552,6 +1552,13 @@ pub(super) fn map_upstream_failure(
     if replay_boundary.permits_provider_proof() && replay_safe {
         error = error.with_replay_safe();
     }
+    if category == CodexFailureCategory::TurnRateLimited {
+        // 本轮拒绝直接交给既有换号路径，不能退回原账号等待或作为传输故障恢复
+        error = error.with_same_account_retry_blocked();
+        if error.replay_is_safe() {
+            error = error.with_session_binding_recovery();
+        }
+    }
     if let Some(continuation_failure) = continuation_failure {
         error = error
             .with_continuation_failure(continuation_failure)

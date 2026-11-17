@@ -97,7 +97,7 @@ fn flex_capacity_rejection_should_be_terminal_even_before_payload_send() {
 }
 
 #[test]
-fn turn_rate_limit_does_not_grant_proxy_replay_or_account_cooldown() {
+fn turn_rate_limit_replay_requires_an_unambiguous_rejection() {
     for phase in [
         CodexUpstreamSendPhase::BeforePayload,
         CodexUpstreamSendPhase::AfterPayload,
@@ -114,7 +114,10 @@ fn turn_rate_limit_does_not_grant_proxy_replay_or_account_cooldown() {
             phase,
         );
         assert_eq!(failure.category(), CodexFailureCategory::TurnRateLimited);
-        assert!(!failure.replay_is_safe());
+        assert_eq!(
+            failure.replay_is_safe(),
+            phase != CodexUpstreamSendPhase::Ambiguous
+        );
     }
     assert_eq!(
         classify(429, r#"{"error":{"message":"turn_rate_limit_exceeded"}}"#),
