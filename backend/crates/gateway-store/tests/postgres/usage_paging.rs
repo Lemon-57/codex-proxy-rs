@@ -89,7 +89,7 @@ async fn account_filter_matches_historical_email_name_and_id_across_status_pages
                     status,
                     range,
                     filter: UsageRecordFilter {
-                        provider_account_name: Some(search.into()),
+                        provider_account_search: Some(search.into()),
                         ..Default::default()
                     },
                     current_page,

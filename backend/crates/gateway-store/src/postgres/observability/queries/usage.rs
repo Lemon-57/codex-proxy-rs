@@ -16,7 +16,7 @@ pub(crate) fn push_usage_filter(
         query.push_bind(literal_contains_pattern(value));
         query.push(" escape '\\'");
     }
-    if let Some(value) = &filter.provider_account_name {
+    if let Some(value) = &filter.provider_account_search {
         let pattern = literal_contains_pattern(value);
         query.push(format!(
             " and ({alias}.provider_account_name_snapshot ilike "
