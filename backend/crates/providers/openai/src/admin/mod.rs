@@ -265,8 +265,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
     }
 
     fn plan_type_display(&self, plan_type: &str) -> String {
-        // Pro 系列按套餐类型区分展示，其他套餐遵循官方 KnownPlan::display_name
-        // 只映射展示名称，原始套餐值与未知套餐保持不变
+        // Pro 三档沿用管理端短名，其余已知套餐使用 Codex /status 的名称
         match plan_type.to_ascii_lowercase().as_str() {
             "free" => "Free",
             "go" => "Go",
@@ -274,16 +273,17 @@ impl ProviderAdmin for OpenAiAdminProvider {
             "pro" => "Pro",
             "prolite" => "ProLite",
             "promax" => "ProMax",
-            "team" => "Team",
-            "self_serve_business_prolite" => "Self Serve Business ProLite",
-            "self_serve_business_usage_based" => "Self Serve Business Usage Based",
-            "business" => "Business",
-            "ent26" | "enterprise" | "hc" => "Enterprise",
+            "team" | "self_serve_business_usage_based" => "Business",
+            "self_serve_business_prolite" => "Business Premium",
+            "business" | "ent26" | "enterprise" | "hc" | "enterprise_cbp_usage_based" => {
+                "Enterprise"
+            }
             "enterprise_cbp_automation" => "Enterprise (Automation)",
-            "enterprise_cbp_usage_based" => "Enterprise CBP Usage Based",
             "edu" | "education" => "Edu",
             "edu_plus" => "Edu Plus",
             "edu_pro" => "Edu Pro",
+            "sci" => "Academic Researchers",
+            "sci_plus" => "Academic Researchers Plus",
             _ => plan_type,
         }
         .to_owned()
@@ -624,6 +624,29 @@ impl ProviderAdmin for OpenAiAdminProvider {
         if !account_matches_record(&current.account, &command.account) {
             return Err(provider_admin_error(ProviderAdminErrorKind::Conflict)
                 .with_public_message("账号凭据已被更新，请刷新账号列表后重试"));
+        }
+        let material = command
+            .provider_material
+            .expose_to_provider()
+            .expose_to_provider();
+        if let Some(replacement) = material.get("supplied_refresh_token") {
+            let replacement = replacement
+                .as_str()
+                .ok_or_else(|| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+            if material
+                .get("expected_credential_revision")
+                .and_then(Value::as_u64)
+                != Some(current.account.revision().get())
+            {
+                return Err(provider_admin_error(ProviderAdminErrorKind::Conflict)
+                    .with_public_message("账号凭据版本已变化，未验证所提供的 RT"));
+            }
+            let prepared = self
+                .credentials
+                .replace_refresh_token(current, replacement)
+                .await
+                .map_err(map_credential_admin_error)?;
+            return prepared_rotation(prepared, command.account.provider_kind);
         }
         if current.account.authentication_kind()
             == crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY

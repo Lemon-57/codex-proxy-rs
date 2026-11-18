@@ -1,16 +1,11 @@
-# v3.52.0
-
-## 新增功能
-
-- 请求记录可按历史账号名称、邮箱或账号 ID 筛选
-- 内置 GPT-6.2 Astra 和 Sol 价目，Ultrafast 按常规价估算
+# v3.52.1
 
 ## 优化改进
 
-- 请求记录用双闪电标识 Ultrafast，用单闪电标识 Fast
-- 请求错误来源图标改为无底色显示
+- 账号列表和请求记录按 Codex 名称展示 Business、Enterprise 和科研套餐，长名称在原列宽内换行，Pro 三档沿用原有短名
+- OpenAI 模型目录的 ETag 与已保存目录一致时，后台复查推迟一小时，减少重复请求
 
-## 升级须知
+## 问题修复
 
-- `GET /api/admin/usage/records` 使用 `accountSearch`，继续接受旧参数 `accountName` 作为别名
-- 自行部署时请确认 PostgreSQL 版本为 16 或更高，默认 Compose 使用 PostgreSQL 18
+- 修复上游响应结束、报错或请求取消后，账号并发槽位仍被占用到记账完成的问题
+- Codex WebSocket 按当前请求转发轮次状态和元数据，避免后续轮次沿用握手时的值，切换账号时清除原账号的轮次状态

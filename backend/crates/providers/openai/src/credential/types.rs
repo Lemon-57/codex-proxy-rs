@@ -244,7 +244,7 @@ impl KnownChatgptPlan {
     }
 }
 
-fn decode_jwt_payload<T: DeserializeOwned>(jwt: &str) -> Result<T, ()> {
+pub(super) fn decode_jwt_payload<T: DeserializeOwned>(jwt: &str) -> Result<T, ()> {
     let mut parts = jwt.split('.');
     let (Some(header), Some(payload), Some(signature)) = (parts.next(), parts.next(), parts.next())
     else {

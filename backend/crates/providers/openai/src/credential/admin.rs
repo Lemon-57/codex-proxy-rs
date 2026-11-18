@@ -32,7 +32,8 @@ use super::token_client::{
 };
 use super::types::{
     CODEX_AUTHENTICATION_KIND_OAUTH, CodexAccountProfile, CodexCredentialData, CodexOAuthMetadata,
-    CodexOAuthSecret, ResponsesTransport, parse_access_token_expiration, parse_chatgpt_jwt_claims,
+    CodexOAuthSecret, ResponsesTransport, decode_jwt_payload, parse_access_token_expiration,
+    parse_chatgpt_jwt_claims,
 };
 
 const PROVIDER_NAME: &str = "openai";
@@ -841,6 +842,30 @@ impl CodexCredentialAdminService {
         &self,
         current: LoadedCredential,
     ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
+        self.refresh_existing(current, None).await
+    }
+
+    pub(crate) async fn replace_refresh_token(
+        &self,
+        current: LoadedCredential,
+        provided: &str,
+    ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
+        if current.account.outbound_proxy().is_none()
+            || current.account.email().is_none()
+            || current.account.upstream_user_id().is_none()
+            || current.account.upstream_account_id().is_none()
+            || current.account.plan_type().is_none()
+        {
+            return Err(CodexCredentialAdminError::InvalidCredential);
+        }
+        self.refresh_existing(current, Some(provided)).await
+    }
+
+    async fn refresh_existing(
+        &self,
+        current: LoadedCredential,
+        supplied: Option<&str>,
+    ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
         let account_id = current.account.id().clone();
         let expected_revision = current.account.revision();
         if current.account.provider().as_str() != PROVIDER_NAME {
@@ -852,10 +877,28 @@ impl CodexCredentialAdminService {
             .authentication
             .oauth()
             .ok_or(CodexCredentialAdminError::MissingRefreshToken)?;
-        let refresh_token = oauth
-            .refresh_token
-            .as_ref()
+        let refresh_token = supplied
+            .or_else(|| {
+                oauth
+                    .refresh_token
+                    .as_ref()
+                    .map(|token| token.expose_secret())
+            })
             .ok_or(CodexCredentialAdminError::MissingRefreshToken)?;
+        let original_subject = if supplied.is_some() {
+            let original = oauth.id_token.as_ref().unwrap_or(&oauth.access_token);
+            let claims = decode_jwt_payload::<Value>(original.expose_secret())
+                .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+            Some(
+                claims["sub"]
+                    .as_str()
+                    .filter(|subject| !subject.trim().is_empty())
+                    .ok_or(CodexCredentialAdminError::InvalidCredential)?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
         let policy = self
             .runtime_policy
             .load_refresh_policy()
@@ -889,24 +932,37 @@ impl CodexCredentialAdminService {
         };
         let tokens = self
             .refresher
-            .refresh_with_proxy(
-                refresh_token.expose_secret(),
-                current.account.outbound_proxy(),
-            )
+            .refresh_with_proxy(refresh_token, current.account.outbound_proxy())
             .await;
         let tokens = match tokens {
             Ok(tokens) => tokens,
             Err(error) => {
-                super::diagnostics::record_refresh_failure(
-                    self.diagnostics.as_ref(),
-                    &current.account,
-                    "manual_refresh",
-                    &error,
-                )
-                .await;
+                if supplied.is_none() {
+                    super::diagnostics::record_refresh_failure(
+                        self.diagnostics.as_ref(),
+                        &current.account,
+                        "manual_refresh",
+                        &error,
+                    )
+                    .await;
+                }
                 return Err(map_refresh_failure(error));
             }
         };
+        if let Some(subject) = original_subject {
+            for (token, require_email) in [
+                (tokens.access_token.as_deref(), false),
+                (tokens.id_token.as_deref(), true),
+            ] {
+                let token = token.ok_or(CodexCredentialAdminError::InvalidCredential)?;
+                verify_replacement_claims(&current.account, token, &subject, require_email)?;
+            }
+            if tokens.refresh_token.as_ref().is_some_and(|rt| {
+                rt.is_empty() || rt.len() > 32768 || !rt.bytes().all(|byte| byte.is_ascii_graphic())
+            }) {
+                return Err(CodexCredentialAdminError::InvalidCredential);
+            }
+        }
         let access_token_expires_at = match tokens.access_token.as_deref() {
             Some(access_token) => parse_access_token_expiration(access_token),
             None => current
@@ -922,17 +978,20 @@ impl CodexCredentialAdminService {
             refresh_token: tokens
                 .refresh_token
                 .map(SecretString::from)
+                .or_else(|| supplied.map(SecretString::from))
                 .or_else(|| oauth.refresh_token.clone()),
             id_token: tokens
                 .id_token
                 .map(SecretString::from)
                 .or_else(|| oauth.id_token.clone()),
         };
-        Self::record_recovery_log(
-            CodexOAuthRecoveryOperation::ManualRefresh,
-            Some(account_id.as_str()),
-            &secret,
-        );
+        if supplied.is_none() {
+            Self::record_recovery_log(
+                CodexOAuthRecoveryOperation::ManualRefresh,
+                Some(account_id.as_str()),
+                &secret,
+            );
+        }
         // 正常预刷新由 worker 读取当时的 runtime policy 动态判断；这里仅清除
         // 之前瞬态失败留下的 retry-not-before
         let next_refresh_at = None;
@@ -1133,6 +1192,37 @@ impl CodexCredentialAdminService {
                 .map(ExposeSecret::expose_secret),
         );
     }
+}
+
+fn verify_replacement_claims(
+    account: &ProviderAccount,
+    token: &str,
+    subject: &str,
+    require_email: bool,
+) -> Result<(), CodexCredentialAdminError> {
+    let claims = decode_jwt_payload::<Value>(token)
+        .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+    let metadata = parse_chatgpt_jwt_claims(token)
+        .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+    let email_matches = match (account.email(), metadata.email.as_deref()) {
+        (Some(old), Some(new)) => old.eq_ignore_ascii_case(new),
+        (Some(_), None) => !require_email,
+        _ => false,
+    };
+    if claims["sub"].as_str() != Some(subject)
+        || !email_matches
+        || metadata.chatgpt_user_id.as_deref() != account.upstream_user_id()
+        || metadata.chatgpt_account_id.as_deref() != account.upstream_account_id()
+        || !account
+            .plan_type()
+            .zip(metadata.chatgpt_plan_type.as_deref())
+            .is_some_and(|(old, new)| old.eq_ignore_ascii_case(new))
+        || !parse_access_token_expiration(token)
+            .is_some_and(|expiry| expiry > Utc::now() + chrono::Duration::seconds(30))
+    {
+        return Err(CodexCredentialAdminError::InvalidCredential);
+    }
+    Ok(())
 }
 
 fn optional_time(value: Option<chrono::DateTime<chrono::Utc>>) -> Option<SystemTime> {

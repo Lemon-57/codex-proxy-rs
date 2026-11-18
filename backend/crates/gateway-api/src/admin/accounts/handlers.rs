@@ -26,6 +26,10 @@ where
         .route("/api/admin/accounts/export", get(export_accounts::<S>))
         .route("/api/admin/accounts/import", post(import_accounts::<S>))
         .route("/api/admin/accounts/refresh", post(refresh_account::<S>))
+        .route(
+            "/api/admin/accounts/oauth/replace-rt",
+            post(replace_account_rt::<S>),
+        )
         .route("/api/admin/accounts/recover", post(recover_account::<S>))
         .route("/api/admin/accounts/update", post(update_account::<S>))
         .route("/api/admin/accounts/delete", post(delete_accounts::<S>))
@@ -340,6 +344,46 @@ where
         .await
         .map_err(map_service_error)?;
     let data = account_refresh_data(result, Utc::now(), time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn replace_account_rt<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<ReplaceAccountRtRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync + 'static,
+{
+    let (account_id, provider_material) = request.into_parts().map_err(map_wire_error)?;
+    let services = state.admin_services();
+    let current = services
+        .accounts()
+        .quota(&account_id, false)
+        .await
+        .map_err(map_service_error)?;
+    let time = crate::time::TimePresenter::new(services.timezone());
+    let view = account_view(current, Utc::now(), time);
+    if view.status != "error" || view.capacity.used_slots != Some(0) {
+        return Err(AdminError::conflict("只允许更新无在途请求的异常账号 RT"));
+    }
+    let provider = ProviderKind::new("openai").map_err(|_| AdminError::internal())?;
+    let saved = services
+        .credentials()
+        .for_provider(&provider)
+        .map_err(map_service_error)?
+        .rotate(RotateCredential {
+            mutation: CredentialMutation {
+                context: auth.context().mutation_context(),
+                account_id,
+            },
+            provider_material,
+            settings: None,
+        })
+        .await
+        .map_err(map_service_error)?;
+    let revision = saved.credential_revision.ok_or_else(AdminError::internal)?;
+    let data = serde_json::json!({"accountId": saved.account_id.to_string(), "credentialRevision": revision.get()});
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
 }
 

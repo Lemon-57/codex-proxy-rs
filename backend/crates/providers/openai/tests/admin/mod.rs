@@ -69,7 +69,7 @@ const COMPLETED_SESSION_SSE: &str = concat!(
 );
 
 #[tokio::test]
-async fn plan_display_should_distinguish_pro_tiers_and_preserve_other_official_names() {
+async fn plan_display_uses_pro_short_names_and_codex_status_labels_for_other_known_plans() {
     let config = valid_config();
     let bundle = provider_openai::initialize(
         config.config.clone(),
@@ -86,25 +86,25 @@ async fn plan_display_should_distinguish_pro_tiers_and_preserve_other_official_n
         ("free", "Free"),
         ("go", "Go"),
         ("plus", "Plus"),
-        ("team", "Team"),
-        ("self_serve_business_prolite", "Self Serve Business ProLite"),
-        (
-            "self_serve_business_usage_based",
-            "Self Serve Business Usage Based",
-        ),
-        ("business", "Business"),
+        ("team", "Business"),
+        ("self_serve_business_prolite", "Business Premium"),
+        ("self_serve_business_usage_based", "Business"),
+        ("business", "Enterprise"),
         ("ent26", "Enterprise"),
         ("enterprise", "Enterprise"),
         ("hc", "Enterprise"),
         ("enterprise_cbp_automation", "Enterprise (Automation)"),
-        ("enterprise_cbp_usage_based", "Enterprise CBP Usage Based"),
+        ("enterprise_cbp_usage_based", "Enterprise"),
         ("edu", "Edu"),
         ("education", "Edu"),
         ("edu_plus", "Edu Plus"),
         ("edu_pro", "Edu Pro"),
-        ("future_plan", "future_plan"),
+        ("sci", "Academic Researchers"),
+        ("sci_plus", "Academic Researchers Plus"),
+        ("SCI_PLUS", "Academic Researchers Plus"),
+        ("Future_Plan", "Future_Plan"),
     ] {
-        assert_eq!(admin.plan_type_display(raw), display);
+        assert_eq!(admin.plan_type_display(raw), display, "{raw}");
     }
 }
 
@@ -2763,6 +2763,115 @@ mod errors {
             assert!(!format!("{error:?} {error}").contains("raw-secret-marker"));
             assert_eq!(store.account("acct_refresh_error").unwrap(), before);
         }
+    }
+
+    #[tokio::test]
+    async fn supplied_rt_requires_exact_revision_and_original_identity() {
+        let direct = MockServer::start().await;
+        for (scenario, accepted, exchanged) in [
+            ("matching", true, true),
+            ("workspace", false, true),
+            ("subject", false, true),
+            ("rejected", false, true),
+            ("stale", false, false),
+        ] {
+            let server = MockServer::start().await;
+            let store = Arc::new(MemoryAccountStore::default());
+            let expected = profile("fixed-workspace");
+            let jwt = |workspace: &str, subject: &str| {
+                let payload = json!({
+                    "sub": subject, "email": expected.email,
+                    "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                    "https://api.openai.com/auth": {
+                        "chatgpt_user_id": expected.chatgpt_user_id,
+                        "chatgpt_account_id": workspace, "chatgpt_plan_type": "pro"
+                    }
+                });
+                format!(
+                    "test.{}.signature",
+                    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+                )
+            };
+            let previous = jwt("fixed-workspace", "original-subject");
+            let next = jwt(
+                if scenario == "workspace" {
+                    "other-workspace"
+                } else {
+                    "fixed-workspace"
+                },
+                if scenario == "subject" {
+                    "other-subject"
+                } else {
+                    "original-subject"
+                },
+            );
+            let proxy = gateway_core::account::OutboundProxy::parse(&server.uri()).unwrap();
+            let mut prepared = provider_openai::credential::CodexCredentialAdmin
+                .prepare_import(ImportCodexOAuthCredential {
+                    account_id: "acct_fixed_rt".to_owned(),
+                    name: "retained name".to_owned(),
+                    secret: secret(&previous),
+                    verified_account: expected,
+                    next_refresh_at: None,
+                    enabled: true,
+                })
+                .unwrap();
+            prepared.account = prepared.account.with_outbound_proxy(Some(proxy));
+            store.create_account(prepared).await.unwrap();
+            let before = store.account("acct_fixed_rt").unwrap();
+            let response = if scenario == "rejected" {
+                ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_grant"}))
+            } else {
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"access_token":next,"id_token":next,"refresh_token":"rotated-rt"}),
+                )
+            };
+            Mock::given(method("POST"))
+                .and(path("/oauth/token"))
+                .and(wiremock::matchers::body_string_contains(
+                    r#""refresh_token":"provided-rt""#,
+                ))
+                .respond_with(response)
+                .expect(u64::from(exchanged))
+                .mount(&server)
+                .await;
+            let mut config = valid_config();
+            config.config.auth.oauth_token_endpoint = format!("{}/oauth/token", direct.uri());
+            let bundle = provider_openai::initialize(
+                config.config,
+                refresh_ports(store.clone(), false),
+                Arc::new(gateway_core::account::UpstreamInfoReader::default()),
+            )
+            .await
+            .unwrap();
+            let revision = before.revision().get();
+            let material = json!({"supplied_refresh_token":"provided-rt",
+                "expected_credential_revision":revision + u64::from(scenario == "stale")});
+            let result = bundle
+                .admin_provider()
+                .prepare_rotation(PrepareCredentialRotation {
+                    account: account_record(&before),
+                    provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                        material.as_object().unwrap().clone(),
+                    )),
+                })
+                .await;
+            if accepted {
+                let prepared = result.expect("matching tokens");
+                let facts = prepared.facts();
+                assert_eq!(facts.account_id, *before.id());
+                assert_eq!(facts.expected_credential_revision.get(), revision);
+                assert!(
+                    facts.preserve_profile
+                        && facts.has_refresh_token
+                        && facts.replacement_identity.is_none()
+                );
+            } else {
+                assert!(result.is_err(), "scenario: {scenario}");
+            }
+            assert_eq!(store.account("acct_fixed_rt").unwrap(), before);
+        }
+        assert!(direct.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

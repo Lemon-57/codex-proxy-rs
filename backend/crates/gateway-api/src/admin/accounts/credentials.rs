@@ -2,6 +2,50 @@
 
 use super::*;
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ReplaceAccountRtRequest {
+    pub account_id: String,
+    pub expected_credential_revision: u64,
+    pub refresh_token: String,
+}
+
+impl ReplaceAccountRtRequest {
+    pub(super) fn into_parts(
+        self,
+    ) -> Result<(ProviderAccountId, ProviderDocument), WireValidationError> {
+        require_account_id(&self.account_id, "accountId")?;
+        let account_id = ProviderAccountId::new(self.account_id)
+            .map_err(|_| WireValidationError::new("accountId"))?;
+        if self.expected_credential_revision == 0 {
+            return Err(WireValidationError::new("expectedCredentialRevision"));
+        }
+        if self.refresh_token.is_empty()
+            || self.refresh_token.len() > 32768
+            || !self
+                .refresh_token
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(WireValidationError::new("refreshToken"));
+        }
+        let material = Map::from_iter([
+            (
+                "supplied_refresh_token".to_owned(),
+                Value::String(self.refresh_token),
+            ),
+            (
+                "expected_credential_revision".to_owned(),
+                Value::from(self.expected_credential_revision),
+            ),
+        ]);
+        Ok((
+            account_id,
+            ProviderDocument::new(OpaqueProviderData::new(material)),
+        ))
+    }
+}
+
 fn validate_account_notes(notes: Option<&str>) -> Result<(), WireValidationError> {
     if notes.is_some_and(|notes| {
         notes.chars().count() > 500
