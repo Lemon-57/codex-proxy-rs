@@ -24,8 +24,8 @@ use crate::engine::{
     AccountAttemptContext, AttemptContext, AttemptRecord, AttemptTransport, AttemptTrigger,
     CommitRequirement, ContinuationAttempt, CoordinatedEvent, EngineError, ExecutionOutcome,
     ExecutionStore, GatewayEngine, IntermediateFailure, ModelRequestFailureObservation,
-    ModelRequestFinalization, ModelRequestId, NewModelRequest, ProviderAccountStateOwner,
-    RequestAttemptContext, UpstreamSendState,
+    ModelRequestFinalization, ModelRequestId, NewModelRequest, ProviderAccountId,
+    ProviderAccountStateOwner, RequestAttemptContext, UpstreamSendState,
 };
 use crate::error::{
     ContinuationRecoveryDisposition, GatewayError, GatewayErrorKind, ProviderError,
@@ -37,7 +37,7 @@ use crate::event::{
 use crate::lifecycle::{CancellationToken, Deadline, LeaseGuard};
 use crate::metering::Decimal;
 use crate::operation::{Operation, ProviderSessionState};
-use crate::routing::RoutingPlan;
+use crate::routing::{ProviderCandidate, RoutingPlan};
 use futures::future::{BoxFuture, Fuse};
 use futures::{FutureExt, StreamExt, pin_mut, select_biased};
 use futures_timer::Delay;
@@ -1248,151 +1248,17 @@ where
             }
             ProviderBoundary::Result(result) => match *result {
                 Ok(stream) => stream,
-                Err(mut error) => {
-                    attempt_trace.record_provider_failure(&error);
-                    if self.continuation_attempt == ContinuationAttempt::RotateForClientReplay
-                        && error.continuation_recovery_disposition()
-                            == Some(ContinuationRecoveryDisposition::ClientReplayRequired)
-                        && let Some(original) = self.last_retryable_failure.take()
-                    {
-                        // 迁移只改变客户端恢复指令；失败分类、发送事实与运维正文仍属于原请求
-                        error = original.with_client_recovery_from(error);
-                        self.last_retryable_failure_events.clear();
-                    }
-                    let connection_fallback = self.connection_rotation.is_some()
-                        && self
-                            .last_retryable_failure
-                            .as_ref()
-                            .and_then(ProviderError::unreachable_proxy)
-                            .is_none()
-                        && !self.connection_budget.exhausted()
-                        && !error.retry_is_prohibited()
-                        && error.send_state() == UpstreamSendState::NotSent
-                        && matches!(
-                            error.kind(),
-                            ProviderErrorKind::NoEligibleAccount
-                                | ProviderErrorKind::AccountCapacityUnavailable
-                                | ProviderErrorKind::QuotaExhausted
-                                | ProviderErrorKind::ConcurrencyQueueFull
-                                | ProviderErrorKind::ConcurrencyQueueTimeout
-                        );
-                    let continuation_retry = !error.retry_is_prohibited()
-                        && self.prepare_unavailable_native_continuation_replay(&error);
-                    let transient_rotation = is_transient_recovery
-                        && self.can_rotate_unavailable_transient_account(&error);
-                    let candidate_retry = !error.retry_is_prohibited() && !connection_fallback && !continuation_retry && !transient_rotation
-                        && matches!(
-                            error.kind(),
-                            ProviderErrorKind::AccountCapacityUnavailable
-                                | ProviderErrorKind::NoEligibleAccount
-                                | ProviderErrorKind::QuotaExhausted
-                                | ProviderErrorKind::ProviderInfrastructureUnavailable
-                                | ProviderErrorKind::ConcurrencyQueueFull
-                                | ProviderErrorKind::ConcurrencyQueueTimeout
+                Err(error) => {
+                    return self
+                        .handle_prepare_failure(
+                            error,
+                            &candidate,
+                            next_attempt,
+                            &attempt_trace,
+                            pinned_account.as_ref().filter(|_| is_transient_recovery),
                         )
-                        && error.send_state() == UpstreamSendState::NotSent
-                        && self.current_send_state() == UpstreamSendState::NotSent
-                        && matches!(
-                            self.continuation_attempt,
-                            ContinuationAttempt::None | ContinuationAttempt::ReplayAny
-                        )
-                        // 跨 Provider 候选推进必然换号（账号行按 Provider 隔离），
-                        // 预算耗尽后不再推进，交回容量类失败的原有终态语义。
-                        && self.has_account_rotation_budget()
-                        && self.advance_provider_candidate();
-                    let retryable = self
-                        .apply_retry_policy(super::policy::RetryFacts {
-                            attempt_index: next_attempt,
-                            provider: candidate.provider().clone(),
-                            model: candidate
-                                .upstream_model()
-                                .map(|model| model.as_str().to_owned()),
-                            error_kind: error.kind(),
-                            upstream_status: error.upstream_status(),
-                            send_state: error.send_state(),
-                            remaining_routing_attempts: self
-                                .plan
-                                .max_attempts()
-                                .get()
-                                .saturating_sub(self.routing_attempts),
-                            remaining_deadline: Duration::ZERO,
-                            retry_allowed: connection_fallback
-                                || continuation_retry
-                                || transient_rotation
-                                || candidate_retry,
-                        })
-                        .await?;
-                    attempt_trace.record("retry.decided", json!({
-                        "phase": "prepare", "retryable": retryable,
-                        "continuationRetry": continuation_retry, "candidateRetry": candidate_retry,
-                        "connectionFallback": connection_fallback,
-                        "transientRotation": transient_rotation,
-                        "retryProhibited": error.retry_is_prohibited(),
-                        "sendState": error.send_state().as_str(),
-                        "requestSendState": self.current_send_state().as_str(),
-                        "continuation": format!("{:?}", self.continuation_attempt),
-                        "accountRotations": self.account_rotations,
-                        "maxAccountRotations": self.plan.account_selection_policy().max_account_rotations(),
-                        "remainingRoutingAttempts": self.plan.max_attempts().get().saturating_sub(self.routing_attempts),
-                    }));
-                    if retryable {
-                        if connection_fallback {
-                            let recovery = self
-                                .connection_rotation
-                                .take()
-                                .expect("pending connection rotation");
-                            self.excluded_accounts.remove(&recovery.account);
-                            self.pending_retry = Some(recovery);
-                        } else if transient_rotation {
-                            // 只解除请求内恢复钉选；外部账号约束与 Provider 会话策略仍由原入口校验
-                            if let Some(account) = pinned_account {
-                                self.excluded_accounts.insert(account);
-                            }
-                        } else if candidate_retry {
-                            // 原账号只属于原 Provider，跨候选后不能拿旧钉选作恢复兜底
-                            self.connection_rotation = None;
-                        }
-                        return Ok(Some(PullOutcome::AttemptDiscarded));
-                    }
-                    if matches!(
-                        error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
-                            | ProviderErrorKind::NoEligibleAccount
-                            | ProviderErrorKind::SessionPolicyRestricted
-                            | ProviderErrorKind::QuotaExhausted
-                            | ProviderErrorKind::ConcurrencyQueueFull
-                            | ProviderErrorKind::ConcurrencyQueueTimeout
-                    ) && let Some(last_failure) = self.last_retryable_failure.take()
-                    {
-                        let send_state = self.current_send_state();
-                        let mut events = std::mem::take(&mut self.last_retryable_failure_events);
-                        if !events.is_empty() {
-                            self.observe_atomic_terminal_events(&mut events);
-                            self.budget_attempt_already_counted = true;
-                            return Ok(Some(PullOutcome::TerminalFailure {
-                                events,
-                                error: last_failure,
-                                send_state,
-                            }));
-                        }
-                        self.finish_provider_error(&last_failure).await?;
-                        return Err(provider_engine_error(last_failure));
-                    }
-                    if !(matches!(
-                        error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
-                            | ProviderErrorKind::NoEligibleAccount
-                            | ProviderErrorKind::SessionPolicyRestricted
-                            | ProviderErrorKind::QuotaExhausted
-                            | ProviderErrorKind::ProviderInfrastructureUnavailable
-                            | ProviderErrorKind::ConcurrencyQueueFull
-                            | ProviderErrorKind::ConcurrencyQueueTimeout
-                    ) && error.send_state() == UpstreamSendState::NotSent)
-                    {
-                        self.record_provider_failure(candidate.provider().clone());
-                    }
-                    self.finish_provider_error(&error).await?;
-                    return Err(provider_engine_error(error));
+                        .await
+                        .map(Some);
                 }
             },
         };
@@ -1576,6 +1442,141 @@ where
             }
         }
         Ok(None)
+    }
+
+    async fn handle_prepare_failure(
+        &mut self,
+        mut error: ProviderError,
+        candidate: &ProviderCandidate,
+        next_attempt: NonZeroU32,
+        attempt_trace: &TraceContext,
+        transient_retry_account: Option<&ProviderAccountId>,
+    ) -> Result<PullOutcome, EngineError> {
+        attempt_trace.record_provider_failure(&error);
+        if self.continuation_attempt == ContinuationAttempt::RotateForClientReplay
+            && error.continuation_recovery_disposition()
+                == Some(ContinuationRecoveryDisposition::ClientReplayRequired)
+            && let Some(original) = self.last_retryable_failure.take()
+        {
+            // 迁移只改变客户端恢复指令；失败分类、发送事实与运维正文仍属于原请求
+            error = original.with_client_recovery_from(error);
+            self.last_retryable_failure_events.clear();
+        }
+        let kind = error.kind();
+        let account_unavailable = matches!(
+            kind,
+            ProviderErrorKind::NoEligibleAccount
+                | ProviderErrorKind::AccountCapacityUnavailable
+                | ProviderErrorKind::QuotaExhausted
+                | ProviderErrorKind::ConcurrencyQueueFull
+                | ProviderErrorKind::ConcurrencyQueueTimeout
+        );
+        let infrastructure_unavailable =
+            kind == ProviderErrorKind::ProviderInfrastructureUnavailable;
+        let selection_failed =
+            account_unavailable || kind == ProviderErrorKind::SessionPolicyRestricted;
+        let not_sent = error.send_state() == UpstreamSendState::NotSent;
+        let retry_allowed = !error.retry_is_prohibited();
+        let connection_fallback = self.connection_rotation.is_some()
+            && self
+                .last_retryable_failure
+                .as_ref()
+                .and_then(ProviderError::unreachable_proxy)
+                .is_none()
+            && !self.connection_budget.exhausted()
+            && retry_allowed
+            && not_sent
+            && account_unavailable;
+        let continuation_retry =
+            retry_allowed && self.prepare_unavailable_native_continuation_replay(&error);
+        let transient_rotation = transient_retry_account
+            .filter(|_| self.can_rotate_unavailable_transient_account(&error));
+        let candidate_retry = retry_allowed
+            && !connection_fallback
+            && !continuation_retry
+            && transient_rotation.is_none()
+            && (account_unavailable || infrastructure_unavailable)
+            && not_sent
+            && self.current_send_state() == UpstreamSendState::NotSent
+            && matches!(
+                self.continuation_attempt,
+                ContinuationAttempt::None | ContinuationAttempt::ReplayAny
+            )
+            // 跨 Provider 候选推进必然换号（账号行按 Provider 隔离），
+            // 预算耗尽后不再推进，交回容量类失败的原有终态语义
+            && self.has_account_rotation_budget()
+            && self.advance_provider_candidate();
+        let retryable = self
+            .apply_retry_policy(super::policy::RetryFacts {
+                attempt_index: next_attempt,
+                provider: candidate.provider().clone(),
+                model: candidate
+                    .upstream_model()
+                    .map(|model| model.as_str().to_owned()),
+                error_kind: kind,
+                upstream_status: error.upstream_status(),
+                send_state: error.send_state(),
+                remaining_routing_attempts: self
+                    .plan
+                    .max_attempts()
+                    .get()
+                    .saturating_sub(self.routing_attempts),
+                remaining_deadline: Duration::ZERO,
+                retry_allowed: connection_fallback
+                    || continuation_retry
+                    || transient_rotation.is_some()
+                    || candidate_retry,
+            })
+            .await?;
+        attempt_trace.record("retry.decided", json!({
+            "phase": "prepare", "retryable": retryable,
+            "continuationRetry": continuation_retry, "candidateRetry": candidate_retry,
+            "connectionFallback": connection_fallback,
+            "transientRotation": transient_rotation.is_some(),
+            "retryProhibited": error.retry_is_prohibited(),
+            "sendState": error.send_state().as_str(),
+            "requestSendState": self.current_send_state().as_str(),
+            "continuation": format!("{:?}", self.continuation_attempt),
+            "accountRotations": self.account_rotations,
+            "maxAccountRotations": self.plan.account_selection_policy().max_account_rotations(),
+            "remainingRoutingAttempts": self.plan.max_attempts().get().saturating_sub(self.routing_attempts),
+        }));
+        if retryable {
+            if connection_fallback {
+                let recovery = self
+                    .connection_rotation
+                    .take()
+                    .expect("pending connection rotation");
+                self.excluded_accounts.remove(&recovery.account);
+                self.pending_retry = Some(recovery);
+            } else if let Some(account) = transient_rotation {
+                self.excluded_accounts.insert(account.clone());
+            } else if candidate_retry {
+                // 原账号只属于原 Provider，跨候选后不能拿旧钉选作恢复兜底
+                self.connection_rotation = None;
+            }
+            return Ok(PullOutcome::AttemptDiscarded);
+        }
+        if selection_failed && let Some(last_failure) = self.last_retryable_failure.take() {
+            let send_state = self.current_send_state();
+            let mut events = std::mem::take(&mut self.last_retryable_failure_events);
+            if !events.is_empty() {
+                self.observe_atomic_terminal_events(&mut events);
+                self.budget_attempt_already_counted = true;
+                return Ok(PullOutcome::TerminalFailure {
+                    events,
+                    error: last_failure,
+                    send_state,
+                });
+            }
+            self.finish_provider_error(&last_failure).await?;
+            return Err(provider_engine_error(last_failure));
+        }
+        if !(not_sent && (selection_failed || infrastructure_unavailable)) {
+            self.record_provider_failure(candidate.provider().clone());
+        }
+        self.finish_provider_error(&error).await?;
+        Err(provider_engine_error(error))
     }
 
     fn advance_provider_candidate(&mut self) -> bool {
@@ -2081,7 +2082,11 @@ where
             .pending_terminal_failure
             .as_ref()
             .ok_or(EngineError::NoActiveAttempt)?;
-        if pending.events.is_empty() {
+        // 在保活提交前冻结 HTTP 错误，否则必须交付原流内事件
+        if pending.events.is_empty()
+            || (pending.error.client_visible_upstream_response().is_some()
+                && self.response_commit.finish())
+        {
             return Err(provider_engine_error(
                 self.finalize_pending_terminal_failure().await?,
             ));

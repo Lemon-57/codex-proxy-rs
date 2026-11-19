@@ -28,6 +28,7 @@ withDefaults(
   defineProps<{
     columns: TableColumn<UsageListRecord>[]
     rows: UsageListRecord[]
+    requestDetails?: boolean
     loading?: boolean
     emptyText?: string
   }>(),
@@ -81,7 +82,7 @@ const { t } = useI18n({ useScope: 'global' })
     <template #accountPlanType="{ row }">
       <div
         v-if="row.accountUpstreamPeer || row.authenticationKind === 'api_key' || row.accountPlanType"
-        class="-mx-2.5 flex min-w-0 justify-center"
+        class="-mx-3 flex min-w-0 justify-center"
       >
         <AccountPlanBadge
           wrap
@@ -96,7 +97,7 @@ const { t } = useI18n({ useScope: 'global' })
     </template>
 
     <template #createdAtDisplay="{ row }">
-      <UsageTimeCell :value="row.createdAtDisplay" />
+      <UsageTimeCell :value="row.createdAtDisplay" :datetime="requestDetails ? row.createdAt : undefined" />
     </template>
 
     <template #clientIp="{ row }">

@@ -405,7 +405,7 @@ async fn inference_proxy_client_is_built_once_for_concurrent_same_binding() {
     for task in tasks {
         assert!(task.await.unwrap().iter().all(Result::is_ok));
     }
-    // 启动时的直连 client + 一个代理 client；不再先构建并丢弃另一个直连 client
+    // 一个启动时创建的直连客户端和一个并发请求共用的代理客户端
     assert_eq!(builds.load(Ordering::SeqCst), 2);
     assert!(origin_server.received_requests().await.unwrap().is_empty());
 }
@@ -917,6 +917,10 @@ async fn inference_transport_should_classify_free_usage_429_as_account_free_quot
     assert_eq!(
         error.kind(),
         GrokInferenceTransportErrorKind::FreeQuotaExhausted
+    );
+    assert_eq!(
+        error.diagnostic().unwrap().as_str(),
+        "上游账号免费额度已用完"
     );
     assert_eq!(error.status(), Some(429));
     assert_eq!(

@@ -743,7 +743,7 @@ async fn request_context_should_resolve_forwarded_precedence_and_peer_fallback()
             operation_kind: OperationKind::Generate,
             input: Some(json!("hello")),
             client_metadata: None,
-            // 客户端 User-Agent 仅用于本地展示，不再透传给上游指纹上下文
+            // 客户端 User-Agent 仅用于本地展示
             protocol_context: Some(json!({"opaque_request_headers": [
                 ["cf-connecting-ip", STANDARD.encode(b"198.51.100.1")],
                 ["x-real-ip", STANDARD.encode(b"198.51.100.2")],
@@ -1378,27 +1378,40 @@ async fn streaming_error_after_initial_keepalive_should_be_a_terminal_sse_failur
 }
 
 #[tokio::test(start_paused = true)]
-async fn streaming_late_upstream_error_should_preserve_extended_error_fields() {
+async fn streaming_bad_request_preserves_extended_error_fields_before_and_after_keepalive() {
     let mut error = json!({
         "type": "invalid_request_error", "code": "misalignment_policy_violation",
         "message": "synthetic policy error", "misalignment": {"category": "synthetic"},
         "extension": {"opaque": true}
     });
-    let failure = ProviderError::new(ProviderErrorKind::InvalidRequest, UpstreamSendState::Sent)
-        .with_client_visible_upstream_response(
-            ClientVisibleUpstreamResponse::new(
-                400,
-                Some(b"application/json".to_vec()),
-                Bytes::from(json!({"error": error}).to_string()),
+    let failure = || {
+        ProviderError::new(ProviderErrorKind::InvalidRequest, UpstreamSendState::Sent)
+            .with_client_visible_upstream_response(
+                ClientVisibleUpstreamResponse::new(
+                    400,
+                    Some(b"application/json".to_vec()),
+                    Bytes::from(json!({"error": error}).to_string()),
+                )
+                .with_headers(headers(&[("retry-after", "7")])),
             )
-            .with_headers(headers(&[("retry-after", "7")])),
-        );
-    error["headers"] = json!({"retry-after": "7"});
+    };
+    let immediate = FakeSession::streaming(
+        Arc::new(Trace::default()),
+        vec![NextStep::Error(EngineError::Provider(failure()))],
+    );
+    let response = stream_execution_response(Box::new(immediate), None).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({"error": error})
+    );
     let session = FakeSession::streaming(
         Arc::new(Trace::default()),
         vec![NextStep::DelayedError(
             Duration::from_secs(30),
-            EngineError::Provider(failure),
+            EngineError::Provider(failure()),
         )],
     );
     let response = stream_execution_response(Box::new(session), None).await;
@@ -1410,6 +1423,7 @@ async fn streaming_late_upstream_error_should_preserve_extended_error_fields() {
         .find(|event| event.event.as_deref() == Some("response.failed"))
         .unwrap();
     let payload: Value = serde_json::from_str(&failed.data).unwrap();
+    error["headers"] = json!({"retry-after": "7"});
     assert_eq!(payload["response"]["error"], error);
     assert!(bytes.ends_with(b"data: [DONE]\n\n"));
 }
@@ -2954,20 +2968,21 @@ struct SessionExecution {
 #[tokio::test]
 async fn official_core_clients_should_be_version_checked_before_starting_responses() {
     let admin = crate::admin::AdminTestFixture::new().await.services;
-    for product in [
-        "codex-tui",
-        "codex_exec",
-        "codex_vscode",
-        "codex_sdk_ts",
-        "codex_python_sdk",
+    for (product, client) in [
+        ("codex-tui", "codex-tui"),
+        ("codex_exec", "codex_exec"),
+        ("codex_vscode", "codex_vscode"),
+        ("codex_sdk_ts", "codex_sdk_ts"),
+        ("codex_python_sdk", "codex_python_sdk"),
+        ("Codex Desktop", "codex-tui"),
     ] {
-        for (version, allowed) in [("0.158.0", false), ("0.162.0", true)] {
+        for (version, allowed) in [("0.168.0", false), ("0.170.0", true)] {
             let trace = Arc::new(Trace::default());
             let execution = Arc::new(SessionExecution {
                 client: authenticated_client_with_min_versions(
                     "sk_version_test",
-                    None,
-                    Some("0.162.0"),
+                    Some("26.1023.51421"),
+                    Some("0.170.0"),
                 ),
                 session: Mutex::new(Some(Box::new(FakeSession::streaming(
                     Arc::clone(&trace),
@@ -2985,7 +3000,7 @@ async fn official_core_clients_should_be_version_checked_before_starting_respons
             let request = Request::post("/v1/responses")
                 .header(AUTHORIZATION, "Bearer sk_version_test")
                 .header("user-agent", format!(
-                    "{product}/{version} (Mac OS 26.6.2; arm64) Apple_Terminal ({product}; 0.165.0)"
+                    "{product}/{version} (Ubuntu 26.4.0; aarch64) xterm-256color ({client}; 0.169.0)"
                 ))
                 .body(Body::from(json!({"model": "model-a", "input": "synthetic", "stream": true}).to_string()))
                 .unwrap();
@@ -3006,8 +3021,9 @@ async fn official_core_clients_should_be_version_checked_before_starting_respons
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{product}/{version}");
                 let value: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(value["error"]["code"], "client_version_too_old");
+                assert_eq!(value["error"]["client"], "codex_cli");
                 assert_eq!(value["error"]["current_version"], version);
-                assert_eq!(value["error"]["min_version"], "0.162.0");
+                assert_eq!(value["error"]["min_version"], "0.170.0");
                 assert!(execution.session.lock().unwrap().is_some());
             }
         }

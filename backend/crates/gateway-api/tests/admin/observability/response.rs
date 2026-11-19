@@ -1733,6 +1733,8 @@ async fn observability_queries_reject_group_filters_and_analytics_search() {
             "routingGroupRefs=group-a",
         ),
         ("/api/admin/usage/records/summary", "search=request-prefix"),
+        ("/api/admin/usage/records/summary", "errorOrigin=proxy"),
+        ("/api/admin/usage/insights/overview", "errorOrigin=proxy"),
         (
             "/api/admin/usage/insights/overview",
             "search=request-prefix",
@@ -1827,27 +1829,50 @@ pub(super) fn ops_error_record() -> gateway_admin::model::observability::OpsErro
 }
 
 #[tokio::test]
-async fn usage_status_query_accepts_three_modes_and_rejects_unknown_values() {
+async fn usage_record_query_accepts_error_sources_only_for_error_status() {
     use crate::admin::{AdminTestFixture, AdminTestState};
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
+    use gateway_admin::model::observability::{UsageErrorOrigin, UsageRecordStatus};
     use gateway_api::admin::observability;
     use tower::ServiceExt as _;
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
-    for (status, expected) in [
-        ("success", StatusCode::OK),
-        ("error", StatusCode::OK),
-        ("all", StatusCode::OK),
-        ("failed", StatusCode::BAD_REQUEST),
+    for (query, expected) in [
+        ("", Some(UsageRecordStatus::Success)),
+        ("status=success", Some(UsageRecordStatus::Success)),
+        ("status=error", Some(UsageRecordStatus::Error(None))),
+        ("status=all", Some(UsageRecordStatus::All)),
+        (
+            "status=error&errorOrigin=proxy",
+            Some(UsageRecordStatus::Error(Some(UsageErrorOrigin::Proxy))),
+        ),
+        (
+            "status=error&errorOrigin=upstream",
+            Some(UsageRecordStatus::Error(Some(UsageErrorOrigin::Upstream))),
+        ),
+        (
+            "status=error&errorOrigin=connection",
+            Some(UsageRecordStatus::Error(Some(UsageErrorOrigin::Connection))),
+        ),
+        (
+            "status=error&errorOrigin=unknown",
+            Some(UsageRecordStatus::Error(Some(UsageErrorOrigin::Unknown))),
+        ),
+        ("status=failed", None),
+        ("errorOrigin=proxy", None),
+        ("status=success&errorOrigin=proxy", None),
+        ("status=all&errorOrigin=unknown", None),
+        ("status=error&errorOrigin=other", None),
+        ("status=error&errorOrigin=", None),
     ] {
         let response = observability::router::<AdminTestState>()
             .with_state(fixture.state())
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/admin/usage/records?status={status}"))
+                    .uri(format!("/api/admin/usage/records?{query}"))
                     .header(header::COOKIE, "cpr_session=valid-session")
                     .header("x-request-id", "usage_status_fixture")
                     .body(Body::empty())
@@ -1859,17 +1884,15 @@ async fn usage_status_query_accepts_three_modes_and_rejects_unknown_values() {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         assert_eq!(
             actual,
-            expected,
-            "{status}: {}",
+            if expected.is_some() {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            "{query}: {}",
             String::from_utf8_lossy(&body)
         );
-        if expected == StatusCode::OK {
-            use gateway_admin::model::observability::UsageRecordStatus;
-            let status_value = match status {
-                "success" => UsageRecordStatus::Success,
-                "error" => UsageRecordStatus::Error,
-                _ => UsageRecordStatus::All,
-            };
+        if let Some(status_value) = expected {
             assert_eq!(
                 fixture
                     .observations
@@ -2066,7 +2089,7 @@ async fn dashboard_relative_time_preserves_server_anchor_boundaries_and_deployme
         ("Asia/Kathmandu", "2026-06-15 05:45:01"),
         ("America/New_York", "2026-06-14 20:00:01"),
     ] {
-        for (elapsed_ms, expected, legacy) in [
+        for (elapsed_ms, expected, display) in [
             (None, json!(null), "—"),
             (
                 Some(-1_000),
@@ -2181,7 +2204,7 @@ async fn dashboard_relative_time_preserves_server_anchor_boundaries_and_deployme
                 account["lastUsedRelative"], expected,
                 "{zone}: {elapsed_ms:?}"
             );
-            assert_eq!(account["lastUsed"], legacy, "{zone}: {elapsed_ms:?}");
+            assert_eq!(account["lastUsed"], display, "{zone}: {elapsed_ms:?}");
             assert_eq!(account["lastUsedAt"], json!(last_used_at));
         }
     }
