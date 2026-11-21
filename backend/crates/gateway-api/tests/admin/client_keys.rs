@@ -13,6 +13,63 @@ use serde_json::json;
 use super::{AdminTestFixture, AdminTestState};
 
 #[test]
+fn batch_key_form_preserves_omissions_and_accepts_explicit_zero_false_and_inheritance() {
+    use gateway_api::admin::client_keys::BatchUpdateClientKeysRequest;
+    use gateway_core::routing::ProviderKind;
+    let parse = |value| {
+        serde_json::from_value::<BatchUpdateClientKeysRequest>(value)
+            .unwrap()
+            .into_command()
+    };
+    let patch = parse(json!({
+        "ids":["key_a","key_b"], "enabled":false,
+        "maxConcurrency":0, "dailyLimitUsd":"0", "weeklyLimitUsd":"1.75",
+        "peerSharing":{"shareQuota":false}, "providerRequestProfileOverrides":{"xai":null}
+    }))
+    .unwrap();
+    assert_eq!(patch.enabled, Some(false));
+    assert_eq!(patch.max_concurrency, Some(0));
+    assert_eq!(patch.daily_limit_usd.unwrap().canonical(), "0");
+    assert_eq!(patch.weekly_limit_usd.unwrap().canonical(), "1.75");
+    assert_eq!(patch.peer_sharing.share_quota, Some(false));
+    assert_eq!(patch.peer_sharing.enabled, None);
+    assert_eq!(patch.requests_per_minute, None);
+    assert_eq!(patch.group_ids, None);
+    assert_eq!(patch.installation_seed, None);
+    assert_eq!(
+        patch
+            .request_profile_override_updates
+            .get(&ProviderKind::new("xai").unwrap()),
+        Some(&None)
+    );
+
+    for (field, value) in [
+        ("dailyLimitUsd", json!("-0.01")),
+        ("weeklyLimitUsd", json!("1.00000000001")),
+        ("maxConcurrency", json!(u64::MAX)),
+        ("requestsPerMinute", json!(u64::MAX)),
+        (
+            "installationSeed",
+            json!("A3A4E0BDF84447068DF8BFF10DE95B3B"),
+        ),
+        ("providerRequestProfileOverrides", json!({"unknown": null})),
+    ] {
+        let mut payload = json!({ "ids":["key_a"] });
+        payload[field] = value;
+        assert_eq!(parse(payload).unwrap_err().field(), field);
+    }
+    let seed = "A3A4E0BD-F844-4706-8DF8-BFF10DE95B3B";
+    assert_eq!(
+        parse(json!({"ids":["key_a"], "installationSeed":seed}))
+            .unwrap()
+            .installation_seed
+            .unwrap()
+            .to_string(),
+        seed.to_lowercase()
+    );
+}
+
+#[test]
 fn reset_budget_requires_an_explicit_supported_period_and_valid_key() {
     use gateway_api::admin::client_keys::ResetClientKeyBudgetRequest;
     for period in ["daily", "weekly", "all"] {
@@ -572,45 +629,26 @@ async fn list_route_should_accept_the_full_nonzero_u16_page_size() {
 
 #[test]
 fn profile_override_distinguishes_omission_from_explicit_inheritance() {
-    let mut payload = json!({"id":"key_profile", "name":"profile", "groupIds":[], "maxConcurrency":0, "requestsPerMinute":0});
-    let decode = |body| {
-        let mut command = serde_json::from_value::<UpdateClientKeyRequest>(body)
-            .unwrap()
-            .into_command()
-            .unwrap();
-        command
-            .request_profile_override_updates
-            .remove(&gateway_core::routing::ProviderKind::new("openai").expect("Provider kind"))
-    };
-    assert_eq!(decode(payload.clone()), None);
-    payload["openaiClientProfileOverride"] = json!(null);
-    assert_eq!(decode(payload.clone()), Some(None));
-    payload["openaiClientProfileOverride"] =
-        json!({"client":"cli", "platform":"linux", "versionMode":"latest"});
-    assert!(decode(payload).unwrap().is_some());
+    for provider in ["openai", "xai"] {
+        let decode = |body| {
+            serde_json::from_value::<UpdateClientKeyRequest>(body)
+                .unwrap()
+                .into_command()
+                .unwrap()
+                .request_profile_override_updates
+                .remove(&gateway_core::routing::ProviderKind::new(provider).unwrap())
+        };
+        let mut payload = json!({"id":"key_profile", "name":"profile", "groupIds":[], "maxConcurrency":0, "requestsPerMinute":0});
+        assert_eq!(decode(payload.clone()), None);
+        payload["providerRequestProfileOverrides"] = json!({(provider):null});
+        assert_eq!(decode(payload.clone()), Some(None));
+        payload["providerRequestProfileOverrides"][provider] = json!({"versionMode":"latest"});
+        assert!(decode(payload).unwrap().is_some());
+    }
 }
 
 #[test]
-fn xai_profile_override_distinguishes_omission_from_explicit_inheritance() {
-    let mut payload = json!({"id":"key_profile", "name":"profile", "groupIds":[], "maxConcurrency":0, "requestsPerMinute":0});
-    let decode = |body| {
-        let mut command = serde_json::from_value::<UpdateClientKeyRequest>(body)
-            .unwrap()
-            .into_command()
-            .unwrap();
-        command
-            .request_profile_override_updates
-            .remove(&gateway_core::routing::ProviderKind::new("xai").expect("Provider kind"))
-    };
-    assert_eq!(decode(payload.clone()), None);
-    payload["xaiClientProfileOverride"] = json!(null);
-    assert_eq!(decode(payload.clone()), Some(None));
-    payload["xaiClientProfileOverride"] = json!({"versionMode":"latest"});
-    assert!(decode(payload).unwrap().is_some());
-}
-
-#[test]
-fn profile_overrides_accept_matching_native_values_and_reject_conflicts_and_unknown_providers() {
+fn profile_overrides_accept_native_providers_and_reject_unknown_providers() {
     let profile = json!({"preset":"desktop"});
     let xai = json!({"preset":"managed"});
     let request: CreateClientKeyRequest = serde_json::from_value(json!({
@@ -622,7 +660,6 @@ fn profile_overrides_accept_matching_native_values_and_reject_conflicts_and_unkn
             "openai": profile,
             "xai": xai,
         },
-        "openaiClientProfileOverride": {"preset":"desktop"},
     }))
     .unwrap();
     let command = request.into_command().unwrap();
@@ -631,20 +668,6 @@ fn profile_overrides_accept_matching_native_values_and_reject_conflicts_and_unkn
         command
             .request_profile_overrides
             .contains_key(&gateway_core::routing::ProviderKind::new("xai").expect("Provider kind"))
-    );
-
-    let conflict: CreateClientKeyRequest = serde_json::from_value(json!({
-        "name":"profile",
-        "groupIds":[],
-        "maxConcurrency":0,
-        "requestsPerMinute":0,
-        "providerRequestProfileOverrides": {"openai":{"preset":"desktop"}},
-        "openaiClientProfileOverride": {"preset":"cli"},
-    }))
-    .unwrap();
-    assert_eq!(
-        conflict.into_command().unwrap_err().field(),
-        "providerRequestProfileOverrides"
     );
 
     let unknown: CreateClientKeyRequest = serde_json::from_value(json!({
@@ -675,20 +698,80 @@ fn profile_overrides_accept_matching_native_values_and_reject_conflicts_and_unkn
     );
 }
 
-#[test]
-fn clearing_an_xai_profile_override_conflicts_with_an_explicit_xai_value() {
-    let request: UpdateClientKeyRequest = serde_json::from_value(json!({
-        "id":"key_profile",
-        "name":"profile",
-        "groupIds":[],
-        "maxConcurrency":0,
-        "requestsPerMinute":0,
-        "providerRequestProfileOverrides": {"xai":null},
-        "xaiClientProfileOverride": {"preset":"desktop"},
-    }))
-    .unwrap();
-    assert_eq!(
-        request.into_command().unwrap_err().field(),
-        "providerRequestProfileOverrides"
-    );
+#[tokio::test]
+async fn key_statistics_route_returns_calendar_days_and_current_budget_only_to_admin() {
+    use crate::support::{cookie_request, key_fixture, response_json};
+    use axum::http::{Method, StatusCode};
+    use gateway_core::policy::ClientApiKeyId;
+    use tower::ServiceExt as _;
+
+    let fixture = key_fixture().await;
+    fixture.auth.insert_session("stats-admin");
+    let record = fixture
+        .services
+        .client_keys()
+        .reveal(&ClientApiKeyId::new("key-42").unwrap())
+        .await
+        .unwrap()
+        .record;
+    *fixture.client_key.lock().unwrap() = Some(record);
+    let app = client_keys::router::<AdminTestState>().with_state(fixture.state());
+    for (query, cookie, status, days) in [
+        ("id=key-42", "", StatusCode::UNAUTHORIZED, 0),
+        (
+            "id=missing",
+            "cpr_session=stats-admin",
+            StatusCode::NOT_FOUND,
+            0,
+        ),
+        (
+            "id=key-42&period=today",
+            "cpr_session=stats-admin",
+            StatusCode::BAD_REQUEST,
+            0,
+        ),
+        ("id=key-42", "cpr_session=stats-admin", StatusCode::OK, 7),
+        (
+            "id=key-42&period=30d",
+            "cpr_session=stats-admin",
+            StatusCode::OK,
+            30,
+        ),
+    ] {
+        let mut request = cookie_request(
+            Method::GET,
+            &format!("/api/admin/client-keys/statistics?{query}"),
+            cookie,
+        );
+        request
+            .headers_mut()
+            .insert("x-request-id", "req_stats".parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status);
+        if days > 0 {
+            let body = response_json(response).await;
+            assert_eq!(body["data"]["dates"].as_array().unwrap().len(), days);
+            assert!(body["data"]["budget"]["dailyUsedUsd"].is_string());
+            assert!(body["data"]["series"].as_array().unwrap().is_empty());
+            assert_eq!(body["data"]["modelCount"], 0);
+        }
+    }
+    for (cookie, status) in [
+        ("", StatusCode::UNAUTHORIZED),
+        ("cpr_session=stats-admin", StatusCode::OK),
+    ] {
+        let mut request = cookie_request(
+            Method::GET,
+            "/api/admin/client-keys/statistics/models?id=key-42",
+            cookie,
+        );
+        request
+            .headers_mut()
+            .insert("x-request-id", "req_models".parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), status);
+        if status == StatusCode::OK {
+            assert_eq!(response_json(response).await["data"], serde_json::json!([]));
+        }
+    }
 }

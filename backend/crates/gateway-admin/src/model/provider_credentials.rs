@@ -621,6 +621,7 @@ pub struct CompleteAuthorization {
     pub context: MutationContext,
     pub flow_id: String,
     pub callback_url: String,
+    pub expected_identity_revision: Option<std::num::NonZeroU64>,
 }
 
 impl fmt::Debug for CompleteAuthorization {
@@ -700,6 +701,7 @@ pub struct PreparedCredentialRotationFacts {
     pub preserve_profile: bool,
     /// 连接配置变更保留当前凭据健康状态与错误事实
     pub preserve_credential_state: bool,
+    pub preserve_access_token_expiry: bool,
     pub provider_material: ProviderDocument,
     pub has_refresh_token: bool,
     pub access_token_expires_at: Option<DateTime<Utc>>,
@@ -817,6 +819,14 @@ pub struct ProviderQuotaWindow {
     pub limit_reached: bool,
     pub local_usage: Option<AccountUsage>,
     pub provider_data: Option<ProviderDocument>,
+}
+
+impl ProviderQuotaWindow {
+    pub(crate) fn observed_bounds(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        let ends_at = self.reset_at?;
+        let duration = chrono::Duration::try_seconds(i64::try_from(self.window_seconds?).ok()?)?;
+        Some((ends_at.checked_sub_signed(duration)?, ends_at))
+    }
 }
 
 /// 账号用量统计周期，完整周/月额度优先，随后使用 Provider 提供的本地滚动日统计

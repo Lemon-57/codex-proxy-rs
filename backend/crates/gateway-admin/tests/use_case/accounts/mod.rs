@@ -266,6 +266,7 @@ impl FakeProviderAdmin {
                 plan_type: account.plan_type.clone(),
                 preserve_profile: false,
                 preserve_credential_state: false,
+                preserve_access_token_expiry: false,
                 provider_material: document(),
                 has_refresh_token: account.has_refresh_token,
                 access_token_expires_at: account
@@ -1185,6 +1186,8 @@ impl SettingsStore for StaticSettingsStore {
             rotation_strategy: RotationStrategy::Smart,
             updated_at: Utc::now(),
             values: gateway_admin::model::settings::RuntimeSettingsValues {
+                openai_oauth_guardian_review_model: false,
+                openai_request_country: Default::default(),
                 codex_privacy_policy: Default::default(),
                 request_location_enabled: false,
                 request_location: Default::default(),
@@ -3559,6 +3562,7 @@ fn plugin_rotation_facts(account: &AccountRecord) -> PreparedCredentialRotationF
         plan_type: account.plan_type.clone(),
         preserve_profile: true,
         preserve_credential_state: false,
+        preserve_access_token_expiry: false,
         provider_material: document(),
         has_refresh_token: account.has_refresh_token,
         access_token_expires_at: account.access_token_expires_at,

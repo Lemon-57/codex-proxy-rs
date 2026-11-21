@@ -137,6 +137,9 @@ impl CodexBackendClient {
             }
         };
         let mut headers = build_codex_model_headers(profile, context.authorization, account_id)?;
+        if self.fedramp_routing {
+            headers.insert("x-openai-fedramp", HeaderValue::from_static("true"));
+        }
         insert_optional_header(&mut headers, "cookie", cookie_header)?;
         Ok(headers)
     }
@@ -161,6 +164,7 @@ impl CodexBackendClient {
         context: CodexRequestContext<'_>,
     ) -> CodexClientResult<HeaderMap> {
         let mut headers = self.response_headers(profile, request, context)?;
+        self.append_middleware_headers(&mut headers)?;
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         insert_optional_protocol_header(
@@ -178,6 +182,9 @@ impl CodexBackendClient {
         context: CodexRequestContext<'_>,
     ) -> CodexClientResult<HeaderMap> {
         let mut headers = self.response_headers(profile, request, context)?;
+        // WebSocket 逐帧回传轮次状态，握手不能把某一轮的 token 绑定到整条连接
+        headers.remove("x-codex-turn-state");
+        self.append_middleware_headers(&mut headers)?;
         headers.insert(
             HeaderName::from_static("openai-beta"),
             HeaderValue::from_static("responses_websockets=2026-02-06"),
@@ -222,13 +229,23 @@ impl CodexBackendClient {
         if let Some(subagent) = openai_subagent_from_metadata(request.client_metadata()) {
             insert_optional_protocol_header(&mut headers, "x-openai-subagent", Some(&subagent));
         }
-        let routing_hint = match request.service_tier() {
-            Some(tier) => format!("model={};tier={tier}", request.model()),
-            None => format!("model={}", request.model()),
-        };
-        insert_optional_protocol_header(&mut headers, "x-codex-routing-hint", Some(&routing_hint));
+        let guardian = (self.protocol == OpenAiUpstreamProtocol::Codex)
+            .then(|| request.oauth_guardian_role(&self.middleware_headers))
+            .flatten();
+        if let Some(role) = guardian {
+            insert_optional_protocol_header(&mut headers, "x-codex-guardian", role.header());
+        } else {
+            let routing_hint = match request.service_tier() {
+                Some(tier) => format!("model={};tier={tier}", request.model()),
+                None => format!("model={}", request.model()),
+            };
+            insert_optional_protocol_header(
+                &mut headers,
+                "x-codex-routing-hint",
+                Some(&routing_hint),
+            );
+        }
         append_passthrough_headers(&mut headers, &request.passthrough_headers);
-        self.append_middleware_headers(&mut headers)?;
         Ok(headers)
     }
 
@@ -249,10 +266,16 @@ impl CodexBackendClient {
     }
 }
 
+// OAuth 账号声明 FedRAMP 时，由选中凭据独占这个头；普通账号允许客户端多值透传
+pub(super) fn is_managed_model_header(name: &HeaderName, fedramp_routing: bool) -> bool {
+    is_managed_identity_header(name.as_str()) || (fedramp_routing && name == "x-openai-fedramp")
+}
+
 pub(super) fn append_passthrough_headers(headers: &mut HeaderMap, passthrough: &HeaderMap) {
+    let fedramp_routing = headers.contains_key("x-openai-fedramp");
     for name in passthrough.keys() {
         // 身份与传输字段只由画像/正文生成；其余协议头保留原始多值字节
-        if is_managed_identity_header(name.as_str())
+        if is_managed_model_header(name, fedramp_routing)
             || matches!(
                 name.as_str(),
                 "openai-beta"

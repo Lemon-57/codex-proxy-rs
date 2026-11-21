@@ -56,6 +56,7 @@ impl CodexCredentialRepository {
         let oauth = data
             .oauth_mut()
             .ok_or(CredentialRepositoryError::InvalidCredentialData(None))?;
+        let same_access_token = oauth.access_token == *secret.access_token.expose_secret();
         oauth.access_token = secret.access_token.expose_secret().to_owned();
         oauth.refresh_token = secret
             .refresh_token
@@ -85,6 +86,11 @@ impl CodexCredentialRepository {
             None,
             None,
         );
+        let update = if same_access_token {
+            update.preserving_access_token_expiry()
+        } else {
+            update
+        };
         cas_revision(self.store.compare_and_swap_credential(update).await?)
     }
 
@@ -115,7 +121,8 @@ impl CodexCredentialRepository {
         .map_err(|source| {
             CredentialRepositoryError::InvalidCredentialData(Some(ErrorSource::new(source)))
         })?
-        .preserving_profile();
+        .preserving_profile()
+        .preserving_access_token_expiry();
         if let Some(error_reason) = error_reason {
             update = update.with_account_state(
                 account.credential_state(),
@@ -173,7 +180,7 @@ impl CodexCredentialRepository {
         if data.authentication_kind() != loaded.account.authentication_kind() {
             return Err(CredentialRepositoryError::InvalidCredentialData(None));
         }
-        CodexCredentialCodec::decode(&loaded.credential).map_err(Into::into)
+        Ok(data.into_runtime())
     }
 
     pub async fn load_runtime_credential(
@@ -250,7 +257,8 @@ impl CodexCredentialRepository {
         .map_err(|source| {
             CredentialRepositoryError::InvalidCredentialData(Some(ErrorSource::new(source)))
         })?
-        .preserving_profile();
+        .preserving_profile()
+        .preserving_access_token_expiry();
         cas_revision(self.store.compare_and_swap_credential(update).await?)
     }
 
@@ -318,7 +326,7 @@ fn cas_revision(
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum CredentialRepositoryError {
     #[error("Codex credential data is invalid")]
     InvalidCredentialData(#[source] Option<ErrorSource>),

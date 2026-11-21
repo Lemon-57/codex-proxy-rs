@@ -8,6 +8,10 @@ pub(super) struct ReplaceAccountRtRequest {
     pub account_id: String,
     pub expected_credential_revision: u64,
     pub refresh_token: String,
+    #[serde(default)]
+    pub allow_plan_mismatch: bool,
+    #[serde(default)]
+    pub allow_workspace_and_plan_change: bool,
 }
 
 impl ReplaceAccountRtRequest {
@@ -19,6 +23,9 @@ impl ReplaceAccountRtRequest {
             .map_err(|_| WireValidationError::new("accountId"))?;
         if self.expected_credential_revision == 0 {
             return Err(WireValidationError::new("expectedCredentialRevision"));
+        }
+        if self.allow_plan_mismatch && self.allow_workspace_and_plan_change {
+            return Err(WireValidationError::new("allowPlanMismatch"));
         }
         if self.refresh_token.is_empty()
             || self.refresh_token.len() > 32768
@@ -37,6 +44,14 @@ impl ReplaceAccountRtRequest {
             (
                 "expected_credential_revision".to_owned(),
                 Value::from(self.expected_credential_revision),
+            ),
+            (
+                "allow_plan_mismatch".to_owned(),
+                Value::Bool(self.allow_plan_mismatch),
+            ),
+            (
+                "allow_workspace_and_plan_change".to_owned(),
+                Value::Bool(self.allow_workspace_and_plan_change),
             ),
         ]);
         Ok((
@@ -159,10 +174,10 @@ impl AccountImportRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartAccountAuthorizationRequest {
     pub outbound_proxy_id: Option<String>,
+    pub outbound_proxy_url: Option<super::wire::AccountProxyUpdate>,
     pub provider: String,
     pub name: String,
     pub account_id: Option<String>,
-    pub outbound_proxy_url: Option<super::wire::AccountProxyUpdate>,
 }
 
 impl StartAccountAuthorizationRequest {
@@ -208,6 +223,7 @@ pub struct CompleteAccountAuthorizationRequest {
     pub provider: String,
     pub flow_id: String,
     pub callback_url: String,
+    pub expected_identity_revision: Option<std::num::NonZeroU64>,
 }
 
 impl CompleteAccountAuthorizationRequest {
@@ -216,6 +232,9 @@ impl CompleteAccountAuthorizationRequest {
             settings.validate()?;
         }
         let provider = parse_provider(&self.provider)?;
+        if self.expected_identity_revision.is_some() && provider.as_str() != "openai" {
+            return Err(WireValidationError::new("expectedIdentityRevision"));
+        }
         validate_authorization_flow(&provider, &self.flow_id)?;
         require_text(&self.callback_url, MAX_CALLBACK_URL_BYTES, "callbackUrl")
     }
@@ -236,6 +255,7 @@ impl CompleteAccountAuthorizationRequest {
                 context,
                 flow_id: self.flow_id,
                 callback_url: self.callback_url,
+                expected_identity_revision: self.expected_identity_revision,
             },
         ))
     }

@@ -11,11 +11,11 @@
       "empty": "沒有已觀測的額度桶",
       "invalid": "請輸入 1～100 的整數，留空表示不限制",
       "limit": "排程上限",
-      "warmup": "預熱",
+      "warmup": "重置預熱",
       "model": "預熱模型",
       "modelPlaceholder": "選擇模型",
       "invalidModel": "請輸入有效的預熱模型 ID",
-      "subtitle": "設定額度上限與重置後預熱"
+      "subtitle": "設定額度上限與重置預熱"
     },
     "quota": {
       "general": "通用額度",
@@ -218,12 +218,13 @@
       "searchOrAddModels": "搜索或添加模型",
       "searchOrEnterId": "搜索模型或輸入完整 ID",
       "addModel": "添加模型",
+      "addImageModels": "加入常用 OpenAI 圖像生成模型",
       "customModels": "自定義",
       "availableModels": "可選模型",
       "upstreamCatalog": "上游目錄",
       "selectAll": "全選",
       "deselectAll": "取消全選",
-      "addToDenylistHint": "保存後，此賬號將拒絕該模型",
+      "addToDenylistHint": "加入並儲存後將拒絕此模型",
       "loadingModel": "加載模型中",
       "noModels": "暫無模型",
       "selectOrAddAtLeastOneModel": "請至少選擇或添加一個模型",
@@ -308,7 +309,7 @@
       "resetRefreshFailed": "額度已重置，但最新額度加載失敗：{value}",
       "statusRestored": "賬號狀態已恢復",
       "staleAccount": "賬號 {id} 的頁面數據已失效，請重新選擇",
-      "unsupportedProvider": "不支持的 Provider：{provider}"
+      "deletionResultUnknown": "刪除結果未知，請核對賬號列表"
     },
     "usage": {
       "call": "調用",

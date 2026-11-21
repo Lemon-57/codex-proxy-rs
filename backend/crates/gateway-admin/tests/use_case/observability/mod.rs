@@ -1266,6 +1266,23 @@ impl ObservabilityStore for FixtureObservabilityStore {
         Ok(self.trend.lock().expect("trend").clone())
     }
 
+    async fn client_key_statistics(
+        &self,
+        _: TimeRange,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: gateway_admin::model::observability::KeyUsageMetric,
+    ) -> AdminStoreResult<gateway_admin::model::observability::KeyStatisticsOverview> {
+        Ok(Default::default())
+    }
+
+    async fn client_key_models(
+        &self,
+        _: TimeRange,
+        _: &gateway_core::policy::ClientApiKeyId,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::observability::KeyModelRow>> {
+        Ok(Default::default())
+    }
+
     async fn usage_trend(
         &self,
         _: TimeRange,
@@ -1414,6 +1431,8 @@ impl SettingsStore for FixtureSettingsStore {
             rotation_strategy: RotationStrategy::Smart,
             updated_at: Utc::now(),
             values: gateway_admin::model::settings::RuntimeSettingsValues {
+                openai_oauth_guardian_review_model: false,
+                openai_request_country: Default::default(),
                 codex_privacy_policy: Default::default(),
                 request_location_enabled: false,
                 request_location: Default::default(),

@@ -1,7 +1,8 @@
 //! Codex 明文 credential JSON 的 schema 校验与日志脱敏边界
 
 use super::api_key::ApiKeyAuthentication;
-use gateway_core::account::PlaintextCredential;
+use crate::transport::{CodexBackendClient, CodexClientResult};
+use gateway_core::account::{PlaintextCredential, ProviderAccount};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use thiserror::Error;
@@ -53,12 +54,17 @@ impl CodexRuntimeAuthentication {
         }
     }
 
-    /// 传输只消费公开连接设置，不读取凭据枚举或秘密
-    pub(crate) fn responses_api_base_url(&self) -> Option<&str> {
-        match self {
-            Self::ApiKey(auth) => Some(&auth.configuration.base_url),
-            Self::OAuth(_) => None,
-        }
+    /// 出口、API 地址与 OAuth 路由声明必须来自同一个被选账号
+    pub(crate) fn model_client_for_account(
+        &self,
+        client: &CodexBackendClient,
+        account: &ProviderAccount,
+    ) -> CodexClientResult<CodexBackendClient> {
+        let client = client.for_account(account)?;
+        Ok(match self {
+            Self::ApiKey(auth) => client.with_responses_api_base_url(&auth.configuration.base_url),
+            Self::OAuth(secret) => client.with_fedramp_routing(secret.has_fedramp_routing_claim()),
+        })
     }
 
     pub fn authorization_header(&self) -> Result<SecretString, CodexCredentialDataError> {
@@ -178,57 +184,7 @@ impl CodexCredentialCodec {
     pub fn decode(
         credential: &PlaintextCredential,
     ) -> Result<CodexRuntimeCredential, CodexCredentialDataError> {
-        let data = Self::decode_complete(credential)?;
-        let transport = match &data {
-            CodexCredentialData::OAuth(data) => data.transport,
-            CodexCredentialData::ApiKey(data) => data.transport,
-        };
-        let (authentication, principal, installation_id, cookies, oauth_client_id, oauth_scope) =
-            match data {
-                CodexCredentialData::ApiKey(data) => (
-                    CodexRuntimeAuthentication::ApiKey(ApiKeyAuthentication {
-                        configuration: data.configuration(),
-                        secret: SecretString::from(data.api_key),
-                    }),
-                    None,
-                    data.installation_id,
-                    Vec::new(),
-                    None,
-                    None,
-                ),
-                CodexCredentialData::OAuth(data) => (
-                    CodexRuntimeAuthentication::OAuth(CodexOAuthSecret {
-                        access_token: SecretString::from(data.access_token),
-                        refresh_token: data.refresh_token.map(SecretString::from),
-                        id_token: data.id_token.map(SecretString::from),
-                    }),
-                    data.principal,
-                    data.installation_id,
-                    data.cookies,
-                    data.oauth_client_id,
-                    data.oauth_scope,
-                ),
-            };
-        Ok(CodexRuntimeCredential {
-            transport,
-            authentication,
-            principal,
-            installation_id,
-            cookies: cookies
-                .into_iter()
-                .map(|cookie| RuntimeCodexCookie {
-                    name: cookie.name,
-                    value: SecretString::from(cookie.value),
-                    domain: cookie.domain,
-                    path: cookie.path,
-                    host_only: cookie.host_only,
-                    secure: cookie.secure,
-                    expires_at: cookie.expires_at,
-                })
-                .collect(),
-            oauth_client_id,
-            oauth_scope,
-        })
+        Self::decode_complete(credential).map(CodexCredentialData::into_runtime)
     }
 
     pub fn decode_complete(
@@ -270,6 +226,61 @@ impl CodexCredentialCodec {
             _ => return Err(CodexCredentialDataError::Invalid),
         }
         Self::encode_complete(incoming)
+    }
+}
+
+impl CodexCredentialData {
+    pub(super) fn into_runtime(self) -> CodexRuntimeCredential {
+        let transport = match &self {
+            CodexCredentialData::OAuth(data) => data.transport,
+            CodexCredentialData::ApiKey(data) => data.transport,
+        };
+        let (authentication, principal, installation_id, cookies, oauth_client_id, oauth_scope) =
+            match self {
+                CodexCredentialData::ApiKey(data) => (
+                    CodexRuntimeAuthentication::ApiKey(ApiKeyAuthentication {
+                        configuration: data.configuration(),
+                        secret: SecretString::from(data.api_key),
+                    }),
+                    None,
+                    data.installation_id,
+                    Vec::new(),
+                    None,
+                    None,
+                ),
+                CodexCredentialData::OAuth(data) => (
+                    CodexRuntimeAuthentication::OAuth(CodexOAuthSecret {
+                        access_token: SecretString::from(data.access_token),
+                        refresh_token: data.refresh_token.map(SecretString::from),
+                        id_token: data.id_token.map(SecretString::from),
+                    }),
+                    data.principal,
+                    data.installation_id,
+                    data.cookies,
+                    data.oauth_client_id,
+                    data.oauth_scope,
+                ),
+            };
+        CodexRuntimeCredential {
+            transport,
+            authentication,
+            principal,
+            installation_id,
+            cookies: cookies
+                .into_iter()
+                .map(|cookie| RuntimeCodexCookie {
+                    name: cookie.name,
+                    value: SecretString::from(cookie.value),
+                    domain: cookie.domain,
+                    path: cookie.path,
+                    host_only: cookie.host_only,
+                    secure: cookie.secure,
+                    expires_at: cookie.expires_at,
+                })
+                .collect(),
+            oauth_client_id,
+            oauth_scope,
+        }
     }
 }
 

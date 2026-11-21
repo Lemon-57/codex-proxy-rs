@@ -10,6 +10,57 @@ use tower::ServiceExt as _;
 use super::super::{AdminTestFixture, AdminTestState};
 
 #[tokio::test]
+async fn replace_rt_plan_override_preserves_account_status_guard() {
+    use gateway_admin::model::provider_credentials::ProviderQuota;
+    use gateway_core::account::{AccountStatusFacts, CredentialState, QuotaState};
+    use serde_json::json;
+
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    *fixture.provider_quota.lock().unwrap() = Some(ProviderQuota::default());
+    *fixture.account.lock().unwrap() = Some(account_page_item(
+        AccountStatusFacts {
+            quota_paused: false,
+            enabled: true,
+            credential_state: CredentialState::Ready,
+            access_token_expires_at: None,
+            quota: QuotaState::unknown(),
+            cooldown: None,
+            last_error_reason: None,
+            last_error_message: None,
+        },
+        chrono::Utc::now(),
+        "oauth",
+    ));
+    let router = admin::accounts::router::<AdminTestState>().with_state(fixture.state());
+    for (change_profile, expected) in [
+        (false, StatusCode::CONFLICT),
+        (true, StatusCode::BAD_REQUEST),
+    ] {
+        let body = json!({
+            "accountId": "acct_cooldown",
+            "expectedCredentialRevision": 1,
+            "refreshToken": "fixture-rt",
+            "allowPlanMismatch": true,
+            "allowWorkspaceAndPlanChange": change_profile,
+        });
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/admin/accounts/oauth/replace-rt")
+                    .header("x-request-id", "req_replace_rt")
+                    .header(header::COOKIE, "cpr_session=valid-session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[tokio::test]
 async fn peer_refresh_uses_the_account_quota_endpoint_and_requires_admin() {
     use gateway_core::account::{AccountStatusFacts, CredentialState, QuotaState};
     let fixture = AdminTestFixture::new().await;

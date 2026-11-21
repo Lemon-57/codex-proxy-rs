@@ -107,8 +107,7 @@ async fn openai_import_should_expose_only_explicit_public_errors_without_committ
     ] {
         let events = events();
         let provider = FakeProviderAdmin::new("openai", events.clone());
-        provider
-            .fail_next_with_public_message(provider_kind, "Codex PAT 验证失败，请检查令牌后重试");
+        provider.fail_next_with_public_message(provider_kind, "PAT 验证失败，请检查令牌");
         let store = FakeAccountStore::new("openai", events.clone());
         let services = service(provider, store.clone()).await;
         let error = services
@@ -124,7 +123,7 @@ async fn openai_import_should_expose_only_explicit_public_errors_without_committ
             .await
             .expect_err("validation must fail before committing accounts");
         assert_eq!(error.kind(), admin_kind);
-        assert_eq!(error.to_string(), "Codex PAT 验证失败，请检查令牌后重试");
+        assert_eq!(error.to_string(), "PAT 验证失败，请检查令牌");
         assert!(!format!("{error:?}").contains("secret token"));
         assert_eq!(recorded(&events), ["provider.prepare_import"]);
         assert!(store.audit_requests().is_empty());
@@ -232,6 +231,7 @@ async fn openai_authorization_create_should_observe_initial_quota() {
         .complete_authorization(
             &gateway_core::routing::ProviderKind::new("openai").unwrap(),
             CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: Some(super::super::accounts::import_settings()),
                 context: context("oauth-start-openai-create"),
                 flow_id: "flow-test".to_owned(),
@@ -293,6 +293,7 @@ async fn openai_authorization_create_should_remain_successful_when_initial_quota
         .complete_authorization(
             &gateway_core::routing::ProviderKind::new("openai").unwrap(),
             CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: None,
                 context: context("oauth-start-openai-quota-failure"),
                 flow_id: "flow-test".to_owned(),
@@ -317,6 +318,7 @@ async fn openai_authorization_store_failure_should_release_claim_for_retry() {
     store.fail_next_commit();
     let services = service(provider.clone(), store).await;
     let command = || CompleteAuthorization {
+        expected_identity_revision: None,
         settings: None,
         context: context("oauth-store-retry"),
         flow_id: "flow-test".to_owned(),
@@ -434,6 +436,7 @@ async fn openai_reauthorization_should_commit_after_credential_revision_advances
         .complete_authorization(
             &gateway_core::routing::ProviderKind::new("openai").unwrap(),
             CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: None,
                 context: context("oauth-complete-openai"),
                 flow_id: "flow-test".to_owned(),
@@ -501,6 +504,7 @@ async fn reauthorization_with_import_settings_releases_claim_without_committing(
         .complete_authorization(
             &gateway_core::routing::ProviderKind::new("openai").unwrap(),
             CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: Some(super::super::accounts::import_settings()),
                 context: context("reauthorization-settings"),
                 flow_id: "flow-test".to_owned(),

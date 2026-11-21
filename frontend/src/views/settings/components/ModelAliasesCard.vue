@@ -43,14 +43,12 @@ const uniqueModelRule = computed<FormRule>(() => ({
     :description="t('settings.routing.modelMapHelp')"
   >
     <div class="grid gap-4">
-      <div class="flex flex-wrap items-center gap-3">
-        <ZButton :disabled="loading" @click="emit('addMapping')">
-          <template #icon>
-            <Plus class="size-4" />
-          </template>
-          {{ t('settings.addMapping') }}
-        </ZButton>
-      </div>
+      <ZButton class="justify-self-start" :disabled="loading" @click="emit('addMapping')">
+        <template #icon>
+          <Plus class="size-4" />
+        </template>
+        {{ t('settings.addMapping') }}
+      </ZButton>
 
       <div
         v-if="loading"
@@ -58,7 +56,7 @@ const uniqueModelRule = computed<FormRule>(() => ({
       >
         {{ t('settings.loadingModelMapping') }}
       </div>
-      <div v-else-if="mappings.length > 0" class="grid max-w-6xl gap-3">
+      <div v-else-if="mappings.length" class="grid max-w-6xl gap-3">
         <div
           v-for="(row, index) in mappings"
           :key="index"

@@ -33,6 +33,8 @@ fn runtime_settings(enabled: bool, probe_enabled: bool) -> RuntimeSettings {
         rotation_strategy: gateway_admin::model::settings::RotationStrategy::Smart,
         updated_at: Utc::now(),
         values: gateway_admin::model::settings::RuntimeSettingsValues {
+            openai_oauth_guardian_review_model: false,
+            openai_request_country: Default::default(),
             codex_privacy_policy: Default::default(),
             request_location_enabled: false,
             request_location: Default::default(),

@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use super::admin::{
     CodexCredentialAdmin, CodexCredentialAdminError, PreparedCodexCredentialRotation,
-    UnresolvedCodexOAuthCredential,
+    RtProfilePolicy, UnresolvedCodexOAuthCredential, verify_replacement_claims,
 };
 use super::codec::CodexCredentialCodec;
 use super::recovery_log::{CodexOAuthRecoveryOperation, record_oauth_recovery};
@@ -31,7 +31,9 @@ use super::token_client::{
     AuthorizationCodeExchangeError, AuthorizationCodeExchanger, AuthorizationCodeGrant,
     OFFICIAL_CODEX_OAUTH_CLIENT_ID, OFFICIAL_CODEX_REDIRECT_URI,
 };
-use super::types::{parse_access_token_expiration, parse_chatgpt_jwt_claims};
+use super::types::{
+    CodexOAuthMetadata, decode_jwt_payload, parse_access_token_expiration, parse_chatgpt_jwt_claims,
+};
 use crate::transport::profile::CodexWireProfileState;
 
 const AUTHORIZATION_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
@@ -74,6 +76,7 @@ pub struct CompleteCodexOAuthAuthorization {
     pub owner_ref: String,
     pub flow_id: String,
     pub callback_url: SecretString,
+    pub expected_identity_revision: Option<std::num::NonZeroU64>,
 }
 
 /// OAuth exchange 后返回的 Provider prepared credential 及其原始事务信封
@@ -380,9 +383,7 @@ impl AuthorizationCommitGuard for CodexOAuthAuthorizationCommitGuard {
         if consumed {
             Ok(())
         } else {
-            Err(AdminError::conflict(
-                "OpenAI OAuth pending claim is no longer current",
-            ))
+            Err(AdminError::conflict("授权状态已变更，请核对账号状态"))
         }
     }
 
@@ -396,7 +397,7 @@ impl AuthorizationCommitGuard for CodexOAuthAuthorizationCommitGuard {
             Ok(())
         } else {
             Err(AdminError::unavailable(
-                "OpenAI 授权处理状态暂时无法释放，请先检查授权状态",
+                "授权流程未正常结束，请核对账号状态",
             ))
         }
     }
@@ -475,7 +476,11 @@ impl CodexOAuthAdmin for CodexOAuthAdminService {
         let claim_ref = random_secret()?;
         let pending = self.claim_pending(&command, &claim_ref).await?;
         let completed = self
-            .complete_claimed_authorization(pending, command.callback_url.expose_secret())
+            .complete_claimed_authorization(
+                pending,
+                command.callback_url.expose_secret(),
+                command.expected_identity_revision,
+            )
             .await;
         match completed {
             Ok((mutation, credential)) => Ok(CompletedCodexOAuthAuthorization {
@@ -501,6 +506,7 @@ impl CodexOAuthAdminService {
         &self,
         pending: CodexPendingAuthorization,
         callback_url: &str,
+        expected_identity_revision: Option<std::num::NonZeroU64>,
     ) -> Result<(PendingAuthorizationMutation, CompletedCodexOAuthCredential), CodexOAuthAdminError>
     {
         let current = if let Some(target) = pending.reauthorization() {
@@ -516,6 +522,13 @@ impl CodexOAuthAdminService {
         } else {
             None
         };
+        if let Some(revision) = expected_identity_revision
+            && !current
+                .as_ref()
+                .is_some_and(|current| current.account.revision().get() == revision.get())
+        {
+            return Err(CodexOAuthAdminError::Conflict);
+        }
         let (mut secret, id_token) = self
             .exchange_pending(
                 &pending,
@@ -530,9 +543,14 @@ impl CodexOAuthAdminService {
         let mutation = pending.mutation.clone();
         let access_token_expires_at =
             parse_access_token_expiration(secret.access_token.expose_secret());
-        let metadata = parse_chatgpt_jwt_claims(id_token.expose_secret())
-            .map_err(|_| CodexOAuthAdminError::TokenRejected)?
-            .with_access_token_fallback(&secret.access_token);
+        let metadata = match (&current, expected_identity_revision) {
+            (Some(current), Some(_)) => {
+                verify_reauthorization_identity(current, &secret, &id_token)?
+            }
+            _ => parse_chatgpt_jwt_claims(id_token.expose_secret())
+                .map_err(|_| CodexOAuthAdminError::TokenRejected)?
+                .with_access_token_fallback(&secret.access_token),
+        };
         secret.id_token = Some(id_token);
         let credential = if let Some(current) = current {
             CompletedCodexOAuthCredential::Reauthorize(Box::new(
@@ -712,6 +730,61 @@ impl CodexOAuthAdminService {
     }
 }
 
+fn verify_reauthorization_identity(
+    current: &LoadedCredential,
+    secret: &super::types::CodexOAuthSecret,
+    id_token: &SecretString,
+) -> Result<CodexOAuthMetadata, CodexOAuthAdminError> {
+    let reject = CodexOAuthAdminError::TokenRejected;
+    let runtime = CodexCredentialCodec::decode(&current.credential)
+        .map_err(|_| CodexOAuthAdminError::Credential)?;
+    let oauth = runtime
+        .authentication
+        .oauth()
+        .ok_or(CodexOAuthAdminError::Credential)?;
+    let old_token = oauth.id_token.as_ref().unwrap_or(&oauth.access_token);
+    let original = decode_jwt_payload::<serde_json::Value>(old_token.expose_secret())
+        .map_err(|_| CodexOAuthAdminError::Credential)?;
+    let subject = original["sub"]
+        .as_str()
+        .filter(|subject| !subject.trim().is_empty())
+        .ok_or(CodexOAuthAdminError::Credential)?;
+    if current.account.upstream_user_id().is_none_or(str::is_empty)
+        || !secret.refresh_token.as_ref().is_some_and(|rt| {
+            let token = rt.expose_secret();
+            !token.is_empty()
+                && token.len() <= 32768
+                && token.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+    {
+        return Err(reject);
+    }
+    let account = &current.account;
+    let mut identity = verify_replacement_claims(
+        account,
+        id_token.expose_secret(),
+        subject,
+        true,
+        RtProfilePolicy::UpdateWorkspaceAndPlan,
+    )
+    .map_err(|_| CodexOAuthAdminError::TokenRejected)?;
+    let access = verify_replacement_claims(
+        account,
+        secret.access_token.expose_secret(),
+        subject,
+        false,
+        RtProfilePolicy::UpdateWorkspaceAndPlan,
+    )
+    .map_err(|_| CodexOAuthAdminError::TokenRejected)?;
+    if identity.chatgpt_account_id != access.chatgpt_account_id
+        || identity.chatgpt_plan_type != access.chatgpt_plan_type
+    {
+        return Err(reject);
+    }
+    identity.email = account.email().map(str::to_owned);
+    Ok(identity)
+}
+
 fn current_installation_id(current: &LoadedCredential) -> Result<String, CodexOAuthAdminError> {
     let runtime = CodexCredentialCodec::decode(&current.credential)
         .map_err(|_| CodexOAuthAdminError::Credential)?;
@@ -876,11 +949,9 @@ fn map_authorization_settlement_error(error: CodexOAuthPendingStoreError) -> Adm
             AdminError::internal("OpenAI OAuth pending claim is invalid")
         }
         CodexOAuthPendingStoreError::Conflict => {
-            AdminError::conflict("OpenAI OAuth pending claim conflicts with current state")
+            AdminError::conflict("授权状态冲突，请核对账号状态")
         }
-        CodexOAuthPendingStoreError::Unavailable => {
-            AdminError::unavailable("OpenAI 授权状态存储暂不可用，请稍后重试")
-        }
+        CodexOAuthPendingStoreError::Unavailable => AdminError::unavailable("授权状态存储暂不可用"),
     }
 }
 

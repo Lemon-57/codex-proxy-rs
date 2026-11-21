@@ -729,6 +729,161 @@ impl ProviderCatalogPort for PublishingCatalog {
 }
 
 #[test]
+fn group_model_access_requires_a_common_group_for_account_and_mapped_model() {
+    use gateway_core::{
+        account::{AccountModelAccess, AccountModelAccessMode, ProviderAccountId},
+        routing::AccountGroupId,
+        validation::RoutingError,
+    };
+    let group = |n| AccountGroupId::new(format!("grp_{n:032x}")).unwrap();
+    let account = |id| ProviderAccountId::new(id).unwrap();
+    let policy = |mode, models: &[&str]| {
+        AccountModelAccess::new(mode, models.iter().map(|id| (*id).to_owned()).collect()).unwrap()
+    };
+    let (a, b, shared) = (account("acct_a"), account("acct_b"), account("acct_shared"));
+    let (first, second, disabled) = (group(1), group(2), group(3));
+    let key = ClientApiKeyId::new("key_groups").unwrap();
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        SettingsValues::new(
+            3,
+            "smart",
+            [("alias".into(), "listed-model".into())].into(),
+            None,
+            None,
+        ),
+        vec![SnapshotClientPolicyFacts::new(
+            key.clone(),
+            PlaintextClientApiKey::new("sk_groups").unwrap(),
+            vec![first.clone(), second.clone(), disabled.clone()],
+            RateLimits::unlimited(),
+        )],
+        vec![
+            SnapshotAccountGroupFacts::new(first.clone(), "First".into(), true)
+                .with_model_access(policy(AccountModelAccessMode::Allowlist, &["listed-model"])),
+            SnapshotAccountGroupFacts::new(second.clone(), "Second".into(), true)
+                .with_model_access(policy(
+                    AccountModelAccessMode::Denylist,
+                    &["listed-model", "blocked"],
+                )),
+            SnapshotAccountGroupFacts::new(disabled.clone(), "Disabled".into(), false),
+        ],
+        vec![
+            SnapshotProviderAccountFacts::new(a.clone(), "alpha"),
+            SnapshotProviderAccountFacts::new(b.clone(), "alpha"),
+            SnapshotProviderAccountFacts::new(shared.clone(), "alpha").with_model_access(policy(
+                AccountModelAccessMode::Allowlist,
+                &["listed-model", "image-model"],
+            )),
+        ],
+        vec![
+            SnapshotAccountGroupMemberFacts::new(first.clone(), a.clone()),
+            SnapshotAccountGroupMemberFacts::new(second.clone(), b.clone()),
+            SnapshotAccountGroupMemberFacts::new(first.clone(), shared.clone()),
+            SnapshotAccountGroupMemberFacts::new(second.clone(), shared.clone()),
+            SnapshotAccountGroupMemberFacts::new(disabled.clone(), b.clone()),
+        ],
+    );
+    let snapshot = block_on(
+        RuntimeSnapshotCompiler::new(
+            Arc::new(TestSnapshotStore::new(Ok(facts))),
+            Arc::new(TestCatalog::Discovery),
+        )
+        .compile(),
+    )
+    .unwrap();
+    let scope = snapshot.client_policy(&key).unwrap().account_scope();
+    let alias = PublicModelId::new("alias").unwrap();
+    let plan = snapshot
+        .plan(
+            &alias,
+            &super::operation(),
+            Arc::clone(scope),
+            &Default::default(),
+        )
+        .unwrap();
+    let candidate = &plan.candidates()[0];
+    assert_eq!(candidate.upstream_model().unwrap().as_str(), "listed-model");
+    assert!(candidate.account_scope().allows_model(&a, "listed-model"));
+    assert!(!candidate.account_scope().allows_model(&b, "listed-model"));
+    assert!(scope.allows_model(&b, "other"));
+    assert!(scope.allows_model(&shared, "listed-model"));
+    assert!(scope.allows_model(&shared, "image-model"));
+    assert!(!scope.allows_model(&shared, "other"));
+    assert!(!scope.allows_unidentified_model(&b));
+    assert!(scope.groups_deny_model(None));
+    assert!(snapshot.contains_public_model_for_scope(&alias, scope));
+    let b_only = scope.restricted_to(&Default::default(), &[b.clone()].into());
+    assert!(!snapshot.public_models_for_scope(&b_only).contains(&alias));
+    assert!(!snapshot.contains_public_model_for_scope(&alias, &b_only));
+    assert!(!snapshot.allows_public_model_for_account(&alias, scope, &b));
+    let blocked = PublicModelId::new("blocked").unwrap();
+    assert!(matches!(
+        snapshot.plan(
+            &blocked,
+            &super::operation(),
+            Arc::clone(scope),
+            &Default::default()
+        ),
+        Err(RoutingError::GroupModelDenied)
+    ));
+    assert!(matches!(
+        snapshot.plan_provider_endpoint(
+            &ProviderKind::new("alpha").unwrap(),
+            Some(&UpstreamModelId::new("blocked").unwrap()),
+            &super::operation(),
+            Arc::clone(scope),
+            &Default::default()
+        ),
+        Err(RoutingError::GroupModelDenied)
+    ));
+    assert!(snapshot.all_account_scope().allows_model(&b, "blocked"));
+    assert!(snapshot.all_account_scope().allows_unidentified_model(&b));
+    assert_eq!(
+        snapshot.upstream_models_for_group(&second),
+        ["image-model", "listed-model"].map(|id| UpstreamModelId::new(id).unwrap())
+    );
+    assert_eq!(
+        snapshot.upstream_models_for_group(&disabled),
+        vec![UpstreamModelId::new("listed-model").unwrap()]
+    );
+    assert!(snapshot.upstream_models_for_group(&group(4)).is_empty());
+
+    // 第二组允许此模型，但适配器只绑定到第一组的账号
+    let adapted = PublicModelId::new("adapter-only").unwrap();
+    let scope = Arc::clone(scope);
+    let snapshot = snapshot.with_extensions(Some(ExtensionSetReference::new(
+        ExtensionSetId::new("group-adapter".into()).unwrap(),
+        Arc::new(ModelLease(vec![gateway_core::routing::ContributedModel {
+            owner: "fixture".into(),
+            id: adapted.clone(),
+            provider: ProviderKind::new("alpha").unwrap(),
+            accounts: [a].into(),
+            capabilities: super::capabilities(),
+            presentation: ModelPresentation::new(Some("Adapter".into()), None),
+        }])),
+    )));
+    assert!(!snapshot.contains_public_model_for_scope(&adapted, &scope));
+    assert!(
+        snapshot
+            .plan(&adapted, &super::operation(), scope, &Default::default())
+            .is_err()
+    );
+    let upstream = UpstreamModelId::new("adapter-only").unwrap();
+    assert!(
+        snapshot
+            .upstream_models_for_group(&first)
+            .contains(&upstream)
+    );
+    assert!(
+        !snapshot
+            .upstream_models_for_group(&second)
+            .contains(&upstream)
+    );
+}
+
+#[test]
 fn compiler_should_reject_revision_changed_during_consistent_read() {
     let store = Arc::new(SequencedSnapshotStore {
         facts: vec![facts(1, 2)],
@@ -1617,9 +1772,9 @@ fn revision(value: u64) -> ConfigRevision {
 
 #[test]
 fn global_request_location_should_be_frozen_when_snapshot_is_published() {
-    use gateway_core::account::{ProviderAccountId, RequestLocation};
+    use gateway_core::account::{OpenAiRequestCountry, ProviderAccountId, RequestLocation};
     use gateway_core::runtime::RuntimeSnapshotHandle;
-    let make_snapshot = |version, timezone: &str, enabled| {
+    let make_snapshot = |version, timezone: &str, enabled, country| {
         let location = RequestLocation {
             timezone: timezone.parse().unwrap(),
             ..RequestLocation::default()
@@ -1628,7 +1783,8 @@ fn global_request_location_should_be_frozen_when_snapshot_is_published() {
             revision(version),
             revision(version),
             SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
-                .with_request_location(location, enabled),
+                .with_request_location(location, enabled)
+                .with_openai_request_country(country),
             Vec::new(),
             Vec::new(),
             vec![SnapshotProviderAccountFacts::new(
@@ -1646,7 +1802,12 @@ fn global_request_location_should_be_frozen_when_snapshot_is_published() {
         )
         .unwrap()
     };
-    let handle = RuntimeSnapshotHandle::new(make_snapshot(1, "Asia/Tokyo", true));
+    let handle = RuntimeSnapshotHandle::new(make_snapshot(
+        1,
+        "Asia/Tokyo",
+        true,
+        OpenAiRequestCountry::Passthrough {},
+    ));
     let frozen = handle.acquire().unwrap();
     let plan = |snapshot: &gateway_core::routing::RuntimeSnapshot| {
         snapshot
@@ -1659,7 +1820,20 @@ fn global_request_location_should_be_frozen_when_snapshot_is_published() {
             .unwrap()
     };
     let old_plan = plan(&frozen);
-    handle.publish(make_snapshot(2, "America/New_York", true));
+    handle.publish(make_snapshot(
+        2,
+        "America/New_York",
+        true,
+        OpenAiRequestCountry::FollowLocation {},
+    ));
+    assert_eq!(
+        old_plan.openai_request_country(),
+        &OpenAiRequestCountry::Passthrough {}
+    );
+    assert_eq!(
+        plan(&handle.acquire().unwrap()).openai_request_country(),
+        &OpenAiRequestCountry::FollowLocation {}
+    );
     assert_eq!(
         old_plan.request_location().unwrap().timezone.name(),
         "Asia/Tokyo"
@@ -1676,7 +1850,7 @@ fn global_request_location_should_be_frozen_when_snapshot_is_published() {
             .name(),
         "America/New_York"
     );
-    handle.publish(make_snapshot(3, "Asia/Tokyo", false));
+    handle.publish(make_snapshot(3, "Asia/Tokyo", false, Default::default()));
     assert!(
         plan(&handle.acquire().unwrap())
             .request_location()
@@ -1686,7 +1860,7 @@ fn global_request_location_should_be_frozen_when_snapshot_is_published() {
         old_plan.request_location().unwrap().timezone.name(),
         "Asia/Tokyo"
     );
-    handle.publish(make_snapshot(4, "Asia/Tokyo", true));
+    handle.publish(make_snapshot(4, "Asia/Tokyo", true, Default::default()));
     assert_eq!(
         plan(&handle.acquire().unwrap())
             .request_location()
@@ -1769,6 +1943,17 @@ fn fast_mode_merges_only_bound_groups_without_changing_account_scope() {
         (FastMode::Disabled, FastMode::Default, FastMode::Disabled),
         (FastMode::Disabled, FastMode::Enabled, FastMode::Disabled),
         (FastMode::Disabled, FastMode::Disabled, FastMode::Disabled),
+        (FastMode::Default, FastMode::Ultrafast, FastMode::Ultrafast),
+        (FastMode::Ultrafast, FastMode::Default, FastMode::Ultrafast),
+        (
+            FastMode::Ultrafast,
+            FastMode::Ultrafast,
+            FastMode::Ultrafast,
+        ),
+        (FastMode::Enabled, FastMode::Ultrafast, FastMode::Enabled),
+        (FastMode::Ultrafast, FastMode::Enabled, FastMode::Enabled),
+        (FastMode::Disabled, FastMode::Ultrafast, FastMode::Disabled),
+        (FastMode::Ultrafast, FastMode::Disabled, FastMode::Disabled),
     ] {
         for group_enabled in [false, true] {
             for bound in [false, true] {
@@ -1847,7 +2032,7 @@ fn fast_mode_merges_only_bound_groups_without_changing_account_scope() {
 }
 
 #[test]
-fn image_generation_merges_bound_groups_with_deny_precedence() {
+fn group_feature_permissions_merge_independently_with_deny_precedence() {
     use gateway_core::account::ProviderAccountId;
     use gateway_core::routing::AccountGroupId;
     for (allowed, other_allowed) in [(true, true), (true, false), (false, true), (false, false)] {
@@ -1877,13 +2062,15 @@ fn image_generation_merges_bound_groups_with_deny_precedence() {
                             "Restricted".to_owned(),
                             group_enabled,
                         )
-                        .with_image_generation(allowed),
+                        .with_image_generation(allowed)
+                        .with_subagents(!allowed),
                         SnapshotAccountGroupFacts::new(
                             open_group_id.clone(),
                             "Open".to_owned(),
                             true,
                         )
-                        .with_image_generation(other_allowed),
+                        .with_image_generation(other_allowed)
+                        .with_subagents(!other_allowed),
                     ],
                     vec![SnapshotProviderAccountFacts::new(
                         account_id.clone(),
@@ -1909,6 +2096,10 @@ fn image_generation_merges_bound_groups_with_deny_precedence() {
                     .account_scope()
                     .clone();
                 assert!(scope.allows(&account_id));
+                assert_eq!(
+                    scope.allows_subagents(),
+                    !bound || (!allowed && !other_allowed)
+                );
                 assert_eq!(
                     scope.allows_image_generation(),
                     !bound || (allowed && other_allowed),
@@ -1994,4 +2185,224 @@ fn key_profiles_replace_whole_global_choice_and_previous_snapshot_stays_frozen()
     assert_eq!(values(&build("global-b", true)), ["global-b", "override"]);
     assert_eq!(values(&previous), ["global-a", "override"]);
     assert_eq!(values(&build("global-b", false)), ["global-b", "global-b"]);
+}
+
+#[test]
+fn direct_reviewer_model_freezes_only_authorized_native_catalog_accounts() {
+    use gateway_core::account::{AccountModelAccess, AccountModelAccessMode, ProviderAccountId};
+    const TARGET: &str = "codex-auto-review";
+    const LUNA: &str = "gpt-5.6-luna";
+    struct Catalog;
+    impl ProviderCatalogPort for Catalog {
+        fn is_direct_account(&self, _: &ProviderKind, kind: &str) -> bool {
+            kind == "oauth"
+        }
+        fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+            [(
+                ProviderKind::new("openai").unwrap(),
+                ProviderCatalogGeneration::new(1),
+            )]
+            .into()
+        }
+        fn query_model_capabilities(
+            &self,
+            _: &ProviderKind,
+        ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>>
+        {
+            Box::pin(async {
+                Ok(vec![
+                    ProviderModelCapabilities::new(
+                        UpstreamModelId::new(TARGET).unwrap(),
+                        super::capabilities(),
+                    )
+                    .with_catalog_accounts(
+                        [
+                            "acct_oauth",
+                            "acct_oauth_backup",
+                            "acct_denied",
+                            "acct_blocked",
+                            "acct_key",
+                        ]
+                        .map(|id| ProviderAccountId::new(id).unwrap())
+                        .into(),
+                    ),
+                    ProviderModelCapabilities::new(
+                        UpstreamModelId::new(LUNA).unwrap(),
+                        super::capabilities(),
+                    ),
+                ])
+            })
+        }
+    }
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        super::settings(),
+        vec![],
+        vec![],
+        [
+            "acct_oauth",
+            "acct_oauth_backup",
+            "acct_denied",
+            "acct_blocked",
+            "acct_unpublished",
+            "acct_key",
+        ]
+        .map(|id| {
+            let account =
+                SnapshotProviderAccountFacts::new(ProviderAccountId::new(id).unwrap(), "openai")
+                    .with_authentication_kind(
+                        if id == "acct_key" { "api_key" } else { "oauth" }.into(),
+                    );
+            if matches!(id, "acct_denied" | "acct_blocked") {
+                let allowed = if id == "acct_denied" {
+                    LUNA
+                } else {
+                    "unrelated-model"
+                };
+                account.with_model_access(
+                    AccountModelAccess::new(
+                        AccountModelAccessMode::Allowlist,
+                        vec![allowed.into()],
+                    )
+                    .unwrap(),
+                )
+            } else {
+                account
+            }
+        })
+        .into(),
+        vec![],
+    );
+    let snapshot = block_on(
+        RuntimeSnapshotCompiler::new(
+            Arc::new(TestSnapshotStore::new(Ok(facts))),
+            Arc::new(Catalog),
+        )
+        .compile(),
+    )
+    .unwrap();
+    let snapshot = snapshot.with_extensions(Some(ExtensionSetReference::new(
+        ExtensionSetId::new("review-catalog".into()).unwrap(),
+        Arc::new(ModelLease(vec![gateway_core::routing::ContributedModel {
+            owner: "review-plugin".into(),
+            id: PublicModelId::new(TARGET).unwrap(),
+            provider: ProviderKind::new("openai").unwrap(),
+            accounts: ["acct_oauth", "acct_unpublished"]
+                .map(|id| ProviderAccountId::new(id).unwrap())
+                .into(),
+            capabilities: super::capabilities(),
+            presentation: ModelPresentation::new(Some("Review".into()), None),
+        }])),
+    )));
+    let plan = |fixed: Option<&str>, owner: Option<&str>, adapter_account: Option<&str>| {
+        let scope = snapshot.all_account_scope();
+        let provider = ProviderKind::new("openai").unwrap();
+        let target = UpstreamModelId::new(TARGET).unwrap();
+        let fixed = fixed.map(|id| ProviderAccountId::new(id).unwrap());
+        let owner = owner.map(|id| ProviderAccountId::new(id).unwrap());
+        let scope = match fixed {
+            Some(id) => Arc::new(scope.restricted_to(&Default::default(), &[id].into())),
+            None => scope,
+        };
+        snapshot.plan_with_direct_account_model(
+            &PublicModelId::new(LUNA).unwrap(),
+            &super::operation(),
+            scope,
+            &Default::default(),
+            gateway_core::routing::DirectAccountModel {
+                provider: &provider,
+                model: &target,
+                continuation_owner: owner.as_ref(),
+            },
+            |id| Some(id.as_str()) != adapter_account,
+        )
+    };
+    let oauth_accounts = &["acct_oauth", "acct_oauth_backup"][..];
+    for (fixed, owner, expected_model, expected_accounts) in [
+        (None, None, TARGET, oauth_accounts),
+        (None, Some("acct_oauth"), TARGET, oauth_accounts),
+        (Some("acct_oauth"), None, TARGET, &["acct_oauth"][..]),
+        (Some("acct_key"), None, LUNA, &["acct_key"][..]),
+        (
+            None,
+            Some("acct_key"),
+            LUNA,
+            &[
+                "acct_oauth",
+                "acct_oauth_backup",
+                "acct_denied",
+                "acct_unpublished",
+                "acct_key",
+            ][..],
+        ),
+    ] {
+        let frozen = plan(fixed, owner, None).unwrap();
+        assert_eq!(
+            frozen.candidates().len(),
+            1,
+            "retry must retain the selected model"
+        );
+        let candidate = &frozen.candidates()[0];
+        assert_eq!(
+            candidate.requires_direct_authentication(),
+            expected_model == TARGET
+        );
+        assert_eq!(candidate.upstream_model().unwrap().as_str(), expected_model);
+        for id in [
+            "acct_key",
+            "acct_oauth",
+            "acct_oauth_backup",
+            "acct_denied",
+            "acct_unpublished",
+            "acct_blocked",
+        ] {
+            assert_eq!(
+                candidate
+                    .account_scope()
+                    .allows_model(&ProviderAccountId::new(id).unwrap(), expected_model),
+                expected_accounts.contains(&id)
+            );
+        }
+    }
+    for id in ["acct_denied", "acct_unpublished"] {
+        let preserved = plan(Some(id), None, None).unwrap();
+        let candidate = &preserved.candidates()[0];
+        assert_eq!(candidate.upstream_model().unwrap().as_str(), LUNA);
+        assert!(
+            candidate
+                .account_scope()
+                .allows_model(&ProviderAccountId::new(id).unwrap(), LUNA)
+        );
+    }
+    assert!(plan(Some("acct_blocked"), None, None).is_err());
+    let adapter_plan = plan(None, Some("acct_oauth"), Some("acct_oauth")).unwrap();
+    assert_eq!(
+        adapter_plan.candidates()[0]
+            .upstream_model()
+            .unwrap()
+            .as_str(),
+        LUNA
+    );
+    let settings = snapshot
+        .settings()
+        .clone()
+        .with_model_mappings([(LUNA.into(), "custom".into())].into());
+    let configured = snapshot.with_settings(&settings).unwrap();
+    let configured_plan = configured.plan_with_direct_account_model(
+        &PublicModelId::new(LUNA).unwrap(),
+        &super::operation(),
+        configured.all_account_scope(),
+        &Default::default(),
+        gateway_core::routing::DirectAccountModel {
+            provider: &ProviderKind::new("openai").unwrap(),
+            model: &UpstreamModelId::new(TARGET).unwrap(),
+            continuation_owner: None,
+        },
+        |_| true,
+    );
+    assert!(
+        configured_plan.is_err(),
+        "an explicit mapping to an unavailable model must not be bypassed"
+    );
 }

@@ -38,8 +38,17 @@ async fn control_plane_replacement_commits_one_writer_per_revision_and_preserves
             created_at: Utc::now(),
         },
     };
+    let mut customized = replacement("first", 1800);
+    customized
+        .settings
+        .values
+        .openai_oauth_guardian_review_model = false;
+    customized.settings.values.openai_request_country =
+        gateway_core::account::OpenAiRequestCountry::Custom {
+            country: "CA".into(),
+        };
     let (first, second) = tokio::join!(
-        repository.replace_control_plane(replacement("first", 1800)),
+        repository.replace_control_plane(customized),
         repository.replace_control_plane(replacement("second", 7200)),
     );
     let (saved, conflict) = match (first, second) {
@@ -55,10 +64,7 @@ async fn control_plane_replacement_commits_one_writer_per_revision_and_preserves
     ));
     let current = repository.load_control_plane().await.unwrap().settings;
     assert_eq!(current.config_revision.get(), revision.get() + 1);
-    assert_eq!(
-        current.values.refresh_margin_seconds,
-        saved.values.refresh_margin_seconds
-    );
+    assert_eq!(current.values, saved.values);
     let audit_count: i64 = sqlx::query_scalar(
         "select count(*) from admin_audit_events where action = 'settings.replace'",
     )

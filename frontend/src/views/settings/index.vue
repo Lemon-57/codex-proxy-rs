@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { ZButton, ZConfirmDialog, ZForm, ZIconButton, ZPageHeader, ZSegmented } from '@codex-proxy/ui'
+import { ZButton, ZCard, ZConfirmDialog, ZForm, ZIconButton, ZPageHeader, ZSegmented, ZSwitch } from '@codex-proxy/ui'
 
 import { Save, Undo2 } from '@lucide/vue'
 
 import { computed, nextTick, reactive, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
+
+import HelpPopover from '@/components/HelpPopover.vue'
 
 import AccountAffinityCard from './components/AccountAffinityCard.vue'
 import AccountWarmupCard from './components/AccountWarmupCard.vue'
@@ -15,6 +17,7 @@ import ConcurrencyPolicyCard from './components/ConcurrencyPolicyCard.vue'
 import AccountErrorProtectionCard from './components/error-protection/AccountErrorProtectionCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import PrivacyPolicyCard from './components/privacy/PrivacyPolicyCard.vue'
+import RequestCountryCard from './components/RequestCountryCard.vue'
 import RequestHistoryCard from './components/RequestHistoryCard.vue'
 import RequestLocationCard from './components/RequestLocationCard.vue'
 import ResetCreditCard from './components/ResetCreditCard.vue'
@@ -249,6 +252,7 @@ watch(section, (value) => {
             :detecting-location="detectingLocation"
             @detect-location="detectLocation"
           />
+          <RequestCountryCard v-model="form.openaiRequestCountry" :disabled="disabled" />
           <PrivacyPolicyCard v-model="form.codexPrivacyPolicy" :disabled="disabled" />
           <ModelAliasesCard
             :mappings="mappings"
@@ -257,6 +261,28 @@ watch(section, (value) => {
             @update-mapping="updateMapping"
             @remove-mapping="removeMapping"
           />
+          <ZCard
+            id="oauth-guardian-review-model-help"
+            :title="t('settings.routing.oauthGuardianReviewModel')"
+            :description="t('settings.routing.oauthGuardianReviewModelHelp')"
+          >
+            <div class="flex items-center gap-2">
+              <ZSwitch
+                v-model="form.openaiOauthGuardianReviewModel"
+                :aria-label="t('settings.routing.oauthGuardianReviewModel')"
+                :aria-description="t('settings.routing.oauthGuardianReviewModelHelp')"
+                :active-text="t('common.values.on')"
+                :inactive-text="t('common.values.off')"
+                inline-prompt
+                :width="56"
+                :disabled="disabled"
+              />
+              <HelpPopover
+                :label="t('common.form.fieldHelp', { label: t('settings.routing.oauthGuardianReviewModel') })"
+                :content="t('settings.routing.oauthGuardianReviewModelDetails')"
+              />
+            </div>
+          </ZCard>
         </div>
       </fieldset>
     </ZForm>

@@ -254,7 +254,7 @@ fn sdk_settings_contract_matches_host_declarations() {
         ),
         (
             "../gateway-core/src/account/location.rs",
-            &["RequestLocation"][..],
+            &["RequestLocation", "OpenAiRequestCountry"][..],
         ),
         (
             "../gateway-core/src/account/scheduling.rs",

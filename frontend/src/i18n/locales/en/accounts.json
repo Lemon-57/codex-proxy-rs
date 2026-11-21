@@ -11,11 +11,11 @@
       "empty": "No observed quota buckets",
       "invalid": "Enter a whole number from 1 to 100 or leave blank for no limit",
       "limit": "Scheduling limit",
-      "warmup": "Warmup",
+      "warmup": "Warmup on reset",
       "model": "Warmup model",
       "modelPlaceholder": "Select model",
       "invalidModel": "Enter a valid warmup model ID",
-      "subtitle": "Configure quota limits and warmup after reset"
+      "subtitle": "Configure quota limits and warmup on reset"
     },
     "quota": {
       "general": "General quota",
@@ -218,12 +218,13 @@
       "searchOrAddModels": "Search or add models",
       "searchOrEnterId": "Search models or enter a full ID",
       "addModel": "Add model",
+      "addImageModels": "Add common OpenAI image models",
       "customModels": "Custom",
       "availableModels": "Available models",
       "upstreamCatalog": "Upstream catalog",
       "selectAll": "Select all",
       "deselectAll": "Deselect all",
-      "addToDenylistHint": "Saving blocks this ID on the account",
+      "addToDenylistHint": "Add and save to block this model",
       "loadingModel": "Loading model",
       "noModels": "No models",
       "selectOrAddAtLeastOneModel": "Please select or add at least one model",
@@ -308,7 +309,7 @@
       "resetRefreshFailed": "Quota reset succeeded, but the latest quota could not be loaded: {value}",
       "statusRestored": "Account status restored",
       "staleAccount": "Account {id} is out of date, select it again",
-      "unsupportedProvider": "Unsupported provider: {provider}"
+      "deletionResultUnknown": "Deletion result unknown. Check the account list"
     },
     "usage": {
       "call": "Calls",

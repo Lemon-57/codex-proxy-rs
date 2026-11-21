@@ -154,6 +154,22 @@ impl CodexProvider {
         } else {
             CodexSelectionModel::Search(requested_model.as_ref().map(|model| model.as_str()))
         };
+        if !context.is_diagnostic_required_account()
+            && context
+                .account_scope()
+                .is_some_and(|scope| scope.groups_deny_model(model.model()))
+        {
+            return Err(provider_error(
+                ProviderErrorKind::RequestPolicyDenied,
+                UpstreamSendState::NotSent,
+            )
+            .with_retry_prohibited()
+            .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                gateway_core::validation::GROUP_MODEL_DENIED_MESSAGE,
+                Some(gateway_core::validation::GROUP_MODEL_DENIED_CODE.to_owned()),
+                None,
+            )));
+        }
         let selection_started_at = Instant::now();
         let lease = self
             .selector
@@ -351,10 +367,10 @@ impl CodexProvider {
             });
         let events = cold_json_response_stream(ColdJsonResponse {
             installation_id,
-            client: client
-                .for_account(lease.account())
+            client: lease
+                .authentication()
+                .model_client_for_account(&client, lease.account())
                 .map_err(|error| map_client_error(error, UpstreamSendState::NotSent, None).error)?
-                .with_responses_api_base_url(lease.authentication().responses_api_base_url())
                 .with_middleware_headers(middleware_headers)
                 .with_outbound_middleware(outbound_middleware)
                 .with_privacy(context.privacy(), context.cancellation().clone()),
@@ -430,6 +446,8 @@ pub(super) struct ColdJsonResponse {
 pub(super) struct OpenAiSessionState {
     pub(super) account_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) reviewer_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) credential_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) oauth_identity: Option<String>,
@@ -449,6 +467,7 @@ pub(super) enum OpenAiContinuationScope {
 
 pub(super) struct OpenAiSessionCapture {
     pub(super) account_id: String,
+    pub(super) reviewer_model: Option<String>,
     pub(super) credential_revision: Option<u64>,
     pub(super) oauth_identity: Option<String>,
     pub(super) conversation_id: Option<String>,
@@ -490,6 +509,7 @@ fn encode_openai_session_capture(
     };
     encode_openai_session_state(OpenAiSessionState {
         account_id: capture.account_id.clone(),
+        reviewer_model: capture.reviewer_model.clone(),
         credential_revision: capture.credential_revision,
         oauth_identity: capture.oauth_identity.clone(),
         conversation_id: capture.conversation_id.clone(),
@@ -981,6 +1001,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         }
         let response_transport = response.transport;
         let routing_affinity = response.routing_affinity;
+        let codex_oauth = matches!(lease.authentication(), crate::credential::CodexRuntimeAuthentication::OAuth(_));
         let websocket_connection_id = response.websocket_connection_id;
         let mut body = response.body;
         let mut failure_diagnostics = response.diagnostics.clone();
@@ -1162,10 +1183,10 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 )
             });
             let timing_signals = decoder.take_timing_signals();
-            if let Some(affinity) = &routing_affinity {
+            if codex_oauth {
                 for fact in events.iter().flat_map(ProviderEvent::canonical_facts) {
                     if let GatewayEvent::Started(meta) = fact {
-                        guardian_routing.remember(context.client_api_key_ref(), &active_account, meta.response_id(), affinity);
+                        guardian_routing.remember(context.client_api_key_ref(), &active_account, meta.response_id(), routing_affinity.as_ref());
                     }
                 }
             }

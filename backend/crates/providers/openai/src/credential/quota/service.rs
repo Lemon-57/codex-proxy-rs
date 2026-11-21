@@ -236,24 +236,20 @@ impl CodexCredentialQuotaService {
                                 );
                             }
                         }
-                        Some(QuotaEndpointFailure::Credential {
-                            state,
-                            reason,
-                            message,
-                        }) => {
-                            if state == CredentialState::Banned {
-                                summary.banned += 1;
-                            } else {
-                                summary.stale += 1;
+                        Some(QuotaEndpointFailure::AccessTokenRevoked) => {
+                            match self.store.expire_access_token(&account, observed_at).await {
+                                Ok(true) => summary.revoked += 1,
+                                Ok(false) => summary.stale += 1,
+                                Err(error) => {
+                                    summary.transient += 1;
+                                    tracing::warn!(account_id = %account.id(), %error, "OpenAI access token expiry write failed");
+                                }
                             }
-                            self.persist_credential_failure(
-                                &account,
-                                state,
-                                reason,
-                                message,
-                                observed_at,
-                            )
-                            .await;
+                        }
+                        Some(QuotaEndpointFailure::Credential { state, reason }) => {
+                            summary.banned += 1;
+                            self.persist_credential_failure(&account, state, reason, observed_at)
+                                .await;
                         }
                         None => {
                             summary.transient += 1;
@@ -429,19 +425,14 @@ impl CodexCredentialQuotaService {
                         self.record_confirmed_exhaustion(&account, evidence, None, observed_at)
                             .await?;
                     }
-                    Some(QuotaEndpointFailure::Credential {
-                        state,
-                        reason,
-                        message,
-                    }) => {
-                        self.persist_credential_failure(
-                            &account,
-                            state,
-                            reason,
-                            message,
-                            observed_at,
-                        )
-                        .await;
+                    Some(QuotaEndpointFailure::AccessTokenRevoked) => {
+                        self.store
+                            .expire_access_token(&account, observed_at)
+                            .await?;
+                    }
+                    Some(QuotaEndpointFailure::Credential { state, reason }) => {
+                        self.persist_credential_failure(&account, state, reason, observed_at)
+                            .await;
                     }
                     None => {}
                 }
@@ -571,18 +562,11 @@ impl CodexCredentialQuotaService {
         account: &ProviderAccount,
         credential_state: CredentialState,
         reason: AccountErrorReason,
-        message: Option<&'static str>,
         observed_at: SystemTime,
     ) {
         if let Err(error) = self
             .repository
-            .apply_state_with_reason(
-                account,
-                credential_state,
-                observed_at,
-                Some(reason),
-                message.map(str::to_owned),
-            )
+            .apply_state_with_reason(account, credential_state, observed_at, Some(reason), None)
             .await
         {
             tracing::warn!(

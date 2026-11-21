@@ -8,16 +8,15 @@ use crate::transport::CodexClientError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuotaEndpointFailure {
+    AccessTokenRevoked,
     Credential {
         state: CredentialState,
         reason: AccountErrorReason,
-        message: Option<&'static str>,
     },
     Exhausted(QuotaEvidence),
 }
 
-/// 明确的令牌撤销只标记当前凭据无效，不能推断 RT 永久失效或账号封禁
-/// 普通 401/403、429、5xx 与传输失败仍不改变账号事实
+/// 仅依据明确的访问令牌撤销、工作区停用或额度拒绝证据更新对应事实
 pub(crate) fn classify_quota_endpoint_failure(
     error: &CodexClientError,
 ) -> Option<QuotaEndpointFailure> {
@@ -27,11 +26,7 @@ pub(crate) fn classify_quota_endpoint_failure(
     if *status == StatusCode::UNAUTHORIZED
         && upstream_error_code(error).as_deref() == Some("token_revoked")
     {
-        return Some(QuotaEndpointFailure::Credential {
-            state: CredentialState::Invalid,
-            reason: AccountErrorReason::CredentialInvalid,
-            message: Some("访问令牌已被撤销，请刷新凭据或重新授权"),
-        });
+        return Some(QuotaEndpointFailure::AccessTokenRevoked);
     }
     if *status != StatusCode::PAYMENT_REQUIRED {
         return None;
@@ -40,7 +35,6 @@ pub(crate) fn classify_quota_endpoint_failure(
         return Some(QuotaEndpointFailure::Credential {
             state: CredentialState::Banned,
             reason: AccountErrorReason::AccountBanned,
-            message: None,
         });
     }
     Some(QuotaEndpointFailure::Exhausted(
@@ -56,7 +50,7 @@ fn is_deactivated_workspace(body: &str) -> bool {
         })
 }
 
-/// 从上游错误体提取稳定错误码：优先 `/error/code`，其次 `/code`
+/// 从上游错误体提取稳定错误码：支持 error、detail 和顶层结构
 ///
 /// 只接受有界的 ASCII 标识，避免把自由文本作为错误码写入诊断
 pub(super) fn upstream_error_code(error: &CodexClientError) -> Option<String> {
@@ -66,6 +60,7 @@ pub(super) fn upstream_error_code(error: &CodexClientError) -> Option<String> {
     let value = serde_json::from_str::<Value>(body).ok()?;
     let code = value
         .pointer("/error/code")
+        .or_else(|| value.pointer("/detail/code"))
         .or_else(|| value.pointer("/code"))
         .and_then(Value::as_str)?
         .trim();

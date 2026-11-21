@@ -321,7 +321,7 @@ async fn lock_url(
     Ok(())
 }
 
-/// 导入和旧版 URL 写入在账号事务内登记到共享代理目录
+/// 按 URL 复用代理条目，与账号导入或代理创建共用事务
 pub(crate) async fn ensure_proxy_for_url(
     transaction: &mut Transaction<'_, Postgres>,
     proxy: &OutboundProxy,

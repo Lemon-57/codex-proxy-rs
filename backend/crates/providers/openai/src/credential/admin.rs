@@ -389,6 +389,13 @@ impl CodexCredentialAdminError {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodexCredentialAdmin;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RtProfilePolicy {
+    MatchWorkspaceAndPlan,
+    MatchWorkspace,
+    UpdateWorkspaceAndPlan,
+}
+
 impl CodexCredentialAdmin {
     fn prepare_api_key(
         &self,
@@ -517,7 +524,8 @@ impl CodexCredentialAdmin {
             current.account.next_refresh_at(),
         )
         .map_err(|_| CodexCredentialAdminError::InvalidCredential)?
-        .preserving_profile();
+        .preserving_profile()
+        .preserving_access_token_expiry();
         Ok(PreparedCodexCredentialRotation {
             profile,
             credential,
@@ -756,6 +764,7 @@ impl CodexCredentialAdmin {
             profile.email = metadata.email;
             profile.plan_type = metadata.chatgpt_plan_type;
         }
+        let same_access_token = oauth.access_token == *secret.access_token.expose_secret();
         oauth.access_token = secret.access_token.expose_secret().to_owned();
         oauth.refresh_token = secret
             .refresh_token
@@ -777,6 +786,11 @@ impl CodexCredentialAdmin {
             optional_time(next_refresh_at),
         )
         .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+        let credential = if same_access_token {
+            credential.preserving_access_token_expiry()
+        } else {
+            credential
+        };
         Ok(PreparedCodexCredentialRotation {
             profile,
             credential: if reauthorization {
@@ -842,29 +856,34 @@ impl CodexCredentialAdminService {
         &self,
         current: LoadedCredential,
     ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
-        self.refresh_existing(current, None).await
+        self.refresh_existing(current, None, RtProfilePolicy::MatchWorkspaceAndPlan)
+            .await
     }
 
     pub(crate) async fn replace_refresh_token(
         &self,
         current: LoadedCredential,
         provided: &str,
+        profile_policy: RtProfilePolicy,
     ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
         if current.account.outbound_proxy().is_none()
             || current.account.email().is_none()
             || current.account.upstream_user_id().is_none()
             || current.account.upstream_account_id().is_none()
-            || current.account.plan_type().is_none()
+            || (profile_policy != RtProfilePolicy::MatchWorkspace
+                && current.account.plan_type().is_none())
         {
             return Err(CodexCredentialAdminError::InvalidCredential);
         }
-        self.refresh_existing(current, Some(provided)).await
+        self.refresh_existing(current, Some(provided), profile_policy)
+            .await
     }
 
     async fn refresh_existing(
         &self,
         current: LoadedCredential,
         supplied: Option<&str>,
+        profile_policy: RtProfilePolicy,
     ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
         let account_id = current.account.id().clone();
         let expected_revision = current.account.revision();
@@ -949,13 +968,38 @@ impl CodexCredentialAdminService {
                 return Err(map_refresh_failure(error));
             }
         };
+        let mut replacement_profile = None;
         if let Some(subject) = original_subject {
-            for (token, require_email) in [
-                (tokens.access_token.as_deref(), false),
-                (tokens.id_token.as_deref(), true),
-            ] {
-                let token = token.ok_or(CodexCredentialAdminError::InvalidCredential)?;
-                verify_replacement_claims(&current.account, token, &subject, require_email)?;
+            let verified = |token: Option<&str>, require_email| {
+                verify_replacement_claims(
+                    &current.account,
+                    token.ok_or(CodexCredentialAdminError::InvalidCredential)?,
+                    &subject,
+                    require_email,
+                    profile_policy,
+                )
+            };
+            let access = verified(tokens.access_token.as_deref(), false)?;
+            let mut identity = verified(tokens.id_token.as_deref(), true)?;
+            if profile_policy == RtProfilePolicy::UpdateWorkspaceAndPlan {
+                if access.chatgpt_account_id != identity.chatgpt_account_id
+                    || access.chatgpt_plan_type != identity.chatgpt_plan_type
+                {
+                    return Err(CodexCredentialAdminError::InvalidCredential);
+                }
+                let original_plan = current.account.plan_type();
+                let same_plan = original_plan
+                    .zip(identity.chatgpt_plan_type.as_deref())
+                    .is_some_and(|(old, new)| old.eq_ignore_ascii_case(new));
+                if current.account.upstream_account_id() != identity.chatgpt_account_id.as_deref()
+                    || !same_plan
+                {
+                    identity.email = current.account.email().map(str::to_owned);
+                    if same_plan {
+                        identity.chatgpt_plan_type = original_plan.map(str::to_owned);
+                    }
+                    replacement_profile = Some(identity);
+                }
             }
             if tokens.refresh_token.as_ref().is_some_and(|rt| {
                 rt.is_empty() || rt.len() > 32768 || !rt.bytes().all(|byte| byte.is_ascii_graphic())
@@ -998,7 +1042,7 @@ impl CodexCredentialAdminService {
         let mut prepared = CodexCredentialAdmin.prepare_oauth_rotation(
             current,
             secret,
-            None,
+            replacement_profile,
             access_token_expires_at,
             next_refresh_at,
         )?;
@@ -1194,12 +1238,13 @@ impl CodexCredentialAdminService {
     }
 }
 
-fn verify_replacement_claims(
+pub(super) fn verify_replacement_claims(
     account: &ProviderAccount,
     token: &str,
     subject: &str,
     require_email: bool,
-) -> Result<(), CodexCredentialAdminError> {
+    profile_policy: RtProfilePolicy,
+) -> Result<CodexOAuthMetadata, CodexCredentialAdminError> {
     let claims = decode_jwt_payload::<Value>(token)
         .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
     let metadata = parse_chatgpt_jwt_claims(token)
@@ -1209,20 +1254,41 @@ fn verify_replacement_claims(
         (Some(_), None) => !require_email,
         _ => false,
     };
+    let workspace_matches = metadata.chatgpt_account_id.as_deref() == account.upstream_account_id();
+    let profile_matches = match profile_policy {
+        RtProfilePolicy::UpdateWorkspaceAndPlan => [
+            metadata.chatgpt_account_id.as_deref(),
+            metadata.chatgpt_plan_type.as_deref(),
+        ]
+        .into_iter()
+        .all(|field| {
+            field.is_some_and(|value| {
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+        }),
+        RtProfilePolicy::MatchWorkspace => workspace_matches,
+        RtProfilePolicy::MatchWorkspaceAndPlan => {
+            workspace_matches
+                && account
+                    .plan_type()
+                    .zip(metadata.chatgpt_plan_type.as_deref())
+                    .is_some_and(|(old, new)| old.eq_ignore_ascii_case(new))
+        }
+    };
     if claims["sub"].as_str() != Some(subject)
         || !email_matches
         || metadata.chatgpt_user_id.as_deref() != account.upstream_user_id()
-        || metadata.chatgpt_account_id.as_deref() != account.upstream_account_id()
-        || !account
-            .plan_type()
-            .zip(metadata.chatgpt_plan_type.as_deref())
-            .is_some_and(|(old, new)| old.eq_ignore_ascii_case(new))
+        || !profile_matches
         || !parse_access_token_expiration(token)
             .is_some_and(|expiry| expiry > Utc::now() + chrono::Duration::seconds(30))
     {
         return Err(CodexCredentialAdminError::InvalidCredential);
     }
-    Ok(())
+    Ok(metadata)
 }
 
 fn optional_time(value: Option<chrono::DateTime<chrono::Utc>>) -> Option<SystemTime> {

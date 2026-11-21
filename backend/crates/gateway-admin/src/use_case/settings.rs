@@ -116,10 +116,10 @@ fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError>
             .map(|(requested, upstream)| (requested.as_str(), upstream.as_str())),
     )
     .map_err(|_| AdminError::invalid("运行时设置不满足约束"))?;
-    command
-        .values
-        .validate()
-        .map_err(|_| AdminError::invalid("运行时设置不满足约束"))
+    command.values.validate().map_err(|field| match field {
+        "openai_request_country" => AdminError::invalid("请求国家必须是两位大写 ASCII 字母"),
+        _ => AdminError::invalid("运行时设置不满足约束"),
+    })
 }
 
 #[async_trait]
@@ -267,7 +267,7 @@ impl SettingsService for DefaultSettingsService {
                         )
                     })
                 {
-                    return Err(AdminError::invalid("xAI 不支持此价格档位"));
+                    return Err(AdminError::invalid("当前平台不支持此价格档位"));
                 }
                 if !pricing.bands.contains_key("standard")
                     && command

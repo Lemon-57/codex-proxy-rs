@@ -23,9 +23,7 @@ const enabled = defineModel<boolean>('enabled', { required: true })
         <ZSwitch v-model="enabled" :label="t('settings.location.enableLocationOverlay')" :disabled="disabled" />
         <RequestLocationDetectButton :loading="detectingLocation" :disabled="disabled" @detect="emit('detectLocation')" />
       </div>
-      <div class="grid min-w-0 gap-4.5 mt-4 max-w-6xl">
-        <RequestLocationFields v-model="location" :form-prop="enabled ? 'requestLocation' : undefined" :disabled="disabled || !enabled" />
-      </div>
+      <RequestLocationFields v-model="location" class="mt-4 max-w-6xl" :form-prop="enabled ? 'requestLocation' : undefined" :disabled="disabled || !enabled" />
     </template>
   </ZCard>
 </template>

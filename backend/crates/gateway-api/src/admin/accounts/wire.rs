@@ -22,26 +22,24 @@ pub(super) fn proxy_selection(
     url: Option<AccountProxyUpdate>,
 ) -> Result<Option<gateway_admin::model::proxies::AccountProxySelection>, WireValidationError> {
     use gateway_admin::model::proxies::AccountProxySelection;
-    match (id, url) {
-        (Some(_), Some(_)) => Err(WireValidationError::new("outboundProxyId")),
-        (Some(id), None) if id.is_empty() => Ok(Some(AccountProxySelection::Direct)),
-        (Some(id), None) => {
-            if id.len() > 128
-                || !id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-            {
-                return Err(WireValidationError::new("outboundProxyId"));
-            }
-            Ok(Some(AccountProxySelection::Saved(id)))
+    if let Some(AccountProxyUpdate(proxy)) = url {
+        if id.is_some() {
+            return Err(WireValidationError::new("outboundProxyId"));
         }
-        (None, Some(value)) => Ok(Some(
-            value
-                .0
-                .map_or(AccountProxySelection::Direct, AccountProxySelection::Url),
-        )),
-        (None, None) => Ok(None),
+        return Ok(Some(proxy.map_or(AccountProxySelection::Direct, AccountProxySelection::Url)));
     }
+    let Some(id) = id else { return Ok(None) };
+    if id.is_empty() {
+        return Ok(Some(AccountProxySelection::Direct));
+    }
+    if id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(WireValidationError::new("outboundProxyId"));
+    }
+    Ok(Some(AccountProxySelection::Saved(id)))
 }
 
 /// 账号列表查询参数
@@ -772,6 +770,16 @@ impl AccountTestQuery {
 pub struct AccountModelView {
     pub id: String,
     pub label: String,
+}
+
+impl From<UpstreamModelId> for AccountModelView {
+    fn from(model: UpstreamModelId) -> Self {
+        let id = model.to_string();
+        Self {
+            label: id.clone(),
+            id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

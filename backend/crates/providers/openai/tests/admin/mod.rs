@@ -833,6 +833,7 @@ async fn openai_admin_provider_persists_the_full_pending_envelope_and_binds_owne
     let error = bundle
         .admin_provider()
         .complete_authorization(CompleteAuthorization {
+            expected_identity_revision: None,
             settings: None,
             context: MutationContext {
                 actor: MutationActor::AdminSession {
@@ -914,6 +915,7 @@ async fn oauth_connection_failures_preserve_safe_diagnostics_and_release_the_cla
         let error = bundle
             .admin_provider()
             .complete_authorization(CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: None,
                 context,
                 flow_id: started.flow_id,
@@ -931,9 +933,9 @@ async fn oauth_connection_failures_preserve_safe_diagnostics_and_release_the_cla
         assert_eq!(
             error.public_message(),
             Some(if timed_out {
-                "连接 OpenAI 授权服务超时，请检查出站连接"
+                "连接授权服务超时，请检查出站连接"
             } else {
-                "无法连接 OpenAI 授权服务，请检查出站连接"
+                "无法连接授权服务，请检查出站连接"
             }),
         );
         let mut source = error.source();
@@ -1976,7 +1978,7 @@ async fn initialized_provider_reports_a_safe_pat_format_error_before_network_acc
     assert_eq!(error.kind(), ProviderAdminErrorKind::Invalid);
     assert_eq!(
         error.public_message(),
-        Some("Codex PAT 格式无效：应为 at- 开头的完整令牌，不能包含空白或控制字符")
+        Some("请输入完整 PAT，以 at- 开头且不含空白或控制字符")
     );
     assert!(error.message().is_none());
     assert!(!format!("{error:?}").contains("sensitive-token"));
@@ -2601,7 +2603,42 @@ mod errors {
     use super::*;
 
     #[tokio::test]
-    async fn quota_refresh_exposes_safe_failure_reasons_and_recovers_without_account_errors() {
+    async fn expired_token_prompts_refresh_before_quota_and_profile_queries() {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = ProviderAccountId::new("acct_expired").unwrap();
+        let mut verified_account = profile("chatgpt-expired");
+        verified_account.access_token_expires_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        store
+            .seed_oauth_credential(ImportCodexOAuthCredential {
+                account_id: account_id.as_str().to_owned(),
+                name: "expired".to_owned(),
+                secret: secret("expired-test-token"),
+                verified_account,
+                next_refresh_at: None,
+                enabled: true,
+            })
+            .await;
+        let server = MockServer::start().await;
+        let provider = initialized_test_bundle(store, server.uri())
+            .await
+            .admin_provider();
+        let quota_error = provider
+            .quota(ProviderQuotaRequest {
+                account_id: account_id.clone(),
+                refresh: true,
+                rolling_usage: None,
+            })
+            .await
+            .unwrap_err();
+        let profile_error = provider.profile_statistics(&account_id).await.unwrap_err();
+        for error in [quota_error, profile_error] {
+            assert_eq!(error.public_message(), Some("请先刷新令牌"));
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn quota_refresh_exposes_safe_rejections_and_recovers_after_revoked_token_rotation() {
         let store = Arc::new(MemoryAccountStore::default());
         let account_id = "acct_quota_error";
         store
@@ -2614,7 +2651,7 @@ mod errors {
                 enabled: true,
             })
             .await;
-        let before = store.account(account_id).expect("account");
+        let mut before = store.account(account_id).expect("account");
         let server = MockServer::start().await;
         let mut config = valid_config();
         config.config.api.base_url = server.uri();
@@ -2630,38 +2667,33 @@ mod errors {
                 401,
                 "token_revoked",
                 Kind::BadGateway,
-                "OpenAI 拒绝了额度查询（HTTP 401，token_revoked）：访问令牌已被撤销，请刷新令牌或重新授权",
+                "访问令牌已撤销，请刷新令牌或重新授权",
             ),
             (
                 401,
                 "unknown_code",
                 Kind::BadGateway,
-                "OpenAI 拒绝了额度查询（HTTP 401），请检查账号授权状态；若令牌已在服务端失效，请重新授权",
+                "账号认证失败，请检查授权状态",
             ),
             (
                 403,
                 "forbidden",
                 Kind::BadGateway,
-                "OpenAI 拒绝了额度查询（HTTP 403），请检查账号授权状态",
+                "额度查询被拒绝，请检查账号权限",
             ),
             (
                 429,
                 "rate_limited",
                 Kind::BadGateway,
-                "OpenAI 额度查询被限流，请稍后重试",
+                "额度查询过于频繁，请稍后重试",
             ),
             (
                 503,
                 "unavailable",
                 Kind::BadGateway,
-                "OpenAI 额度查询服务异常，请稍后重试",
+                "额度服务异常，请稍后重试",
             ),
-            (
-                400,
-                "invalid_request",
-                Kind::Unavailable,
-                "OpenAI 额度查询失败，请检查出站连接与上游服务",
-            ),
+            (400, "invalid_request", Kind::Unavailable, "额度查询失败"),
         ] {
             server.reset().await;
             Mock::given(method("GET"))
@@ -2683,10 +2715,28 @@ mod errors {
             assert_eq!(error.kind(), expected_kind);
             assert_eq!(error.public_message(), Some(expected_message));
             assert!(!format!("{error:?} {error}").contains("raw-secret-marker"));
-            assert_eq!(
-                store.account(account_id).expect("account after rejection"),
-                before
-            );
+            let current = store.account(account_id).expect("account after rejection");
+            if code == "token_revoked" {
+                assert_eq!(
+                    current
+                        .status_projection(SystemTime::now(), None)
+                        .error_reason,
+                    Some(gateway_core::account::AccountErrorReason::AccessTokenExpired)
+                );
+                store
+                    .repository()
+                    .rotate_refreshed_oauth_secret(
+                        &before,
+                        secret("replacement-test-token"),
+                        before.access_token_expires_at(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                before = store.account(account_id).expect("account after rotation");
+            } else {
+                assert_eq!(current, before);
+            }
         }
         server.reset().await;
         Mock::given(method("GET"))
@@ -2714,12 +2764,8 @@ mod errors {
     #[tokio::test]
     async fn manual_refresh_preserves_banned_evidence_without_promoting_401_to_terminal() {
         for (status, kind, message) in [
-            (400, Kind::Invalid, "Codex 账号已被停用，请检查账号状态"),
-            (
-                401,
-                Kind::BadGateway,
-                "OpenAI 拒绝了令牌刷新，请检查账号授权状态",
-            ),
+            (400, Kind::Invalid, "上游账号已停用"),
+            (401, Kind::BadGateway, "令牌刷新被拒绝，请检查账号授权"),
         ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
@@ -2749,11 +2795,27 @@ mod errors {
     }
 
     #[tokio::test]
-    async fn supplied_rt_requires_exact_revision_and_original_identity() {
+    async fn supplied_rt_preserves_identity_and_changes_profile_only_when_allowed() {
         let direct = MockServer::start().await;
         for (scenario, accepted, exchanged) in [
             ("matching", true, true),
             ("workspace", false, true),
+            ("plan", false, true),
+            ("ignore_plan", true, true),
+            ("ignore_missing_plan", true, true),
+            ("ignore_conflicting_plans", true, true),
+            ("ignore_wrong_workspace", false, true),
+            ("ignore_wrong_user", false, true),
+            ("ignore_wrong_email", false, true),
+            ("ignore_wrong_subject", false, true),
+            ("ignore_both_flags", false, false),
+            ("allow_workspace", true, true),
+            ("allow_plan", true, true),
+            ("allow_both", true, true),
+            ("allow_conflicting_tokens", false, true),
+            ("allow_wrong_user", false, true),
+            ("allow_wrong_email", false, true),
+            ("allow_wrong_subject", false, true),
             ("subject", false, true),
             ("rejected", false, true),
             ("stale", false, false),
@@ -2761,13 +2823,14 @@ mod errors {
             let server = MockServer::start().await;
             let store = Arc::new(MemoryAccountStore::default());
             let expected = profile("fixed-workspace");
-            let jwt = |workspace: &str, subject: &str| {
+            let jwt = |workspace: &str, subject: &str, plan: &str, previous: bool| {
                 let payload = json!({
-                    "sub": subject, "email": expected.email,
+                    "sub": subject,
+                    "email": if !previous && scenario.ends_with("_wrong_email") { Some("other@example.com") } else { expected.email.as_deref() },
                     "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
                     "https://api.openai.com/auth": {
-                        "chatgpt_user_id": expected.chatgpt_user_id,
-                        "chatgpt_account_id": workspace, "chatgpt_plan_type": "pro"
+                        "chatgpt_user_id": if !previous && scenario.ends_with("_wrong_user") { "another-user" } else { expected.chatgpt_user_id.as_str() },
+                        "chatgpt_account_id": workspace, "chatgpt_plan_type": (!plan.is_empty()).then_some(plan)
                     }
                 });
                 format!(
@@ -2775,19 +2838,42 @@ mod errors {
                     URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
                 )
             };
-            let previous = jwt("fixed-workspace", "original-subject");
+            let previous = jwt("fixed-workspace", "original-subject", "pro", true);
+            let workspace_changed =
+                matches!(scenario, "workspace" | "allow_workspace" | "allow_both");
+            let plan_changed = matches!(scenario, "plan" | "allow_plan" | "allow_both");
+            let ignore_plan = scenario.starts_with("ignore_");
             let next = jwt(
-                if scenario == "workspace" {
+                if workspace_changed {
                     "other-workspace"
                 } else {
                     "fixed-workspace"
                 },
-                if scenario == "subject" {
+                if scenario == "subject" || scenario.ends_with("_wrong_subject") {
                     "other-subject"
                 } else {
                     "original-subject"
                 },
+                match scenario {
+                    "ignore_missing_plan" => "",
+                    _ if ignore_plan => "free",
+                    _ if plan_changed => "plus",
+                    _ => "pro",
+                },
+                false,
             );
+            let access = match scenario {
+                "allow_conflicting_tokens" => {
+                    jwt("other-workspace", "original-subject", "plus", false)
+                }
+                "ignore_wrong_workspace" => {
+                    jwt("other-workspace", "original-subject", "free", false)
+                }
+                "ignore_conflicting_plans" => {
+                    jwt("fixed-workspace", "original-subject", "pro", false)
+                }
+                _ => next.clone(),
+            };
             let proxy = gateway_core::account::OutboundProxy::parse(&server.uri()).unwrap();
             let mut prepared = provider_openai::credential::CodexCredentialAdmin
                 .prepare_import(ImportCodexOAuthCredential {
@@ -2806,7 +2892,7 @@ mod errors {
                 ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_grant"}))
             } else {
                 ResponseTemplate::new(200).set_body_json(
-                    json!({"access_token":next,"id_token":next,"refresh_token":"rotated-rt"}),
+                    json!({"access_token":access,"id_token":next,"refresh_token":"rotated-rt"}),
                 )
             };
             Mock::given(method("POST"))
@@ -2828,8 +2914,14 @@ mod errors {
             .await
             .unwrap();
             let revision = before.revision().get();
-            let material = json!({"supplied_refresh_token":"provided-rt",
+            let mut material = json!({"supplied_refresh_token":"provided-rt",
                 "expected_credential_revision":revision + u64::from(scenario == "stale")});
+            if ignore_plan {
+                material["allow_plan_mismatch"] = json!(true);
+            }
+            if scenario.starts_with("allow_") || scenario == "ignore_both_flags" {
+                material["allow_workspace_and_plan_change"] = json!(true);
+            }
             let result = bundle
                 .admin_provider()
                 .prepare_rotation(PrepareCredentialRotation {
@@ -2844,10 +2936,18 @@ mod errors {
                 let facts = prepared.facts();
                 assert_eq!(facts.account_id, *before.id());
                 assert_eq!(facts.expected_credential_revision.get(), revision);
-                assert!(
-                    facts.preserve_profile
-                        && facts.has_refresh_token
-                        && facts.replacement_identity.is_none()
+                assert!(facts.has_refresh_token);
+                assert_eq!(facts.preserve_profile, !(workspace_changed || plan_changed));
+                assert_eq!(
+                    facts.plan_type.as_deref(),
+                    Some(if plan_changed { "plus" } else { "pro" })
+                );
+                assert_eq!(
+                    facts
+                        .replacement_identity
+                        .as_ref()
+                        .and_then(|identity| identity.upstream_account_id()),
+                    workspace_changed.then_some("other-workspace"),
                 );
             } else {
                 assert!(result.is_err(), "scenario: {scenario}");
@@ -2888,7 +2988,7 @@ mod errors {
                 401,
                 "unknown",
                 Kind::BadGateway,
-                "OpenAI 拒绝了令牌刷新，请检查账号授权状态",
+                "令牌刷新被拒绝，请检查账号授权",
             ),
             (
                 400,
@@ -2912,19 +3012,19 @@ mod errors {
                 400,
                 "INVALID_GRANT",
                 Kind::BadGateway,
-                "刷新令牌无效或已失效，请重新授权",
+                "刷新令牌无效，请重新授权",
             ),
             (
                 429,
                 "unknown",
                 Kind::BadGateway,
-                "OpenAI 令牌刷新请求被限流，请稍后重试",
+                "令牌刷新过于频繁，请稍后重试",
             ),
             (
                 503,
                 "unknown",
                 Kind::BadGateway,
-                "OpenAI 令牌刷新服务异常，请稍后重试",
+                "令牌刷新服务异常，请稍后重试",
             ),
         ] {
             let server = MockServer::start().await;
@@ -2960,7 +3060,7 @@ mod errors {
                 true,
                 false,
                 Kind::Conflict,
-                "令牌刷新繁忙，请等待当前刷新完成后重试",
+                "令牌刷新繁忙，请稍后重试",
             ),
             (
                 false,
@@ -2974,7 +3074,7 @@ mod errors {
                 true,
                 true,
                 Kind::Conflict,
-                "账号凭据已被更新，请刷新账号列表后重试",
+                "凭据已更新，请刷新账号列表",
             ),
         ] {
             let server = MockServer::start().await;
@@ -3020,7 +3120,7 @@ mod errors {
         assert_eq!(error.kind(), Kind::Ambiguous);
         assert_eq!(
             error.public_message(),
-            Some("令牌刷新结果未知，请先核对账号状态，不要立即重复刷新")
+            Some("刷新结果未知，核对账号状态前请勿重试")
         );
         assert!(!format!("{error:?}").contains("invalid-success-secret-marker"));
 
@@ -3040,7 +3140,7 @@ mod errors {
         assert_eq!(error.kind(), Kind::Ambiguous);
         assert_eq!(
             error.public_message(),
-            Some("令牌刷新结果未知，请先核对账号状态，不要立即重复刷新")
+            Some("刷新结果未知，核对账号状态前请勿重试")
         );
         assert_eq!(store.account("acct_refresh_error").unwrap(), before);
     }
@@ -3300,6 +3400,7 @@ async fn oauth_transport_settings_preserve_tokens_refresh_schedule_and_health() 
         );
         assert_eq!(facts.has_refresh_token, account.has_refresh_token());
         assert!(facts.preserve_profile && facts.preserve_credential_state);
+        assert!(facts.preserve_access_token_expiry);
     }
     for invalid in [
         json!({"transport":"invalid"}),

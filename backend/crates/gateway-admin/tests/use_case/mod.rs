@@ -719,6 +719,26 @@ impl AccountRuntimeStore for UnavailableStore {
 
 #[async_trait]
 impl ClientKeyStore for UnavailableStore {
+    async fn budget_reference_accounts(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: &str,
+        _: &str,
+    ) -> gateway_admin::ports::store::AdminStoreResult<
+        gateway_admin::model::client_keys::BudgetReferenceAccountPage,
+    > {
+        Err(unavailable("reference accounts"))
+    }
+
+    async fn batch_update_client_keys(
+        &self,
+        _: gateway_admin::model::client_keys::BatchUpdateClientKeys,
+        _: gateway_admin::ports::store::BatchClientKeyProfileMerger,
+        _: &MutationContext,
+    ) -> AdminStoreResult<Revision> {
+        Err(unavailable("client key batch update"))
+    }
+
     async fn client_key_budget_window(
         &self,
         _: &gateway_core::policy::ClientApiKeyId,
@@ -761,6 +781,15 @@ impl ClientKeyStore for UnavailableStore {
         _: &MutationContext,
     ) -> AdminStoreResult<()> {
         Err(unavailable("client key budget reset"))
+    }
+
+    async fn client_key_budget(
+        &self,
+        id: &gateway_core::policy::ClientApiKeyId,
+    ) -> AdminStoreResult<Option<gateway_core::engine::budget::ClientBudgetStatus>> {
+        self.get_client_key(id)
+            .await
+            .map(|key| key.map(|row| row.budget))
     }
 
     async fn get_client_key(
@@ -842,6 +871,23 @@ impl ObservabilityStore for UnavailableStore {
         _: Granularity,
     ) -> AdminStoreResult<Vec<RequestMetricPoint>> {
         Err(unavailable("dashboard trend"))
+    }
+
+    async fn client_key_statistics(
+        &self,
+        _: TimeRange,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: gateway_admin::model::observability::KeyUsageMetric,
+    ) -> AdminStoreResult<gateway_admin::model::observability::KeyStatisticsOverview> {
+        Ok(Default::default())
+    }
+
+    async fn client_key_models(
+        &self,
+        _: TimeRange,
+        _: &gateway_core::policy::ClientApiKeyId,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::observability::KeyModelRow>> {
+        Ok(Default::default())
     }
 
     async fn usage_trend(

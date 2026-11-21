@@ -58,7 +58,6 @@ interface AccountUpdateParam {
   supplier?: string
   manualExpiresAt?: string
   connection?: { baseUrl?: string, protocol?: ApiKeyConfiguration['protocol'], transport: ApiKeyConfiguration['transport'], apiKey?: string }
-  outboundProxyUrl?: string
   outboundProxyId?: string
   accountId: string
   name?: string
@@ -73,7 +72,6 @@ interface AccountUpdateParam {
 interface AccountBatchUpdateParam {
   quotaSettings?: Record<string, AccountQuotaBucketSettings>
   autoUseQuotaCredits?: boolean
-  outboundProxyUrl?: string
   outboundProxyId?: string
   accountIds: string[]
   enabled?: boolean

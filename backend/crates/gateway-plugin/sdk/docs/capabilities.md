@@ -350,6 +350,7 @@ HTTP 总入口统一包裹原生路由，`dispatch_http` 复用同一路由与�
 
 `Load` 返回完整运行设置与 `config_revision`。`ReplaceRuntimeSettings::from(settings)` 保留该版本并构造更新命令；
 `Replace` 接收 `(MutationContext, ReplaceRuntimeSettings)`，通过已有校验、事务、审计和快照发布保存设置。
+每次写入都必须提供 `openai_oauth_guardian_review_model`、`openai_request_country` 和 `reset_credit_on_low_weekly_quota`。
 版本过期返回 `ServiceError { kind: "conflict", message }`。读取结果的普通改写不会持久化，也不会回滚已经提交的事务
 
 `accounts::GetResetCreditAutomation` 接收账号 ID，返回 `ResetCreditAutomationStatus`：开关、全局提前分钟数、
@@ -494,7 +495,7 @@ OpenAI 与 xAI 的上游 headers 先由账号和画像生成，插件同名字�
 实际账号租约、凭据版本与计费归属仍记录真实选中事实，不随插件修改 header 名称而伪造
 
 request 阶段 `request.head.settings` 是本次调用的有效设置对象，包含 `runtime`、`fast_mode`、`client_limits` 和 `timeout_ms`。
-`fast_mode` 使用 `default`、`enabled`、`disabled` 三态，具体档位语义见[账号分组](../../../../../docs/api.md#6-账号分组)。
+`fast_mode` 使用 `default`、`enabled`、`ultrafast`、`disabled` 四个值，具体档位语义见[账号分组](../../../../../docs/api.md#6-账号分组)。
 `runtime` 使用宿主快照的设置字段，画像已合并 Client Key 设置；可以修改映射、画像、调度、位置及计价等执行参数。
 SDK 仅在对象改变时提交完整替换，`false`、`0`、空映射和合同允许的 `null` 不表示跳过；不做隐式深合并。
 线协议省略 `next.settings` 才表示保留；显式 `null` 仍按完整替换校验，因不符合设置对象合同而拒绝。

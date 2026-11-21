@@ -123,6 +123,7 @@ pub struct CodexQuotaSyncSummary {
     pub updated: u64,
     pub exhausted: u64,
     pub banned: u64,
+    pub revoked: u64,
     pub transient: u64,
     pub stale: u64,
 }

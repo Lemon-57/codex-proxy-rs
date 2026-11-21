@@ -222,6 +222,19 @@ impl CodexCredentialCatalogSnapshot {
             .map(|e| e.content.ids.as_slice())
     }
 
+    fn account_model(
+        &self,
+        account: &ProviderAccount,
+        model: &UpstreamModelId,
+    ) -> Option<&CodexCatalogModel> {
+        self.entries
+            .get(&CodexCatalogScope::for_account(account))?
+            .content
+            .models
+            .iter()
+            .find(|entry| entry.request_model() == model)
+    }
+
     #[must_use]
     pub fn model_catalog_accounts(&self) -> BTreeMap<&str, BTreeSet<ProviderAccountId>> {
         let mut accounts = BTreeMap::<&str, BTreeSet<ProviderAccountId>>::new();
@@ -251,8 +264,8 @@ impl fmt::Debug for CodexCredentialCatalogSnapshot {
 pub enum CodexCredentialCatalogError {
     #[error("Codex model catalog has no eligible account")]
     NoEligibleCredential,
-    #[error("Codex model catalog account data is invalid")]
-    InvalidCredentialData,
+    #[error(transparent)]
+    Credential(#[from] CredentialRepositoryError),
     #[error("Codex model catalog upstream query failed: {detail}")]
     Upstream { detail: String },
     #[error("Codex model catalog cache is unavailable")]
@@ -278,12 +291,6 @@ struct FetchedAccountModels {
     models: Vec<CodexCatalogModel>,
     document: bytes::Bytes,
     etag: Option<String>,
-}
-
-impl From<CredentialRepositoryError> for CodexCredentialCatalogError {
-    fn from(_: CredentialRepositoryError) -> Self {
-        Self::InvalidCredentialData
-    }
 }
 
 #[derive(Clone)]
@@ -437,6 +444,23 @@ impl CodexCredentialCatalogService {
             .collect())
     }
 
+    pub(crate) fn account_advertises_tier(
+        &self,
+        account: &ProviderAccount,
+        model: &UpstreamModelId,
+        tier: &str,
+    ) -> bool {
+        self.cached().ok().flatten().is_some_and(|snapshot| {
+            snapshot.account_model(account, model).is_some_and(|entry| {
+                entry
+                    .metadata()
+                    .service_tiers()
+                    .iter()
+                    .any(|item| item.id() == tier)
+            })
+        })
+    }
+
     pub(crate) fn messages_model_capabilities(
         &self,
         account: &ProviderAccount,
@@ -444,12 +468,7 @@ impl CodexCredentialCatalogService {
     ) -> Option<gateway_protocol::anthropic::MessagesModelCapabilities> {
         let snapshot = self.cached().ok()??;
         snapshot
-            .entries
-            .get(&CodexCatalogScope::for_account(account))?
-            .content
-            .models
-            .iter()
-            .find(|entry| entry.request_model() == model)?
+            .account_model(account, model)?
             .messages_capabilities()
             .cloned()
     }
@@ -534,7 +553,7 @@ impl CodexCredentialCatalogService {
             .store()
             .get_account(account_id)
             .await
-            .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?
+            .map_err(CredentialRepositoryError::from)?
             .filter(|account| account.provider().as_str() == "openai")
             .ok_or(CodexCredentialCatalogError::NoEligibleCredential)?;
         let scope = CodexCatalogScope::for_account(&account);
@@ -676,22 +695,18 @@ impl CodexCredentialCatalogService {
         account: &ProviderAccount,
     ) -> Result<FetchedAccountModels, CodexCredentialCatalogError> {
         tokio::time::timeout(MODEL_CATALOG_TIMEOUT, async {
-            let credential = self
-                .repository
-                .load_runtime_credential(account)
-                .await
-                .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?;
+            let credential = self.repository.load_runtime_credential(account).await?;
             let request_id = format!("catalog_{}", Uuid::now_v7().simple());
             let authorization = credential
                 .authentication
                 .authorization_header()
-                .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?;
-            let mut client = client
-                .for_account(account)
+                .map_err(CredentialRepositoryError::from)?;
+            let mut client = credential
+                .authentication
+                .model_client_for_account(client, account)
                 .map_err(|error| CodexCredentialCatalogError::Upstream {
                     detail: error.to_string(),
-                })?
-                .with_responses_api_base_url(credential.authentication.responses_api_base_url());
+                })?;
             if let super::CodexRuntimeAuthentication::ApiKey(auth) = &credential.authentication
                 && auth.configuration.protocol == super::ApiKeyProtocol::Messages
             {
