@@ -12,6 +12,8 @@ pub(super) struct ReplaceAccountRtRequest {
     pub allow_plan_mismatch: bool,
     #[serde(default)]
     pub allow_workspace_and_plan_change: bool,
+    #[serde(default)]
+    pub allow_any_status: bool,
 }
 
 impl ReplaceAccountRtRequest {
@@ -26,6 +28,9 @@ impl ReplaceAccountRtRequest {
         }
         if self.allow_plan_mismatch && self.allow_workspace_and_plan_change {
             return Err(WireValidationError::new("allowPlanMismatch"));
+        }
+        if self.allow_any_status && self.allow_workspace_and_plan_change {
+            return Err(WireValidationError::new("allowAnyStatus"));
         }
         if self.refresh_token.is_empty()
             || self.refresh_token.len() > 32768

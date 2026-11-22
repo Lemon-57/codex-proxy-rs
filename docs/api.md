@@ -1242,7 +1242,7 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | `GET` | `/api/admin/accounts/import-tasks/detail` | `taskId` | 任务摘要和逐条结果，不含原始凭据 |
 | `POST` | `/api/admin/accounts/import-tasks/stop` | `{ taskId }` | 跳过未开始的条目，已开始的条目继续完成 |
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
-| `POST` | `/api/admin/accounts/oauth/replace-rt` | `{ accountId, expectedCredentialRevision, refreshToken, allowPlanMismatch?, allowWorkspaceAndPlanChange? }` | 用原固定代理验证所提供的 RT，只更新无在途请求的异常 OpenAI OAuth 账号；成功返回 `{ accountId, credentialRevision }`，不修改调度设置 |
+| `POST` | `/api/admin/accounts/oauth/replace-rt` | `{ accountId, expectedCredentialRevision, refreshToken, allowPlanMismatch?, allowWorkspaceAndPlanChange?, allowAnyStatus? }` | 用原固定代理更新空闲 OpenAI OAuth 账号的 RT；成功返回 `{ accountId, credentialRevision }`，不修改备注、代理或调度设置 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 停用账号只启用调度；已启用账号强制清除本地错误/额度/cooldown 事实，不访问上游 |
 | `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, name?, notes?, modelAccess?, outboundProxyId?, connection? }` | 一次更新账号设置；`connection` 支持 OpenAI OAuth 传输方式及 API Key 连接配置，见下文 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
@@ -1264,6 +1264,8 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | `POST` | `/api/admin/accounts/oauth/complete` | `{ provider, flowId, callbackUrl, settings?, expectedIdentityRevision? }` | 消费 OAuth callback；首次授权可附带账号设置，重新授权保留原设置。OpenAI 重新授权传 `expectedIdentityRevision` 时，提交前校验原凭据版本、邮箱、用户 ID 和 OAuth 主体；实际套餐和工作区可变 |
 
 RT 更新始终核验原邮箱、用户 ID、OAuth 主体和凭据版本。默认也核验原工作区和套餐。`allowPlanMismatch: true` 仍须匹配原工作区，但不核验套餐，也不修改账号保存的套餐。`allowWorkspaceAndPlanChange: true` 可写回双令牌一致证明的新工作区和套餐。两个选项不能同时为 `true`。
+
+默认只更新异常账号。`allowAnyStatus: true` 允许保持原工作区的任意状态账号更新 RT，不能与 `allowWorkspaceAndPlanChange: true` 同用。账号必须确认无在途请求。
 
 账号授权、编辑和批量编辑优先使用 `outboundProxyId`。这些入口仍兼容已认证管理调用的旧 `outboundProxyUrl` 字段；两种字段不能同时提交。
 
@@ -1410,7 +1412,7 @@ Key 消费窗口的 `localUsage` 按各自 `[resetAt - windowSeconds, resetAt)` 
 
 - 收到有效快照时显示 CPR 互联。明确返回不支持协议（HTTP 404、405、501），或返回 `403 peer_sharing_disabled` 时，清除互联身份和共享数据，显示普通 API Key
 - 普通 401/403 保留原识别结果并清除已撤销的共享内容。超时、限流、服务异常或无效响应保留原识别结果和已有观测。无观测时 `observedAt` 与 `pool` 为 `null`，额度窗口为空
-- 展开可探测的 API Key 后，点击「刷新额度」可重新识别互联。卡片显示已有更新时间，手动刷新结果通过通知反馈。明确不支持协议的连接停止周期探测，共享关闭的连接按授权退避周期复查
+- 可探测但尚未识别为互联的 API Key 支持手动检测。明确不支持协议的连接停止周期探测，共享关闭的连接按授权退避周期复查
 
 账号地址、密钥或出口变更使旧观测与识别身份失效，重新识别当前连接。
 账号停用后停止同步，重新启用后按当前连接的识别结果恢复后台任务
@@ -1532,7 +1534,7 @@ API 的 `autoLocation` 默认为 `false`；开启时使用已检测位置，测�
 只改位置不清空连通性测试结果，也不更改账号凭据版本
 
 关联账号的 OpenAI/Codex Responses 请求（HTTP/SSE、WebSocket）优先使用代理位置，否则使用全局
-运行设置中已开启的 `requestLocation`。出站正文的顶层 `request_country` 默认跟随位置，也可在[请求位置](#请求位置)选择“空值”“透传”或“自定义”。
+运行设置中已开启的 `requestLocation`。Codex OAuth 请求的顶层国家字段由[请求国家策略](#请求位置)控制。
 位置覆盖同时更新客户端时间上下文的时区和 Web Search 的结构化位置，未启用覆盖时这两项保留客户端原值。
 全局覆盖按请求冻结，保存后对新请求生效。代理覆盖按每次执行选定的账号解析，包括换号和换出口。
 位置覆盖不改变 epoch 时间戳、真实出口 IP、服务或管理端时区、数据驻留约束及 xAI 请求
@@ -1882,7 +1884,7 @@ OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上
 
 样本仅使用当前额度窗口内、账号加入后开始且截至观测时间已完整交付的请求，缓存命中不重复计入输入
 
-重置或套餐变化后重新积累有效进度，中途加入的账号可在新基线后采样，无需等待下一次重置，职责与断点处理见[额度预测架构](architecture.md#额度预测)
+重置或套餐变化后重新积累有效进度，中途加入的账号可在新基线后采样。单条历史读数的重置时间偏移不会截断已记录用量。疑似跨周期且仍待确认时，接口保留来源用量并暂停估算，详见[额度预测架构](architecture.md#额度预测)
 
 预测不参与调度或账单结算，站外消耗、日志清理、异步延迟、未成功交付的上游消耗和模型组合变化均可能造成误差
 
@@ -2304,7 +2306,7 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 关联代理配置了自定义位置时优先使用代理值。保存后通过现有配置发布机制对新请求生效，
 已开始请求及其重试保持同一份全局值；普通文本、绝对时间戳和数据驻留要求不受影响
 
-`openaiRequestCountry` 单独控制 OpenAI Responses 出站正文顶层的 `request_country`。保存后对新请求生效。
+`openaiRequestCountry` 仅控制发往 Codex OAuth 上游的 Responses 请求顶层字段 `request_country`。API Key 上游保留客户端原值，包括显式 `null`，客户端省略时也省略。保存后对新请求生效
 
 | 管理端选项 | 设置值 | 发往上游的字段 |
 | --- | --- | --- |

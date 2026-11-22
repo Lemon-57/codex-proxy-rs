@@ -10,15 +10,15 @@ use tower::ServiceExt as _;
 use super::super::{AdminTestFixture, AdminTestState};
 
 #[tokio::test]
-async fn replace_rt_plan_override_preserves_account_status_guard() {
+async fn replace_rt_status_override_preserves_idle_and_workspace_guards() {
     use gateway_admin::model::provider_credentials::ProviderQuota;
-    use gateway_core::account::{AccountStatusFacts, CredentialState, QuotaState};
+    use gateway_core::account::{AccountStatus, AccountStatusFacts, CredentialState, QuotaState};
     use serde_json::json;
 
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
     *fixture.provider_quota.lock().unwrap() = Some(ProviderQuota::default());
-    *fixture.account.lock().unwrap() = Some(account_page_item(
+    let account = account_page_item(
         AccountStatusFacts {
             quota_paused: false,
             enabled: true,
@@ -31,19 +31,103 @@ async fn replace_rt_plan_override_preserves_account_status_guard() {
         },
         chrono::Utc::now(),
         "oauth",
-    ));
+    );
     let router = admin::accounts::router::<AdminTestState>().with_state(fixture.state());
-    for (change_profile, expected) in [
-        (false, StatusCode::CONFLICT),
-        (true, StatusCode::BAD_REQUEST),
+    for (
+        account_status,
+        used_slots,
+        allow_any_status,
+        allow_plan_mismatch,
+        change_profile,
+        expected,
+    ) in [
+        (
+            AccountStatus::Normal,
+            Some(0),
+            false,
+            true,
+            false,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Error,
+            Some(0),
+            false,
+            false,
+            true,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(0),
+            true,
+            true,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Disabled,
+            Some(0),
+            true,
+            true,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::QuotaExhausted,
+            Some(0),
+            true,
+            true,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(1),
+            true,
+            true,
+            false,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Normal,
+            None,
+            true,
+            true,
+            false,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Error,
+            Some(0),
+            false,
+            true,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(0),
+            true,
+            false,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
     ] {
-        let body = json!({
+        let mut row = account.clone();
+        row.projection.status = account_status;
+        row.capacity.used_slots = used_slots;
+        *fixture.account.lock().unwrap() = Some(row);
+        let mut body = json!({
             "accountId": "acct_cooldown",
             "expectedCredentialRevision": 1,
             "refreshToken": "fixture-rt",
-            "allowPlanMismatch": true,
+            "allowPlanMismatch": allow_plan_mismatch,
             "allowWorkspaceAndPlanChange": change_profile,
         });
+        if allow_any_status {
+            body["allowAnyStatus"] = json!(true);
+        }
         let response = router
             .clone()
             .oneshot(
@@ -56,7 +140,11 @@ async fn replace_rt_plan_override_preserves_account_status_guard() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), expected);
+        assert_eq!(
+            response.status(),
+            expected,
+            "{account_status:?}, {used_slots:?}, {allow_any_status}, {change_profile}"
+        );
     }
 }
 

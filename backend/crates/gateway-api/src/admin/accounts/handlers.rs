@@ -355,6 +355,7 @@ async fn replace_account_rt<S>(
 where
     S: SessionState + Send + Sync + 'static,
 {
+    let allow_any_status = request.allow_any_status;
     let (account_id, provider_material) = request.into_parts().map_err(map_wire_error)?;
     let services = state.admin_services();
     let current = services
@@ -362,10 +363,14 @@ where
         .quota(&account_id, false)
         .await
         .map_err(map_service_error)?;
-    let time = crate::time::TimePresenter::new(services.timezone());
-    let view = account_view(current, Utc::now(), time);
-    if view.status != "error" || view.capacity.used_slots != Some(0) {
-        return Err(AdminError::conflict("只允许更新无在途请求的异常账号 RT"));
+    if current.capacity.used_slots != Some(0) {
+        return Err(AdminError::conflict(
+            "账号仍有在途请求或并发状态未知，未更新 RT",
+        ));
+    }
+    if !allow_any_status && current.projection.status != gateway_core::account::AccountStatus::Error
+    {
+        return Err(AdminError::conflict("此操作只允许更新异常账号 RT"));
     }
     let provider = ProviderKind::new("openai").map_err(|_| AdminError::internal())?;
     let saved = services
