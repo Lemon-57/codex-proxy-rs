@@ -215,18 +215,6 @@ impl MemoryAccountStore {
         stored.account = stored.account.clone().with_auto_use_quota_credits(true);
     }
 
-    pub(crate) fn set_model_access(
-        &self,
-        id: &str,
-        access: gateway_core::account::AccountModelAccess,
-    ) {
-        let mut accounts = self.accounts.lock().unwrap();
-        let stored = accounts
-            .get_mut(&ProviderAccountId::new(id).unwrap())
-            .unwrap();
-        stored.account = stored.account.clone().with_model_access(access);
-    }
-
     pub(crate) fn set_scheduling(
         &self,
         id: &str,
@@ -240,6 +228,17 @@ impl MemoryAccountStore {
             .account
             .clone()
             .with_scheduling(concurrency_limit, weight);
+    }
+
+    pub(crate) fn set_model_access(
+        &self,
+        id: &str,
+        access: gateway_core::account::AccountModelAccess,
+    ) {
+        let id = ProviderAccountId::new(id).expect("valid account ID");
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let stored = accounts.get_mut(&id).expect("seeded account");
+        stored.account = stored.account.clone().with_model_access(access);
     }
 
     pub(crate) fn set_egress(
@@ -474,7 +473,6 @@ impl ProviderAccountStore for MemoryAccountStore {
     async fn list_for_provider(
         &self,
         provider: &ProviderKind,
-        include_disabled: bool,
     ) -> Result<Vec<ProviderAccount>, StoreError> {
         self.provider_list_reads.fetch_add(1, Ordering::SeqCst);
         if self.fail_provider_listing.load(Ordering::SeqCst) {
@@ -486,15 +484,13 @@ impl ProviderAccountStore for MemoryAccountStore {
                 ),
             ));
         }
+        // 与 Postgres 实现的调度列表语义一致：停用账号不进入常规候选
         Ok(self
             .accounts
             .lock()
             .expect("account store lock")
             .values()
-            .filter(|stored| {
-                stored.account.provider() == provider
-                    && (include_disabled || stored.account.enabled())
-            })
+            .filter(|stored| stored.account.provider() == provider && stored.account.enabled())
             .map(|stored| stored.account.clone())
             .collect())
     }
@@ -605,6 +601,7 @@ impl ProviderAccountStore for MemoryAccountStore {
             access_token_expires_at,
             next_refresh_at,
             account_state,
+            native_refresh_plan: _,
         } = update.into_parts();
         let mut accounts = self.accounts.lock().expect("account store lock");
         let stored = accounts

@@ -155,9 +155,9 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     refresh_concurrency, max_concurrent_per_account,
                     rotation_strategy, smart_scheduling_json, quota_reset_window_weights_json, model_mappings_json, usage_retention_days, ops_event_retention_days,
                     audit_retention_days, min_codex_desktop_version,
-                    min_codex_cli_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, key_queue_timeout_seconds, account_queue_timeout_seconds, switch_account_on_queue_failure, max_retry_after_seconds, openai_guardian_reserved_concurrency, openai_oauth_guardian_review_model, openai_request_country_json, openai_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours,
+                    min_codex_cli_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds AS key_queue_timeout_seconds, account_queue_timeout_seconds, switch_account_on_queue_failure, max_retry_after_seconds, openai_guardian_reserved_concurrency, openai_oauth_guardian_review_model, openai_request_country_json, openai_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours,
                     account_error_protection_json, account_error_protection_revision,
-                    account_warmup_enabled, account_warmup_cron, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_on_low_weekly_quota
+                    account_warmup_enabled, account_warmup_cron, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_on_low_weekly_quota, reset_credit_default_enabled
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -335,9 +335,9 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 refresh_concurrency, max_concurrent_per_account,
                 rotation_strategy, smart_scheduling_json, quota_reset_window_weights_json, model_mappings_json, usage_retention_days, ops_event_retention_days,
                 audit_retention_days, min_codex_desktop_version,
-                min_codex_cli_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, key_queue_timeout_seconds, account_queue_timeout_seconds, switch_account_on_queue_failure, max_retry_after_seconds, openai_guardian_reserved_concurrency, openai_oauth_guardian_review_model, openai_request_country_json, openai_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours,
+                min_codex_cli_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds AS key_queue_timeout_seconds, account_queue_timeout_seconds, switch_account_on_queue_failure, max_retry_after_seconds, openai_guardian_reserved_concurrency, openai_oauth_guardian_review_model, openai_request_country_json, openai_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours,
                 account_error_protection_json, account_error_protection_revision,
-                account_warmup_enabled, account_warmup_cron, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_on_low_weekly_quota
+                account_warmup_enabled, account_warmup_cron, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_on_low_weekly_quota, reset_credit_default_enabled
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -356,8 +356,8 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     update: &RuntimeSettingsUpdate,
 ) -> StoreResult<Revision> {
     update.validate()?;
-    let previous_reset_settings: (i32, Option<i32>, bool) = sqlx::query_as(
-        "select reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_on_low_weekly_quota from runtime_settings where id = 1 for update",
+    let previous_reset_settings: (i32, Option<i32>, bool, bool) = sqlx::query_as(
+        "select reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_default_enabled, reset_credit_on_low_weekly_quota from runtime_settings where id = 1 for update",
     )
     .fetch_one(&mut **transaction)
     .await
@@ -397,7 +397,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
 	                 min_codex_cli_version = $10,
                      max_waiting_per_key = $11,
                      max_waiting_per_account = $12,
-                     key_queue_timeout_seconds = $13,
+                     concurrency_wait_timeout_seconds = $13,
                      account_error_protection_revision = case when account_error_protection_json is distinct from $14::jsonb then config_revision + 1 else account_error_protection_revision end,
                      account_error_protection_json = $14,
                      request_location_json = $15,
@@ -415,13 +415,14 @@ pub(crate) async fn update_runtime_settings_in_transaction(
                      codex_privacy_policy_json = $28,
                      reset_credit_lead_minutes = $29,
                      reset_credit_max_weekly_remaining_percent = $30,
-                     max_retry_after_seconds = $31,
-                     account_queue_timeout_seconds = $32,
-                     switch_account_on_queue_failure = $33,
-                     reset_credit_on_low_weekly_quota = $34,
-                     quota_reset_window_weights_json = $35,
-                     openai_oauth_guardian_review_model = $36,
-                     openai_request_country_json = $37,
+                     reset_credit_default_enabled = $31,
+                     max_retry_after_seconds = $32,
+                     account_queue_timeout_seconds = $33,
+                     switch_account_on_queue_failure = $34,
+                     reset_credit_on_low_weekly_quota = $35,
+                     quota_reset_window_weights_json = $36,
+                     openai_oauth_guardian_review_model = $37,
+                     openai_request_country_json = $38,
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -464,6 +465,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(sqlx::types::Json(&update.values.codex_privacy_policy))
     .bind(i64::from(update.values.reset_credit_lead_minutes))
     .bind(update.values.reset_credit_max_weekly_remaining_percent.map(i64::from))
+    .bind(update.values.reset_credit_default_enabled)
     .bind(i64::from(update.values.max_retry_after_seconds))
     .bind(i64::from(update.values.account_queue_timeout_seconds))
     .bind(update.values.switch_account_on_queue_failure)
@@ -480,15 +482,17 @@ pub(crate) async fn update_runtime_settings_in_transaction(
         id: "1".to_owned(),
     })?;
     // 自动使用配置变化只唤醒本地计划重算，不触发账号全量上游查询
-    if i64::from(previous_reset_settings.0) != i64::from(update.values.reset_credit_lead_minutes)
-        || previous_reset_settings.2 != update.values.reset_credit_on_low_weekly_quota
+    if previous_reset_settings.2 != update.values.reset_credit_default_enabled
+        || i64::from(previous_reset_settings.0)
+            != i64::from(update.values.reset_credit_lead_minutes)
+        || previous_reset_settings.3 != update.values.reset_credit_on_low_weekly_quota
         || previous_reset_settings.1.map(i64::from)
             != update
                 .values
                 .reset_credit_max_weekly_remaining_percent
                 .map(i64::from)
     {
-        sqlx::query("update provider_accounts set reset_credit_next_run_at = least(reset_credit_next_run_at, now()), reset_credit_automation_json = jsonb_set(reset_credit_automation_json, '{revision}', to_jsonb((reset_credit_automation_json ->> 'revision')::bigint + 1)) where reset_credit_automation_json ->> 'enabled' = 'true' ")
+        sqlx::query("update provider_accounts set reset_credit_next_run_at = least(reset_credit_next_run_at, now()), reset_credit_automation_json = jsonb_set(reset_credit_automation_json, '{revision}', to_jsonb((reset_credit_automation_json ->> 'revision')::bigint + 1)) where coalesce(reset_credit_automation_json ->> 'enabled_v2', reset_credit_automation_json ->> 'enabled') = 'true' or reset_credit_automation_json #>> '{state,inherits_default}' = 'true' ")
             .execute(&mut **transaction).await
             .map_err(|source| postgres_unavailable("reschedule reset-credit automation", source))?;
     }
@@ -575,6 +579,7 @@ struct RuntimeSettingsRow {
     account_warmup_enabled: bool,
     account_warmup_cron: String,
     account_warmup_model: Option<String>,
+    reset_credit_default_enabled: bool,
     reset_credit_on_low_weekly_quota: bool,
     reset_credit_lead_minutes: i32,
     reset_credit_max_weekly_remaining_percent: Option<i32>,
@@ -648,6 +653,7 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
             account_warmup_enabled: row.account_warmup_enabled,
             account_warmup_cron: row.account_warmup_cron,
             account_warmup_model: row.account_warmup_model,
+            reset_credit_default_enabled: row.reset_credit_default_enabled,
             reset_credit_on_low_weekly_quota: row.reset_credit_on_low_weekly_quota,
             reset_credit_lead_minutes: u32::try_from(row.reset_credit_lead_minutes)
                 .map_err(|_| invalid_numeric())?,

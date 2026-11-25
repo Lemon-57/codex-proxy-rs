@@ -242,6 +242,8 @@ async fn account_capacity_should_resolve_limits_for_list_and_detail() {
             let page = store
                 .list_accounts(
                     AccountListQuery {
+                        supplier: None,
+                        plan_type: None,
                         page: 1,
                         page_size: PageSize::new(20).unwrap(),
                         provider_kind: None,
@@ -283,7 +285,7 @@ async fn account_capacity_should_resolve_limits_for_list_and_detail() {
 }
 
 #[tokio::test]
-async fn account_search_matches_only_name_and_email_literal_substrings() {
+async fn account_search_matches_name_email_and_upstream_identity_literal_substrings() {
     let Some(database) = TestDatabase::create("account_contains_search").await else {
         return;
     };
@@ -307,14 +309,16 @@ async fn account_search_matches_only_name_and_email_literal_substrings() {
         ("%", 1),
         (r"\", 1),
         ("searchable", 0),
-        ("user-needle", 0),
-        ("account-marker", 0),
+        ("user-needle", 1),
+        ("account-marker", 1),
         ("Ops_100_", 0),
         ("missing", 0),
     ] {
         let page = store
             .list_accounts(
                 AccountListQuery {
+                    supplier: None,
+                    plan_type: None,
                     page: 1,
                     page_size: PageSize::new(10).unwrap(),
                     provider_kind: None,
@@ -351,6 +355,8 @@ async fn provider_filter_applies_before_pagination_even_on_an_empty_page() {
         repository.insert_provider_account(record).await.unwrap();
     }
     let query = AccountListQuery {
+        supplier: None,
+        plan_type: None,
         page: 2,
         page_size: PageSize::new(1).unwrap(),
         provider_kind: Some(ProviderKind::new("openai").unwrap()),
@@ -624,6 +630,9 @@ async fn reset_credit_automation_persists_pending_checks_cas_and_follows_account
         revision: 0,
         next_run_at: now + TimeDelta::hours(2),
         state: ResetCreditAutomationState {
+            inherits_default: false,
+            next_quota_check_at: None,
+            quota_refresh: None,
             next_weekly_check_at: None,
             awaiting_weekly_recovery_since: None,
             next_discovery_at: now + TimeDelta::days(1),
@@ -654,6 +663,7 @@ async fn reset_credit_automation_persists_pending_checks_cas_and_follows_account
         .unwrap()
         .unwrap();
     assert_eq!(loaded.state, record.state);
+    assert_eq!(loaded.enabled, record.enabled);
     use gateway_store::postgres::{PgRuntimeSettingsRepository, RuntimeSettingsRepository as _};
     let settings = PgRuntimeSettingsRepository::new(database.pool.clone());
     assert_eq!(
@@ -767,5 +777,220 @@ async fn reset_credit_automation_persists_pending_checks_cas_and_follows_account
             .unwrap()
             .is_none()
     );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn supplier_filter_applies_before_pagination_and_treats_wildcards_literally() {
+    let Some(database) = TestDatabase::create("supplier_filter").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let store = admin_account_store(&database.pool);
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "supplier-edit".to_owned(),
+    };
+    for (id, supplier) in [
+        ("acct_s1", "North 100%_A"),
+        ("acct_s2", "North partner"),
+        ("acct_s3", "Other"),
+    ] {
+        repository
+            .insert_provider_account(account(id, id))
+            .await
+            .unwrap();
+        store
+            .update_account(
+                UpdateAccount {
+                    account_id: id.to_owned(),
+                    name: None,
+                    supplier: Some(supplier.to_owned()),
+                    manual_starts_at: None,
+                    manual_expires_at: None,
+                    notes: None,
+                    enabled: false,
+                    concurrency_limit: None,
+                    weight: gateway_core::account::AccountWeight::DEFAULT,
+                    group_ids: vec![],
+                    outbound_proxy: None,
+                    model_access: None,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+    }
+    let query = AccountListQuery {
+        plan_type: None,
+        supplier: Some("north".to_owned()),
+        page: 1,
+        page_size: PageSize::new(1).unwrap(),
+        provider_kind: None,
+        group_filter: None,
+        search: None,
+        status: Some(AccountStatus::Disabled),
+        sort: Some(AccountSort {
+            field: AccountSortField::Email,
+            direction: SortDirection::Asc,
+        }),
+    };
+    let first = store
+        .list_accounts(query.clone(), Default::default())
+        .await
+        .unwrap();
+    let second = store
+        .list_accounts(
+            AccountListQuery {
+                page: 2,
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!((first.total, second.total), (2, 2));
+    assert_eq!(
+        (
+            first.items[0].account.id.as_str(),
+            second.items[0].account.id.as_str()
+        ),
+        ("acct_s1", "acct_s2")
+    );
+    let literal = store
+        .list_accounts(
+            AccountListQuery {
+                supplier: Some("100%_A".to_owned()),
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(literal.total, 1);
+    assert_eq!(literal.items[0].account.id, "acct_s1");
+    let empty = store
+        .list_accounts(
+            AccountListQuery {
+                supplier: Some("absent".to_owned()),
+                ..query
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.total, 0);
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.summary.total, 3);
+    let matching_plan = store
+        .list_accounts(
+            AccountListQuery {
+                plan_type: Some("pro".to_owned()),
+                supplier: Some("north".to_owned()),
+                page: 1,
+                page_size: PageSize::new(1).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: Some(AccountStatus::Disabled),
+                sort: None,
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(matching_plan.total, 2);
+    assert_eq!(matching_plan.items.len(), 1);
+    let absent_plan = store
+        .list_accounts(
+            AccountListQuery {
+                plan_type: Some("plus".to_owned()),
+                supplier: None,
+                page: 1,
+                page_size: PageSize::new(1).unwrap(),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: None,
+                sort: None,
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(absent_plan.total, 0);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn paused_invalid_accounts_are_errors_in_detail_filters_pagination_and_global_counts() {
+    use gateway_core::account::AccountStatus;
+    let Some(database) = TestDatabase::create("paused_invalid_projection").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    for (id, state) in [
+        ("acct_invalid", CredentialState::Invalid),
+        ("acct_expired", CredentialState::Expired),
+        ("acct_paused", CredentialState::Ready),
+    ] {
+        let mut seed = account(id, id);
+        seed.enabled = false;
+        seed.credential_state = state;
+        repository.insert_provider_account(seed).await.unwrap();
+    }
+    let store = admin_account_store(&database.pool);
+    let query = AccountListQuery {
+        plan_type: None,
+        supplier: None,
+        page: 1,
+        page_size: PageSize::new(1).unwrap(),
+        provider_kind: None,
+        group_filter: None,
+        search: None,
+        status: Some(AccountStatus::Error),
+        sort: None,
+    };
+    let errors = store
+        .list_accounts(query.clone(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(errors.total, 1);
+    assert_eq!(errors.summary.error, 1);
+    assert_eq!(errors.summary.disabled, 2);
+    assert_eq!(errors.items[0].account.id, "acct_invalid");
+    assert!(!errors.items[0].account.enabled);
+    assert_eq!(errors.items[0].projection.status, AccountStatus::Error);
+    let detail = store
+        .load_account("acct_invalid", Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.projection, errors.items[0].projection);
+    let empty = store
+        .list_accounts(
+            AccountListQuery {
+                page: 2,
+                ..query.clone()
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.total, 1);
+    assert!(empty.items.is_empty());
+    assert_eq!(empty.summary, errors.summary);
+    let disabled = store
+        .list_accounts(
+            AccountListQuery {
+                status: Some(AccountStatus::Disabled),
+                ..query
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(disabled.total, 2);
+    assert_eq!(disabled.summary, errors.summary);
     database.close().await;
 }

@@ -833,6 +833,7 @@ async fn openai_admin_provider_persists_the_full_pending_envelope_and_binds_owne
     let error = bundle
         .admin_provider()
         .complete_authorization(CompleteAuthorization {
+            expected_identity_revision: None,
             settings: None,
             context: MutationContext {
                 actor: MutationActor::AdminSession {
@@ -914,6 +915,7 @@ async fn oauth_connection_failures_preserve_safe_diagnostics_and_release_the_cla
         let error = bundle
             .admin_provider()
             .complete_authorization(CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: None,
                 context,
                 flow_id: started.flow_id,
@@ -2202,6 +2204,9 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
         quota_paused: false,
         quota_settings: Default::default(),
         auto_use_quota_credits: false,
+        supplier: None,
+        manual_starts_at: None,
+        manual_expires_at: None,
         outbound_proxy_id: None,
         outbound_proxy_enabled: true,
         notes: None,
@@ -2725,6 +2730,7 @@ mod errors {
                         secret("replacement-test-token"),
                         before.access_token_expires_at(),
                         None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -2787,6 +2793,191 @@ mod errors {
             assert!(!format!("{error:?} {error}").contains("raw-secret-marker"));
             assert_eq!(store.account("acct_refresh_error").unwrap(), before);
         }
+    }
+
+    #[tokio::test]
+    async fn supplied_rt_preserves_identity_and_changes_profile_only_when_allowed() {
+        let direct = MockServer::start().await;
+        for (scenario, accepted, exchanged) in [
+            ("matching", true, true),
+            ("workspace", false, true),
+            ("plan", false, true),
+            ("ignore_plan", true, true),
+            ("ignore_missing_plan", true, true),
+            ("ignore_conflicting_plans", true, true),
+            ("ignore_wrong_workspace", false, true),
+            ("ignore_wrong_user", false, true),
+            ("ignore_wrong_email", false, true),
+            ("ignore_wrong_subject", false, true),
+            ("allow_workspace", true, true),
+            ("allow_plan", true, true),
+            ("allow_both", true, true),
+            ("allow_conflicting_tokens", false, true),
+            ("allow_wrong_user", false, true),
+            ("allow_wrong_email", false, true),
+            ("allow_wrong_subject", false, true),
+            ("import_same_plan_mismatch", true, true),
+            ("import_same_missing_plan", true, true),
+            ("import_same_conflicting_plans", true, true),
+            ("import_cross_workspace", true, true),
+            ("import_cross_both", true, true),
+            ("import_cross_missing_plan", false, true),
+            ("import_cross_conflicting_workspaces", false, true),
+            ("import_cross_conflicting_plans", false, true),
+            ("import_cross_wrong_user", false, true),
+            ("import_cross_wrong_email", false, true),
+            ("import_cross_wrong_subject", false, true),
+            ("subject", false, true),
+            ("rejected", false, true),
+            ("stale", false, false),
+        ] {
+            let server = MockServer::start().await;
+            let store = Arc::new(MemoryAccountStore::default());
+            let expected = profile("fixed-workspace");
+            let jwt = |workspace: &str, subject: &str, plan: &str, previous: bool| {
+                let payload = json!({
+                    "sub": subject,
+                    "email": if !previous && scenario.ends_with("_wrong_email") { Some("other@example.com") } else { expected.email.as_deref() },
+                    "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                    "https://api.openai.com/auth": {
+                        "chatgpt_user_id": if !previous && scenario.ends_with("_wrong_user") { "another-user" } else { expected.chatgpt_user_id.as_str() },
+                        "chatgpt_account_id": workspace, "chatgpt_plan_type": (!plan.is_empty()).then_some(plan)
+                    }
+                });
+                format!(
+                    "test.{}.signature",
+                    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+                )
+            };
+            let previous = jwt("fixed-workspace", "original-subject", "pro", true);
+            let workspace_changed =
+                matches!(scenario, "workspace" | "allow_workspace" | "allow_both")
+                    || scenario.starts_with("import_cross_");
+            let plan_changed = matches!(
+                scenario,
+                "plan" | "allow_plan" | "allow_both" | "import_cross_both"
+            );
+            let ignore_plan = scenario.starts_with("ignore_") || scenario.starts_with("import_");
+            let next = jwt(
+                if workspace_changed {
+                    "other-workspace"
+                } else {
+                    "fixed-workspace"
+                },
+                if scenario == "subject" || scenario.ends_with("_wrong_subject") {
+                    "other-subject"
+                } else {
+                    "original-subject"
+                },
+                match scenario {
+                    "ignore_missing_plan"
+                    | "import_same_missing_plan"
+                    | "import_cross_missing_plan" => "",
+                    _ if plan_changed => "plus",
+                    _ if ignore_plan && !workspace_changed => "free",
+                    _ => "pro",
+                },
+                false,
+            );
+            let access = match scenario {
+                "allow_conflicting_tokens" => {
+                    jwt("other-workspace", "original-subject", "plus", false)
+                }
+                "import_cross_conflicting_workspaces" => {
+                    jwt("fixed-workspace", "original-subject", "pro", false)
+                }
+                "import_cross_conflicting_plans" => {
+                    jwt("other-workspace", "original-subject", "plus", false)
+                }
+                "ignore_wrong_workspace" => {
+                    jwt("other-workspace", "original-subject", "free", false)
+                }
+                "ignore_conflicting_plans" | "import_same_conflicting_plans" => {
+                    jwt("fixed-workspace", "original-subject", "pro", false)
+                }
+                _ => next.clone(),
+            };
+            let proxy = gateway_core::account::OutboundProxy::parse(&server.uri()).unwrap();
+            let mut prepared = provider_openai::credential::CodexCredentialAdmin
+                .prepare_import(ImportCodexOAuthCredential {
+                    account_id: "acct_fixed_rt".to_owned(),
+                    name: "retained name".to_owned(),
+                    secret: secret(&previous),
+                    verified_account: expected,
+                    next_refresh_at: None,
+                    enabled: true,
+                })
+                .unwrap();
+            prepared.account = prepared.account.with_outbound_proxy(Some(proxy));
+            store.create_account(prepared).await.unwrap();
+            let before = store.account("acct_fixed_rt").unwrap();
+            let response = if scenario == "rejected" {
+                ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_grant"}))
+            } else {
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"access_token":access,"id_token":next,"refresh_token":"rotated-rt"}),
+                )
+            };
+            Mock::given(method("POST"))
+                .and(path("/oauth/token"))
+                .and(wiremock::matchers::body_string_contains(
+                    r#""refresh_token":"provided-rt""#,
+                ))
+                .respond_with(response)
+                .expect(u64::from(exchanged))
+                .mount(&server)
+                .await;
+            let mut config = valid_config();
+            config.config.auth.oauth_token_endpoint = format!("{}/oauth/token", direct.uri());
+            let bundle = provider_openai::initialize(
+                config.config,
+                refresh_ports(store.clone(), false),
+                Arc::new(gateway_core::account::UpstreamInfoReader::default()),
+            )
+            .await
+            .unwrap();
+            let revision = before.revision().get();
+            let mut material = json!({"supplied_refresh_token":"provided-rt",
+                "expected_credential_revision":revision + u64::from(scenario == "stale")});
+            if ignore_plan {
+                material["allow_plan_mismatch"] = json!(true);
+            }
+            if scenario.starts_with("allow_") || scenario.starts_with("import_") {
+                material["allow_workspace_and_plan_change"] = json!(true);
+            }
+            let result = bundle
+                .admin_provider()
+                .prepare_rotation(PrepareCredentialRotation {
+                    account: account_record(&before),
+                    provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                        material.as_object().unwrap().clone(),
+                    )),
+                })
+                .await;
+            if accepted {
+                let prepared = result.expect("matching tokens");
+                let facts = prepared.facts();
+                assert_eq!(facts.account_id, *before.id());
+                assert_eq!(facts.expected_credential_revision.get(), revision);
+                assert!(facts.has_refresh_token);
+                assert_eq!(facts.preserve_profile, !(workspace_changed || plan_changed));
+                assert_eq!(
+                    facts.plan_type.as_deref(),
+                    Some(if plan_changed { "plus" } else { "pro" })
+                );
+                assert_eq!(
+                    facts
+                        .replacement_identity
+                        .as_ref()
+                        .and_then(|identity| identity.upstream_account_id()),
+                    workspace_changed.then_some("other-workspace"),
+                );
+            } else {
+                assert!(result.is_err(), "scenario: {scenario}");
+            }
+            assert_eq!(store.account("acct_fixed_rt").unwrap(), before);
+        }
+        assert!(direct.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2998,6 +3189,96 @@ mod errors {
             .await
             .unwrap();
         assert!(prepared.facts().preserve_profile);
+        assert!(prepared.facts().native_refresh_plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_refresh_observes_only_fresh_same_identity_subscription() {
+        for (case, expected) in [
+            ("confirmed", Some("free")),
+            ("access_only", Some("free")),
+            ("disagree", None),
+            ("other_workspace", None),
+            ("other_subject", None),
+            ("reused_access", None),
+        ] {
+            let server = MockServer::start().await;
+            let store = Arc::new(MemoryAccountStore::default());
+            let account_profile = profile("fresh-plan-workspace");
+            let token = |workspace: &str, subject: &str, plan: &str| {
+                let payload = json!({
+                    "email": account_profile.email.as_deref(),
+                    "sub": subject,
+                    "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                    "https://api.openai.com/auth": {
+                        "chatgpt_user_id": account_profile.chatgpt_user_id.as_str(),
+                        "chatgpt_account_id": workspace,
+                        "chatgpt_plan_type": plan,
+                    },
+                });
+                format!(
+                    "test.{}.signature",
+                    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+                )
+            };
+            let workspace = account_profile.chatgpt_account_id.as_str();
+            let subject = account_profile.oauth_subject.as_str();
+            let previous = token(workspace, subject, "pro");
+            let access = match case {
+                "other_workspace" => token("different-workspace", subject, "free"),
+                "other_subject" => token(workspace, "different-subject", "free"),
+                "reused_access" => previous.clone(),
+                _ => token(workspace, subject, "free"),
+            };
+            let mut response = json!({"access_token": access});
+            if case != "access_only" {
+                response["id_token"] = json!(token(
+                    workspace,
+                    subject,
+                    if case == "disagree" { "pro" } else { "free" }
+                ));
+            }
+            Mock::given(method("POST"))
+                .and(path("/oauth/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+            store
+                .seed_oauth_credential(ImportCodexOAuthCredential {
+                    account_id: "acct_refresh_plan".to_owned(),
+                    name: "native refresh plan test".to_owned(),
+                    secret: secret(&previous),
+                    verified_account: account_profile,
+                    next_refresh_at: None,
+                    enabled: true,
+                })
+                .await;
+            let mut config = valid_config();
+            config.config.auth.oauth_token_endpoint = format!("{}/oauth/token", server.uri());
+            let bundle = provider_openai::initialize(
+                config.config,
+                refresh_ports(store.clone(), false),
+                Arc::new(gateway_core::account::UpstreamInfoReader::default()),
+            )
+            .await
+            .unwrap();
+            let account = store.account("acct_refresh_plan").unwrap();
+            let prepared = bundle
+                .admin_provider()
+                .prepare_refresh(PrepareCredentialRefresh {
+                    account: account_record(&account),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                prepared.facts().native_refresh_plan.as_deref(),
+                expected,
+                "{case}"
+            );
+            assert!(prepared.facts().preserve_profile, "{case}");
+            server.verify().await;
+        }
     }
 
     async fn refresh_fixture(

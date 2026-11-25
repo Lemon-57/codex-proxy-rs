@@ -75,6 +75,8 @@ pub struct RuntimeSettingsValues {
     pub account_warmup_enabled: bool,
     pub account_warmup_cron: String,
     pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_default_enabled: bool,
     pub reset_credit_on_low_weekly_quota: bool,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
@@ -192,7 +194,9 @@ impl From<RuntimeSettings> for ReplaceRuntimeSettings {
 impl RuntimeSettingsValues {
     /// 校验共同事实，返回字段名供边界转换错误；SQL 类型转换仍由 Store 处理
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !(1..=1440).contains(&self.reset_credit_lead_minutes) {
+        if self.reset_credit_lead_minutes == 0
+            || i32::try_from(self.reset_credit_lead_minutes).is_err()
+        {
             return Err("reset_credit_lead_minutes");
         }
         if self

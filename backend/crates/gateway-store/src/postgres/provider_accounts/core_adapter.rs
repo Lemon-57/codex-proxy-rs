@@ -112,9 +112,8 @@ impl ProviderAccountStore for PgProviderAccountRepository {
     async fn list_for_provider(
         &self,
         provider: &ProviderKind,
-        include_disabled: bool,
     ) -> Result<Vec<CoreProviderAccount>, CoreStoreError> {
-        self.list_provider_accounts(Some(provider.as_str()), include_disabled)
+        self.list_provider_accounts(Some(provider.as_str()), false)
             .await
             .map_err(core_store_error)?
             .into_iter()
@@ -238,6 +237,7 @@ impl ProviderAccountStore for PgProviderAccountRepository {
             access_token_expires_at,
             next_refresh_at,
             account_state,
+            native_refresh_plan,
         } = update.into_parts();
         if profile.account_id != account_id {
             return Err(CoreStoreError::new(CoreStoreErrorKind::InvalidData));
@@ -262,7 +262,8 @@ impl ProviderAccountStore for PgProviderAccountRepository {
             .as_ref()
             .and_then(|state| state.message.as_deref());
         let next = sqlx::query_scalar::<_, i64>(
-            "update provider_accounts
+            "with rotated as (
+             update provider_accounts
              set name = case when $14 then name else $3 end,
                  email = case when $14 then email else $4 end,
                  plan_type = case when $14 then plan_type else $5 end,
@@ -287,7 +288,13 @@ impl ProviderAccountStore for PgProviderAccountRepository {
                    then $13 else last_error_message end,
                  updated_at = greatest(now(), updated_at, $11)
              where id = $1 and credential_revision = $2
-             returning credential_revision",
+             returning id, credential_revision
+             ), observed as (
+                insert into provider_account_native_refresh_plans (account_id, credential_revision, plan_type, observed_at)
+                select id, credential_revision, $16::text, clock_timestamp() from rotated where $16 is not null
+                on conflict (account_id) do update set credential_revision = excluded.credential_revision,
+                    plan_type = excluded.plan_type, observed_at = excluded.observed_at
+             ) select credential_revision from rotated",
         )
         .bind(&account_id)
         .bind(to_i64(expected_revision.get()).map_err(core_store_error)?)
@@ -304,6 +311,7 @@ impl ProviderAccountStore for PgProviderAccountRepository {
         .bind(message)
         .bind(preserve_profile)
         .bind(preserve_access_token_expiry)
+        .bind(native_refresh_plan)
         .fetch_optional(&self.pool)
         .await
         .map_err(|source| CoreStoreError::caused_by(CoreStoreErrorKind::Unavailable, source))?;

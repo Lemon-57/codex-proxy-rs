@@ -166,6 +166,8 @@ pub struct RuntimeSettings {
     pub account_warmup_enabled: bool,
     pub account_warmup_cron: String,
     pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_default_enabled: bool,
     pub reset_credit_on_low_weekly_quota: bool,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
@@ -208,6 +210,8 @@ pub struct ReplaceRuntimeSettings {
     pub account_warmup_enabled: bool,
     pub account_warmup_cron: String,
     pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_default_enabled: bool,
     pub reset_credit_on_low_weekly_quota: bool,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
@@ -429,6 +433,7 @@ impl From<RuntimeSettings> for ReplaceRuntimeSettings {
             account_warmup_enabled: settings.account_warmup_enabled,
             account_warmup_cron: settings.account_warmup_cron,
             account_warmup_model: settings.account_warmup_model,
+            reset_credit_default_enabled: settings.reset_credit_default_enabled,
             reset_credit_on_low_weekly_quota: settings.reset_credit_on_low_weekly_quota,
             reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
             reset_credit_max_weekly_remaining_percent: settings

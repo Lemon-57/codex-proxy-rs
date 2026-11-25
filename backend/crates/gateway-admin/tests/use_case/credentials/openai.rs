@@ -231,6 +231,7 @@ async fn openai_authorization_create_should_observe_initial_quota() {
         .complete_authorization(
             &gateway_core::routing::ProviderKind::new("openai").unwrap(),
             CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: Some(super::super::accounts::import_settings()),
                 context: context("oauth-start-openai-create"),
                 flow_id: "flow-test".to_owned(),
@@ -292,6 +293,7 @@ async fn openai_authorization_create_should_remain_successful_when_initial_quota
         .complete_authorization(
             &gateway_core::routing::ProviderKind::new("openai").unwrap(),
             CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: None,
                 context: context("oauth-start-openai-quota-failure"),
                 flow_id: "flow-test".to_owned(),
@@ -316,6 +318,7 @@ async fn openai_authorization_store_failure_should_release_claim_for_retry() {
     store.fail_next_commit();
     let services = service(provider.clone(), store).await;
     let command = || CompleteAuthorization {
+        expected_identity_revision: None,
         settings: None,
         context: context("oauth-store-retry"),
         flow_id: "flow-test".to_owned(),
@@ -433,6 +436,7 @@ async fn openai_reauthorization_should_commit_after_credential_revision_advances
         .complete_authorization(
             &gateway_core::routing::ProviderKind::new("openai").unwrap(),
             CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: None,
                 context: context("oauth-complete-openai"),
                 flow_id: "flow-test".to_owned(),
@@ -500,6 +504,7 @@ async fn reauthorization_with_import_settings_releases_claim_without_committing(
         .complete_authorization(
             &gateway_core::routing::ProviderKind::new("openai").unwrap(),
             CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: Some(super::super::accounts::import_settings()),
                 context: context("reauthorization-settings"),
                 flow_id: "flow-test".to_owned(),

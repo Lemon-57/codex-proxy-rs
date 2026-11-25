@@ -18,6 +18,7 @@ const OPENAI_ACCOUNT_SCORE_FAILURE_REASONS: &[&str] = &[
     "service_unavailable_error",
     "overloaded_error",
 ];
+const WEBSOCKET_UPGRADE_403: &str = "websocket_upgrade_403";
 
 fn is_openai_account_score_failure_reason(value: &str) -> bool {
     let value = value.trim();
@@ -37,7 +38,8 @@ fn openai_account_score_failure_reason(error: &ProviderError) -> Option<&str> {
 /// 返回该 OpenAI 失败是否属于 Smart 账号计分闭集
 #[doc(hidden)]
 pub fn openai_failure_affects_account_score(error: &ProviderError) -> bool {
-    openai_account_score_failure_reason(error).is_some_and(is_openai_account_score_failure_reason)
+    error.diagnostic().and_then(ProviderDiagnostic::code) != Some(WEBSOCKET_UPGRADE_403)
+        && openai_account_score_failure_reason(error).is_some_and(is_openai_account_score_failure_reason)
 }
 
 pub(super) struct MappedProviderFailure {
@@ -898,7 +900,36 @@ pub(super) fn map_client_error(
     };
     let observation = handshake_account.and_then(|_| codex_error_observation(&error));
     if let Some(failure) = error.upstream_failure() {
-        return map_upstream_failure(failure, observation, ReplayBoundary::BeforeSemanticOutput);
+        let websocket_opening = matches!(
+            &error,
+            CodexClientError::Upstream { transport: CodexBackendTransport::WebSocket, .. }
+        ) || matches!(
+            &error,
+            CodexClientError::WebSocket(exchange)
+                if matches!(exchange.classified(), CodexWebSocketExchangeError::Upstream(_))
+        );
+        let upgrade_rejection = websocket_opening
+            && failure.send_phase == CodexUpstreamSendPhase::BeforePayload
+            && failure.status == Some(reqwest::StatusCode::FORBIDDEN)
+            && failure.category() == CodexFailureCategory::PermissionDenied
+            && !failure.has_identity_authorization_error
+            && failure.identity_error_code.is_none()
+            && !failure.no_more_retry
+            && failure.code.as_deref().is_none_or(|code| code.trim().is_empty())
+            && failure.client_error_type.as_deref().is_none_or(|kind| kind.trim().is_empty())
+            && !["permission", "access denied", "not authorized", "no access", "not allowed"]
+                .iter()
+                .any(|signal| failure.raw_body.to_ascii_lowercase().contains(signal));
+        let mut mapped = map_upstream_failure_with_rotation(
+            failure,
+            observation,
+            ReplayBoundary::BeforeSemanticOutput,
+            upgrade_rejection,
+        );
+        if let Some(connection_observation) = connection_observation {
+            mapped.error = mapped.error.with_connection_observation(connection_observation);
+        }
+        return mapped;
     }
     let connect_retry = !local_connection_capacity
         && matches!(&error, CodexClientError::Http(error) if transient_http_connect(error));
@@ -1525,9 +1556,18 @@ fn transient_retry_policy(
 }
 
 pub(super) fn map_upstream_failure(
+    failure: CodexUpstreamFailure,
+    observation: Option<ProviderResponseObservation>,
+    replay_boundary: ReplayBoundary,
+) -> MappedProviderFailure {
+    map_upstream_failure_with_rotation(failure, observation, replay_boundary, false)
+}
+
+fn map_upstream_failure_with_rotation(
     mut failure: CodexUpstreamFailure,
     observation: Option<ProviderResponseObservation>,
     replay_boundary: ReplayBoundary,
+    upgrade_rejection: bool,
 ) -> MappedProviderFailure {
     let category = failure.category();
     let retry_policy = transient_retry_policy(category, &failure);
@@ -1548,8 +1588,8 @@ pub(super) fn map_upstream_failure(
     // WS opening 的 426 是明确的传输切换信号；普通拒绝不能仅凭 NotSent 触发换号
     let upgrade_required = failure.send_phase == CodexUpstreamSendPhase::BeforePayload
         && failure.status == Some(reqwest::StatusCode::UPGRADE_REQUIRED);
-    if category == CodexFailureCategory::FlexUnavailable
-        || (!replay_safe && continuation_summary.is_none() && !upgrade_required)
+    if matches!(category, CodexFailureCategory::FlexUnavailable | CodexFailureCategory::SpendLimitExceeded)
+        || (!replay_safe && continuation_summary.is_none() && !upgrade_required && !upgrade_rejection)
     {
         error = error.with_retry_prohibited();
     }
@@ -1583,6 +1623,16 @@ pub(super) fn map_upstream_failure(
     }
     if replay_boundary.permits_provider_proof() && replay_safe {
         error = error.with_replay_safe();
+    }
+    if upgrade_rejection {
+        error = error.with_pre_delivery_retry().with_same_account_retry_blocked();
+    }
+    if category == CodexFailureCategory::TurnRateLimited {
+        // 本轮拒绝直接交给既有换号路径，不能退回原账号等待或作为传输故障恢复
+        error = error.with_same_account_retry_blocked();
+        if error.replay_is_safe() {
+            error = error.with_session_binding_recovery();
+        }
     }
     if continuation_summary.is_some() {
         error = error
@@ -1632,8 +1682,9 @@ pub(super) fn map_upstream_failure(
     } else {
         summary
     };
+    let diagnostic_code = if upgrade_rejection { WEBSOCKET_UPGRADE_403 } else { "upstream_rejected" };
     error = error.with_diagnostic(
-        ProviderDiagnostic::new(summary).with_classification("upstream", "upstream_rejected"),
+        ProviderDiagnostic::new(summary).with_classification("upstream", diagnostic_code),
     );
     MappedProviderFailure {
         error,
@@ -1649,9 +1700,9 @@ pub(super) fn map_upstream_failure(
         // 普通 5xx 与未知流内错误不足以证明容量拒绝，不能用于冻结账号
         set_cookie_headers: failure.set_cookie_headers,
         response_origin: failure.response_origin,
-        rate_limit_headers: failure.rate_limit_headers,
+        rate_limit_headers: if upgrade_rejection { Vec::new() } else { failure.rate_limit_headers },
         observation,
-        capture_response_cookies: !matches!(
+        capture_response_cookies: !upgrade_rejection && !matches!(
             category,
             CodexFailureCategory::CloudflareChallenge | CodexFailureCategory::CloudflarePathBlocked
         ),

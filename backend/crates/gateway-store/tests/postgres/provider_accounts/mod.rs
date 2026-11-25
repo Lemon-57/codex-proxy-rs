@@ -14,6 +14,7 @@ mod protection_revision;
 mod quota;
 mod quota_forecast;
 mod quota_history;
+mod refresh_groups;
 mod timestamps;
 mod usage_projection;
 
@@ -474,6 +475,9 @@ async fn profile_changes_survive_inflight_background_and_manual_token_refresh() 
     admin_account_store(&database.pool)
         .update_account(
             UpdateAccount {
+                supplier: None,
+                manual_starts_at: None,
+                manual_expires_at: None,
                 account_id: id.to_string(),
                 name: Some("renamed team".to_owned()),
                 notes: None,
@@ -810,6 +814,8 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let usage_page = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: PageSize::new(2).expect("page size"),
                 provider_kind: None,
@@ -854,6 +860,8 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let last_used_page = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: PageSize::new(2).expect("page size"),
                 provider_kind: None,
@@ -881,6 +889,8 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let filtered = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: PageSize::new(10).expect("page size"),
                 provider_kind: Some(ProviderKind::new("openai").expect("Provider kind")),
@@ -901,6 +911,8 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let rate_limited = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: PageSize::new(10).expect("page size"),
                 provider_kind: None,
@@ -928,6 +940,8 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let email_domain_page = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 2,
                 page_size: PageSize::new(2).expect("page size"),
                 provider_kind: None,
@@ -947,6 +961,8 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     let error_accounts = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: PageSize::new(10).expect("page size"),
                 provider_kind: None,
@@ -974,6 +990,8 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
                 group_filter: None,
                 search: None,
                 status: Some(AccountStatus::QuotaPaused),
+                plan_type: None,
+                supplier: None,
                 sort: None,
             },
             Default::default(),
@@ -1265,6 +1283,9 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
     let result = store
         .update_account(
             UpdateAccount {
+                supplier: None,
+                manual_starts_at: None,
+                manual_expires_at: None,
                 name: None,
                 notes: None,
                 model_access: Default::default(),
@@ -1354,6 +1375,9 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
         request_id: "proxy-edit".to_owned(),
     };
     let command = UpdateAccount {
+        supplier: None,
+        manual_starts_at: None,
+        manual_expires_at: None,
         name: None,
         notes: None,
         model_access: Default::default(),
@@ -1431,6 +1455,9 @@ async fn account_rename_preserves_facts_and_is_searchable() {
         request_id: "rename-account".to_owned(),
     };
     let command = UpdateAccount {
+        supplier: None,
+        manual_starts_at: None,
+        manual_expires_at: None,
         account_id: "acct_rename".to_owned(),
         name: Some("  研发团队  ".to_owned()),
         notes: None,
@@ -1455,6 +1482,8 @@ async fn account_rename_preserves_facts_and_is_searchable() {
         let page = store
             .list_accounts(
                 AccountListQuery {
+                    supplier: None,
+                    plan_type: None,
                     page: 1,
                     page_size: PageSize::new(20).unwrap(),
                     provider_kind: None,
@@ -1540,6 +1569,17 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
     let command = UpdateAccount {
         name: None,
         account_id: "acct_notes".to_owned(),
+        supplier: Some("手工备注".to_owned()),
+        manual_starts_at: Some(Some(
+            chrono::DateTime::parse_from_rfc3339("2026-12-01T23:59:00+08:00")
+                .unwrap()
+                .to_utc(),
+        )),
+        manual_expires_at: Some(Some(
+            chrono::DateTime::parse_from_rfc3339("2026-12-31T23:59:00+08:00")
+                .unwrap()
+                .to_utc(),
+        )),
         notes: Some("  团队备用\n下月续费  ".to_owned()),
         enabled: true,
         concurrency_limit: None,
@@ -1559,6 +1599,12 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         .unwrap()
         .account;
     assert_eq!(record.notes.as_deref(), Some("团队备用\n下月续费"));
+    assert_eq!(record.supplier, command.supplier);
+    assert_eq!(record.manual_starts_at, command.manual_starts_at.flatten());
+    assert_eq!(
+        record.manual_expires_at,
+        command.manual_expires_at.flatten()
+    );
     assert_eq!(record.credential_revision.get(), 1);
     let changed_fields: Vec<String> =
         sqlx::query_scalar("select changed_fields from admin_audit_events")
@@ -1609,6 +1655,15 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         .unwrap();
     let records = repository.list_provider_accounts(None, true).await.unwrap();
     assert_eq!(records[0].notes.as_deref(), Some("团队备用\n下月续费"));
+    assert_eq!(records[0].supplier, command.supplier);
+    assert_eq!(
+        records[0].manual_starts_at,
+        command.manual_starts_at.flatten()
+    );
+    assert_eq!(
+        records[0].manual_expires_at,
+        command.manual_expires_at.flatten()
+    );
     let audits: String = sqlx::query_scalar("select json_agg(a)::text from admin_audit_events a")
         .fetch_one(&database.pool)
         .await
@@ -1650,21 +1705,29 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         .update_account(
             UpdateAccount {
                 notes: Some(" \n\t ".to_owned()),
+                supplier: Some(String::new()),
+                manual_starts_at: Some(None),
+                manual_expires_at: Some(None),
                 ..command
             },
             &context,
         )
         .await
         .unwrap();
+    let cleared = store
+        .load_account("acct_notes", AccountRuntimeSnapshot::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .account;
     assert_eq!(
-        store
-            .load_account("acct_notes", AccountRuntimeSnapshot::default())
-            .await
-            .unwrap()
-            .unwrap()
-            .account
-            .notes,
-        None
+        (
+            cleared.notes,
+            cleared.supplier,
+            cleared.manual_starts_at,
+            cleared.manual_expires_at
+        ),
+        (None, None, None, None)
     );
     database.close().await;
 }
@@ -1692,6 +1755,9 @@ async fn invalid_account_notes_roll_back_scheduling_revision_and_audit() {
     let result = admin_account_store(&database.pool)
         .update_account(
             UpdateAccount {
+                supplier: None,
+                manual_starts_at: None,
+                manual_expires_at: None,
                 name: None,
                 account_id: "acct_notes".to_owned(),
                 notes: Some("备".repeat(501)),
@@ -2734,6 +2800,9 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
             pauses: Default::default(),
             quota_settings: None,
             auto_use_quota_credits: None,
+            supplier: None,
+            manual_starts_at: None,
+            manual_expires_at: None,
             name: None,
             notes: None,
             model_access: Default::default(),
@@ -2803,6 +2872,9 @@ async fn credential_rotation_and_settings_share_one_transaction() {
     .await
     .expect("seed group");
     let settings = UpdateAccount {
+        supplier: None,
+        manual_starts_at: None,
+        manual_expires_at: None,
         name: Some("  团队新名称  ".to_owned()),
         account_id: ACCOUNT_ID.to_owned(),
         notes: Some("统一保存".to_owned()),
@@ -3409,6 +3481,7 @@ fn credential_update(account_id: &str, revision: u64, marker: &str) -> ProviderC
         preserve_profile: false,
         preserve_credential_state: false,
         preserve_access_token_expiry: false,
+        native_refresh_plan: None,
         account_id: account_id.to_owned(),
         expected_revision: Revision::new(revision).expect("credential revision"),
         provider_credentials_json: credential_json(marker),
@@ -3588,6 +3661,9 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
     admin_account_store(&database.pool)
         .update_account(
             UpdateAccount {
+                supplier: None,
+                manual_starts_at: None,
+                manual_expires_at: None,
                 name: None,
                 notes: None,
                 model_access: Default::default(),

@@ -574,6 +574,11 @@ WS 握手的轮次元数据头只随首次请求转发，后续帧在正文中�
 不删除工具参数 schema、输入内容或 `client_metadata` 内的同名业务字段；其他未知字段继续透传。
 `prompt_cache_key` 不用于补造会话或线程请求头；客户端未提供缓存键、会话或线程身份时保持缺省
 
+Codex/OAuth 的 Responses Lite 请求在出站时显式使用 `parallel_tool_calls: false`，
+包括无工具、顶层 `tools` 和 `input` 内 `additional_tools` 声明。HTTP 依据实际 Lite 请求头，
+WebSocket 优先依据逐帧 `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`，
+缺少该投影时采用握手头。普通非 Lite 请求及 API Key 上游保留原并行工具语义
+
 发往 Codex/OAuth 的 Responses 请求另按下表处理；API Key 上游保留这些字段。规则只匹配表中列出的位置
 
 | 请求字段 | Codex/OAuth 出站行为 |
@@ -810,8 +815,13 @@ HTTP 瞬时建连失败（含 TLS 握手 EOF），或 WebSocket 新请求在发�
 再次失败刷新有效期，成功结束后解除限制。其他重试策略不受影响，缺少有效身份、状态过期或状态存储不可用时沿用原策略。
 这是一项轮次重试预算控制，不是客户端重试意图的精确检测；状态与交付顺序见[数据面请求生命周期](architecture.md#4-数据面请求生命周期)
 
-`turn_rate_limit_exceeded` 保留原始错误和 `Retry-After`，由客户端按自身重试预算等待。
-代理不因此写入账号冷却、换号或透明重试，其他会话仍可使用该账号
+`turn_rate_limit_exceeded` 在上游明确拒绝、请求可安全重放且尚未交付不可重放输出时，
+直接排除本次请求内的失败账号，按现有调度与换号预算尝试其他账号，不在原账号等待 `Retry-After`。
+该错误不写入账号级冷却，其他会话仍可使用原账号。
+优先亲和模式下，替代账号成功准入时按绑定版本原子接管当前会话，后续请求优先使用新账号；
+并发请求发现绑定已由其他账号接管时，不覆盖该绑定。
+指定账号、原生续接归属、发送结果不明、外部副作用及交付边界仍限制换号；
+没有可用替代账号或预算耗尽时，保留最后一次原始错误与 `Retry-After` 供客户端处理
 
 `/v1/responses` 流式请求尚未发出数据或心跳时，若上游 WS `error` 明确返回 400，
 且网关判定为普通请求参数错误，客户端收到 HTTP 400 和原始 `error` 对象。
@@ -1248,6 +1258,8 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | `GET` | `/api/admin/accounts/import-tasks/detail` | `taskId` | 任务摘要和逐条结果，不含原始凭据 |
 | `POST` | `/api/admin/accounts/import-tasks/stop` | `{ taskId }` | 跳过未开始的条目，已开始的条目继续完成 |
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
+| `POST` | `/api/admin/accounts/groups/move-after-refresh` | `{ provider, sourceGroup, targetGroup, planType }` | 条件式移动最多一名现有成员；只接受当前凭据版本上已确认的原生刷新套餐，返回 `{ moved }` |
+| `POST` | `/api/admin/accounts/oauth/replace-rt` | `{ accountId, expectedCredentialRevision, refreshToken, allowPlanMismatch?, allowWorkspaceAndPlanChange?, allowAnyStatus? }` | 用原固定代理更新空闲 OpenAI OAuth 账号的 RT；成功返回 `{ accountId, credentialRevision }`，不修改备注、代理或调度设置 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 停用账号只启用调度；已启用账号强制清除本地错误/额度/cooldown 事实，不访问上游 |
 | `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, name?, notes?, modelAccess?, outboundProxyId?, connection? }` | 一次更新账号设置；`connection` 支持 OpenAI OAuth 传输方式及 API Key 连接配置，见下文 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
@@ -1266,7 +1278,13 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | `POST` | `/api/admin/accounts/models/refresh` | `{ accountId }` | 强制拉取最新模型并覆盖缓存，响应结构与模型目录查询相同 |
 | `GET` | `/api/admin/accounts/connection-test` | `accountId`、`modelId` | 通过 SSE 返回实时连接测试事件，不作为业务 Responses 用量记录 |
 | `POST` | `/api/admin/accounts/oauth/start` | `{ provider, name, accountId?, outboundProxyId? }` | 为支持登录的 Provider 创建 flow；`accountId` 表示重新授权 |
-| `POST` | `/api/admin/accounts/oauth/complete` | `{ provider, flowId, callbackUrl, settings? }` | 消费 OAuth callback；首次授权可附带账号设置，重新授权保留原设置 |
+| `POST` | `/api/admin/accounts/oauth/complete` | `{ provider, flowId, callbackUrl, settings?, expectedIdentityRevision? }` | 消费 OAuth callback；首次授权可附带账号设置，重新授权保留原设置。OpenAI 重新授权传 `expectedIdentityRevision` 时，提交前校验原凭据版本、邮箱、用户 ID 和 OAuth 主体；实际套餐和工作区可变 |
+
+RT 更新始终核验原邮箱、用户 ID、OAuth 主体和凭据版本。默认也核验原工作区和套餐。仅设置 `allowPlanMismatch: true` 时，仍须匹配原工作区，但不核验或更新套餐。仅设置 `allowWorkspaceAndPlanChange: true` 时，可写回双令牌一致证明的实际工作区和套餐。两者同开时，同工作区保留原套餐；工作区变更时，原子写回 RT 和双令牌一致证明的新工作区及套餐。
+
+默认只更新异常账号。`allowAnyStatus: true` 可显式允许任意状态；如同时设置 `allowWorkspaceAndPlanChange: true`，也必须设置 `allowPlanMismatch: true`。账号必须确认无在途请求。
+
+账号授权、编辑和批量编辑优先使用 `outboundProxyId`。这些入口仍兼容已认证管理调用的旧 `outboundProxyUrl` 字段；两种字段不能同时提交。
 
 ### 查询与账号字段
 
@@ -1345,6 +1363,15 @@ OpenAI OAuth 账号的 `capabilities.quotaSettingsSupported` 为真。通过 `PO
 账号列表和详情返回 `notes`（无备注时为 `null`）。编辑时省略或 `null` 保留原备注；字符串最多 500 个 Unicode
 字符，允许换行和制表符，保存时去除首尾空白，空字符串清空备注。备注独立于上游身份，导入时未显式提供备注、
 重新授权、凭据刷新及批量调度更新均保留已有备注
+
+`supplier`、`manualStartsAt` 和 `manualExpiresAt` 为人工维护的供应商、开始时间和到期时间，与授权备注 `notes`、令牌有效期独立保存，
+仅用于记录，不改变启停和调度。列表和详情返回这三项及后端生成的 `manualStartsAtDisplay`、`manualExpiresAtDisplay`，未填写为 `null`。
+`/api/admin/accounts/update` 省略或传 `null` 保留原值，空字符串清空对应字段。`supplier` 最多 100 个 Unicode 字符，
+不接受控制字符，保存时去除首尾空白；`manualStartsAt`、`manualExpiresAt` 接受带时区的 RFC 3339 时间。导入、重新授权和批量调度更新保留人工信息
+
+列表查询支持 `planType` 按订阅原始类型精确匹配，忽略大小写；`api` 对应 API Key 账号，`unknown` 对应未提供套餐的账号，空值表示不过滤，筛选在分页前执行，可与其他条件组合
+
+列表查询支持 `supplier`，在分页前按供应商名称进行忽略大小写的包含匹配，与状态、分组及账号搜索共同生效，空值表示不过滤
 
 账号视图和 Dashboard 账号概览中的 `planType` 保留原始套餐值；`planTypeDisplay` 使用 Provider 提供的最终名称，
 前端直接展示。OpenAI 的 `prolite`、`pro`、`promax` 分别显示为 `ProLite`、`Pro`、`ProMax`；
@@ -1704,7 +1731,10 @@ OAuth 账号优先按实际周/月额度窗口统计。xAI 缺少可展示的上
 }
 ```
 
-RT-only 使用同一形状，只提交 `refreshToken`。不得把真实 token 写入日志、issue、fixture 或文档
+RT-only 使用同一形状，提交 `refreshToken`，受保护的固定代理管理入口还要求每个条目包含预期 `email`，用于交换前去重及选择代理，交换后的身份必须与该邮箱一致
+
+管理端 RT 快捷入口支持填写账号邮箱并粘贴单个 RT，批量输入使用每行 `邮箱----RT`，邮箱随对应账号条目提交，缺失身份、格式错误及批次内重复在提交前拒绝
+不得把真实 token 写入日志、issue、fixture 或文档
 
 账号导入与首次 OAuth complete 可附带 `settings: { enabled, concurrencyLimit, weight, groupIds, name?, notes?, modelAccess? }`。
 提供 `settings` 时前四项均必填，`concurrencyLimit: null` 继承运行参数，否则为 1–4294967295 的整数；
@@ -1801,8 +1831,7 @@ OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上
   `refreshToken`。刷新响应中的三个 token 字段均按官方语义独立轮换：返回新值时替换，省略时分别保留
   现值。回调地址只承载 `code`/`state`，不以 host/path 形式作为拒绝条件
 - OpenAI 重新授权允许登录另一个上游账号。保留本地账号 ID、名称和调度设置，按新授权更新令牌、
-  上游用户与工作区 ID、邮箱和套餐。同一用户和工作区保留最近的额度快照，后台查询成功后按上游窗口更新。
-  用户或工作区变更时清除原身份的额度快照和耗尽状态。
+  上游用户与工作区 ID、邮箱和套餐。换号时清除旧账号的额度快照和耗尽状态，新额度由后台重新查询。
   无法识别新用户或新身份已绑定其他记录时，原账号保持不变
 - OAuth 账号文件导入和 OAuth complete（包括重新授权）在 credential 提交后后台尝试一次额度观测，不等待
   观测完成才返回成功。观测失败只记录告警，不回滚已提交的账号；手工或后台 RT 刷新只更新 token，
@@ -1820,8 +1849,8 @@ OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上
   本次耗尽之后的已记录窗口 reset 全部到期后，新查询明确 `allowed=true` 可解除限制，即使用量仍为
   100%。未知 reset 或再次拒绝后残留的旧 reset 仍走原规则，不复用旧边界解封；时间到期本身不会
   解除限制，也不会将展示用量归零
-- 停用的 OpenAI 与 xAI OAuth 账号退出客户端请求调度，仍按各自策略续期 Token、查询额度。
-  成功刷新后账号保持停用。无 refresh token 或凭据已进入失效、无效、
+- 账号 `enabled` 控制是否参与请求调度，不控制 OAuth 凭据续期。OpenAI 与 xAI 的停用账号仍按各自刷新
+  策略维护 Token；刷新结果更新凭据状态，但不会启用调度。无 refresh token 或凭据已进入失效、无效、
   封禁状态的账号不参加后台自动续期
 - `POST /api/admin/accounts/recover` 对停用账号只将 `enabled` 改为 `true`，保留已有额度快照、凭据、错误和 Redis
   cooldown；启用后仍按这些事实投影状态，不会把已有错误或耗尽改成正常。对已启用账号则执行强制恢复：
@@ -1832,7 +1861,7 @@ OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上
   `errorReason` 区分。OpenAI 额度查询返回 `401 token_revoked` 时，当前访问令牌立即按过期处理，
   已启用账号投影为 `error`，已有 refresh token 仍可续期。取得新访问令牌后按已有额度事实显示状态。
   其他额度 401/403 保留原状态，refresh token 是否永久失效由 OAuth 续期结果判断
-- xAI 额度百分比取自 `creditUsagePercent`，缺失时为未知。
+- xAI 额度百分比只读取 `creditUsagePercent`，缺失时保持未知，不由旧月额度与用量计算。
   预付余额保留上游账本符号，非零余额及剩余按量额度可独立证明可用；窗口已过期或缺少可用证据时，
   不凭旧快照恢复账号
 - 正常 Responses 请求会解析上游响应的 rate-limit headers，合并进同一 quota 快照并同步状态。Free、
@@ -1974,13 +2003,15 @@ revision 变化时丢弃结果
 }
 ```
 
-消费响应只返回上游结果 `code` 和可选 `credit`。消费端确认成功后应重新 GET 卡片列表，并显式调用
-`POST /api/admin/accounts/quota/refresh` 回读上游额度；未提供 `quotaRefresh` 能力时不发起该查询。
+消费响应返回上游结果 `code` 和可选 `credit`。服务端确认 `reset` 或 `already_redeemed` 后保存独立的额度核验任务，立即回读上游额度。
+刷新失败或上游仍返回消费前的周窗口时，后台只重试额度查询，不重新消费卡片，服务重启后继续核验。
+客户端可重新 GET 卡片列表并刷新账号显示，无需承担唯一的额度刷新责任。
 不得因为消费成功直接改写本地 `resetAt` 或解除冻结。xAI 不支持该能力
 
 消费期间账号身份或凭据版本变化时返回结果未知，不将旧结果套用到新绑定账号
 
-自动使用通过 `/api/admin/accounts/reset-credits/automation` 按账号开启，默认关闭；账号本身停用时暂停执行。
+运行设置 `resetCreditDefaultEnabled` 控制未单独设置账号的默认自动用卡，初始为 `false`。新导入和现有未配置的账号动态继承，
+通过 `/api/admin/accounts/reset-credits/automation` 保存的单账号开关优先，单独关闭不会被全局开启覆盖。账号本身停用时不自动消费。
 GET 和 POST 均返回 `enabled`、`leadMinutes`、`weeklyTriggerRemainingPercent`、`nextDiscoveryAtDisplay`、`nextConsumeAtDisplay`、`lastResult`，
 时间展示沿用部署时区，无计划时为 `null`。运行设置 `resetCreditLeadMinutes` 默认 10，范围 1～1440 分钟
 
@@ -1995,10 +2026,13 @@ GET 和 POST 均返回 `enabled`、`leadMinutes`、`weeklyTriggerRemainingPercen
 
 开启后在一分钟内错峰执行首次发现，此后按部署时区每天随机发现一次，普通发现失败也等待下一日。
 临期模式在提前窗口内错峰执行；周额度模式在有卡且本地快照达线时刷新上游周额度核实。两者消费前均重新查询卡片；已在其他地方使用或已到期的卡片
+自动用卡账号在约五至六分钟的错峰周期内核对周额度。周额度已耗尽时，即使从未打开卡片弹窗、原发现排程未到期或卡片未进入提前窗口，也会主动查询可用卡片。
+仅确认仍可用且未到期的卡片参与自动消费，消费前仍重新核对剩余周额度上限。卡片的日常发现和临近到期计划保留原有独立排程。
 会移出计划，查询失败不直接消费。上游返回 `already_redeemed` 后结束该次操作，不切换另一张卡重试。
-无卡片 ID 或到期时间时不自动消费；每天发现一次可能错过两次发现之间发放并到期的卡片
+无卡片 ID 或到期时间时不自动消费。未耗尽的账号仍按日常发现和提前窗口判断，不把短期或模型专属额度触顶当作周额度耗尽
 
-`lastResult` 的 `pending` 表示消费结果待确认；重试沿用已持久化的幂等键，重启或关闭再开启也不换键。
+`lastResult` 的 `quota_refresh_pending` 表示消费已经确认但额度核验尚未完成，自动用卡关闭时也继续执行该只读核验。
+`pending` 表示消费结果待确认；重试沿用已持久化的幂等键，重启或关闭再开启也不换键。
 `expired_unknown` 表示未确认操作的卡片已经到期，停止重试；`reset`、`already_redeemed` 表示对应终态，
 `discovery_failed` 表示最近查询失败，`not_redeemed` 表示上游明确未完成消费。
 `weekly_quota_above_threshold` 表示剩余周额度高于上限，`weekly_quota_unavailable` 表示暂时无法确认周额度；
@@ -2862,6 +2896,7 @@ Dashboard 默认 `period=today`，用量、诊断和错误查询默认 `period=7
 Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚点
 
 请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountSearch`、`model`、`status` 和 `errorOrigin`。
+`accountName` 是 `accountSearch` 的兼容别名，两者不能同时传入。
 汇总和洞察接受时间范围与 `provider`；性能和成本另要求 `metric`，诊断另接受 `dimension`、`model` 和 `statusCode`。
 各接口拒绝未知参数，明细筛选不改变顶部统计范围
 
@@ -2935,8 +2970,9 @@ HTTP SSE 请求可能在返回 HTTP 200 后流内失败；WebSocket 已升级时
 
 管理端请求列表与详情保留 `requestedModel`（客户端请求）与 `upstreamModel`（网关发送）
 
-请求明细的 `clientApiKeyName` 匹配 Key 名称，`accountSearch` 匹配账号名称或邮箱。
-这些筛选仅使用历史快照，可与时间、状态等条件组合。`model` 匹配请求模型或上游模型。以上文本筛选均按区分大小写的字面量包含匹配，`%`、`_` 和 `\` 按普通字符处理
+请求明细的 `clientApiKeyName` 按字面量包含匹配请求保存的历史 Key 名称快照，区分大小写。
+`accountSearch` 按字面量包含匹配历史账号名称、邮箱快照或账号 ID，不区分大小写，名称为空时仍可按邮箱或 ID 查询。
+筛选不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
 
 运维错误列表的 `search` 使用字面量包含匹配，`%`、`_` 和 `\` 按普通字符处理，不支持密钥值或可见前缀搜索。
 请求详情通过 `/api/admin/usage/records/detail?id=...` 查询

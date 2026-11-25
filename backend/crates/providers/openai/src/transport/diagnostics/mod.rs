@@ -48,9 +48,8 @@ pub enum CodexFailureCategory {
     /// 当前用量窗口已经耗尽，但存在自动恢复的重置时间
     UsageLimitExhausted,
     RateLimited,
-    /// 当前 turn 的限流交给客户端等待，不据此推导账号级冷却
+    /// 当前 turn 的明确拒绝允许请求内安全换号，不据此推导账号级冷却
     TurnRateLimited,
-    /// 上游 API 支出已达上限，本次请求终止，作用范围由原始错误码标识
     SpendLimitExceeded,
     QuotaExhausted,
     CloudflareChallenge,
@@ -78,6 +77,7 @@ pub struct CodexUpstreamFailure {
     pub(crate) raw_body: String,
     pub(crate) client_response: Option<Box<CodexClientVisibleUpstreamResponse>>,
     pub(crate) identity_error_code: Option<String>,
+    pub(crate) has_identity_authorization_error: bool,
     /// 官方 `usage_limit_reached` 错误体携带的窗口重置时间（Unix 秒）
     pub(crate) usage_limit_resets_at: Option<i64>,
     pub(crate) retry_after_seconds: Option<u64>,
@@ -127,6 +127,7 @@ impl CodexUpstreamFailure {
             raw_body: body.to_owned(),
             client_response: client_response.cloned().map(Box::new),
             identity_error_code: diagnostics.identity_error_code.clone(),
+            has_identity_authorization_error: diagnostics.identity_authorization_error.is_some(),
             usage_limit_resets_at: (category == CodexFailureCategory::UsageLimitExhausted)
                 .then_some(fields.resets_at)
                 .flatten(),
@@ -182,6 +183,7 @@ impl CodexUpstreamFailure {
             raw_body: failure.raw_body().to_owned(),
             client_response: None,
             identity_error_code: diagnostics.identity_error_code.clone(),
+            has_identity_authorization_error: diagnostics.identity_authorization_error.is_some(),
             usage_limit_resets_at: None,
             retry_after_seconds: failure.retry_after_seconds,
             no_more_retry: failure.no_more_retry,
@@ -226,6 +228,7 @@ impl CodexUpstreamFailure {
                         | CodexFailureCategory::Banned
                         | CodexFailureCategory::UsageLimitExhausted
                         | CodexFailureCategory::RateLimited
+                        | CodexFailureCategory::TurnRateLimited
                         | CodexFailureCategory::QuotaExhausted
                         | CodexFailureCategory::CloudflareChallenge
                         | CodexFailureCategory::CloudflarePathBlocked
@@ -470,14 +473,14 @@ fn classify_upstream_failure(
         return CodexFailureCategory::TurnRateLimited;
     }
     if matches!(status, None | Some(StatusCode::TOO_MANY_REQUESTS))
-        && matches!(
-            fields.code.as_deref(),
-            Some(
+        && [code.as_str(), error_type.as_str()].into_iter().any(|value| {
+            matches!(
+                value,
                 "api_key_spend_limit_exceeded"
                     | "project_spend_limit_exceeded"
                     | "organization_spend_limit_exceeded"
             )
-        )
+        })
     {
         return CodexFailureCategory::SpendLimitExceeded;
     }

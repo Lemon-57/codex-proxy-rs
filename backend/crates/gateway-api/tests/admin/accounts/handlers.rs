@@ -10,6 +10,185 @@ use tower::ServiceExt as _;
 use super::super::{AdminTestFixture, AdminTestState};
 
 #[tokio::test]
+async fn replace_rt_explicit_profile_change_preserves_idle_and_status_guards() {
+    use gateway_admin::model::provider_credentials::ProviderQuota;
+    use gateway_core::account::{AccountStatus, AccountStatusFacts, CredentialState, QuotaState};
+    use serde_json::json;
+
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    *fixture.provider_quota.lock().unwrap() = Some(ProviderQuota::default());
+    let account = account_page_item(
+        AccountStatusFacts {
+            quota_paused: false,
+            enabled: true,
+            credential_state: CredentialState::Ready,
+            access_token_expires_at: None,
+            quota: QuotaState::unknown(),
+            cooldown: None,
+            last_error_reason: None,
+            last_error_message: None,
+        },
+        chrono::Utc::now(),
+        "oauth",
+    );
+    let router = admin::accounts::router::<AdminTestState>().with_state(fixture.state());
+    for (
+        account_status,
+        used_slots,
+        allow_any_status,
+        allow_plan_mismatch,
+        change_profile,
+        expected,
+    ) in [
+        (
+            AccountStatus::Normal,
+            Some(0),
+            false,
+            true,
+            false,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Error,
+            Some(0),
+            false,
+            false,
+            true,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(0),
+            true,
+            true,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Disabled,
+            Some(0),
+            true,
+            true,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::QuotaExhausted,
+            Some(0),
+            true,
+            true,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(1),
+            true,
+            true,
+            false,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Normal,
+            None,
+            true,
+            true,
+            false,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Error,
+            Some(0),
+            false,
+            true,
+            true,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(0),
+            false,
+            true,
+            true,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(0),
+            true,
+            true,
+            true,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Disabled,
+            Some(0),
+            true,
+            true,
+            true,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(1),
+            true,
+            true,
+            true,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Normal,
+            None,
+            true,
+            true,
+            true,
+            StatusCode::CONFLICT,
+        ),
+        (
+            AccountStatus::Normal,
+            Some(0),
+            true,
+            false,
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut row = account.clone();
+        row.projection.status = account_status;
+        row.capacity.used_slots = used_slots;
+        *fixture.account.lock().unwrap() = Some(row);
+        let mut body = json!({
+            "accountId": "acct_cooldown",
+            "expectedCredentialRevision": 1,
+            "refreshToken": "fixture-rt",
+            "allowPlanMismatch": allow_plan_mismatch,
+            "allowWorkspaceAndPlanChange": change_profile,
+        });
+        if allow_any_status {
+            body["allowAnyStatus"] = json!(true);
+        }
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/admin/accounts/oauth/replace-rt")
+                    .header("x-request-id", "req_replace_rt")
+                    .header(header::COOKIE, "cpr_session=valid-session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            expected,
+            "{account_status:?}, {used_slots:?}, {allow_any_status}, {allow_plan_mismatch}, {change_profile}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn peer_refresh_uses_the_account_quota_endpoint_and_requires_admin() {
     use gateway_core::account::{AccountStatusFacts, CredentialState, QuotaState};
     let fixture = AdminTestFixture::new().await;
@@ -415,6 +594,9 @@ fn account_page_item(
             quota_paused: false,
             quota_settings: Default::default(),
             auto_use_quota_credits: false,
+            supplier: None,
+            manual_starts_at: None,
+            manual_expires_at: None,
             outbound_proxy_id: None,
             outbound_proxy_enabled: true,
             id: "acct_cooldown".to_owned(),
@@ -812,5 +994,24 @@ async fn concurrency_details_require_admin_validate_paging_and_report_lease_time
                 "2026-10-17 07:59:45"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn diagnostic_rejects_ordinary_admin_session_and_unauthenticated_request() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    for authenticated in [false, true] {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/admin/accounts/diagnostic")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-request-id", "req_diagnostic_identity");
+        if authenticated {
+            builder = builder.header(header::COOKIE, "cpr_session=valid-session");
+        }
+        let response=admin::router::<AdminTestState>().with_state(fixture.state())
+            .oneshot(builder.body(Body::from(r#"{"accountId":"acct_test","modelId":"gpt-6.1-sol","body":{"input":"21"}}"#)).unwrap()).await.unwrap();
+        assert!(response.status().is_client_error());
     }
 }

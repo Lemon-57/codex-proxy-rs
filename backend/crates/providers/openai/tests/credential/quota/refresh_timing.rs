@@ -278,10 +278,10 @@ async fn exhausted_reset_refreshes_quickly_then_backs_off_and_recovers_from_usag
 }
 
 #[tokio::test]
-async fn disabled_account_with_expired_window_synchronizes_at_reset_grace() {
+async fn allowed_account_with_expired_window_synchronizes_at_reset_grace() {
     let mut now = SystemTime::now();
     let store = Arc::new(MemoryAccountStore::default());
-    create_account_with_enabled(&store, "acct_allowed_expired_window", false).await;
+    create_account(&store, "acct_allowed_expired_window").await;
     let account = store
         .account("acct_allowed_expired_window")
         .expect("account");
@@ -351,6 +351,29 @@ async fn disabled_account_with_expired_window_synchronizes_at_reset_grace() {
         .await
         .expect("skip fresh window");
     assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+}
+
+#[tokio::test]
+async fn disabling_an_account_prevents_periodic_quota_queries_at_reset() {
+    let now = SystemTime::now();
+    let store = Arc::new(MemoryAccountStore::default());
+    let account_id = "acct_disabled_expired_window";
+    create_account(&store, account_id).await;
+    let account = store.account(account_id).unwrap();
+    let server = MockServer::start().await;
+    let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
+    let reset = now.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64 - 114;
+    mount_usage(&server, json!({"rate_limit": {"allowed": true, "primary_window": {
+        "used_percent": 100, "reset_at": reset, "limit_window_seconds": 18_000,
+    }}})).await;
+    service.refresh_account(account.id()).await.expect("seed quota snapshot");
+    store.set_enabled(account.id(), false).await.unwrap();
+    mount_usage(&server, json!({"rate_limit": {"allowed": true, "primary_window": {
+        "used_percent": 0, "reset_at": reset + 18_000, "limit_window_seconds": 18_000,
+    }}})).await;
+    let summary = service.synchronize_at(reset_grace(reset)).await.expect("quota cycle");
+    assert_eq!(summary.updated, 0);
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

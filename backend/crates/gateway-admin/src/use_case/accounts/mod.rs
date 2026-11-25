@@ -24,7 +24,7 @@ use crate::{
         accounts::{
             AccountConnectionTestEvent, AccountConnectionTestEventStream, AccountListQuery,
             AccountPageItem, AccountUpdateResult, AccountUsage, AccountUsageWindowQuery,
-            AccountsUpdateResult, BatchUpdateAccounts, UpdateAccount,
+            AccountsUpdateResult, BatchUpdateAccounts, NativeRefreshGroupMove, UpdateAccount,
         },
         client_keys::ClientKeyBudgetReference,
         observability::TimeRange,
@@ -57,6 +57,14 @@ const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 /// 统一账号页消费的服务
 #[async_trait]
 pub trait AccountsService: Send + Sync {
+    async fn move_native_refresh_group_member(
+        &self,
+        _context: &MutationContext,
+        _command: NativeRefreshGroupMove,
+    ) -> Result<bool, AdminError> {
+        Err(AdminError::internal("原生刷新归组不可用"))
+    }
+
     async fn concurrency(
         &self,
         account_id: ProviderAccountId,
@@ -183,6 +191,16 @@ pub trait AccountsService: Send + Sync {
         &self,
         account_id: &ProviderAccountId,
     ) -> Result<ProviderModelCatalogDocument, AdminError>;
+
+    /// 仅受保护管理端可调用，不更改账号启停或客户路由
+    async fn diagnose(
+        &self,
+        _account_id: ProviderAccountId,
+        _upstream_model: UpstreamModelId,
+        _body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<gateway_core::engine::probe::AccountProbeResult, AdminError> {
+        Err(AdminError::invalid("账号诊断接口不可用"))
+    }
 
     async fn test_connection(
         &self,
@@ -534,6 +552,61 @@ impl DefaultAccountsService {
 
 #[async_trait]
 impl AccountsService for DefaultAccountsService {
+    async fn move_native_refresh_group_member(
+        &self,
+        context: &MutationContext,
+        command: NativeRefreshGroupMove,
+    ) -> Result<bool, AdminError> {
+        let candidates = self
+            .accounts
+            .native_refresh_group_candidates(&command)
+            .await
+            .map_err(|error| map_store_error(error, "native refresh observations"))?;
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+        let ids = candidates
+            .iter()
+            .map(|candidate| candidate.account_id.clone())
+            .collect::<Vec<_>>();
+        let runtime = self
+            .account_runtime
+            .account_runtime(&ids)
+            .await
+            .map_err(|error| map_store_error(error, "account runtime"))?;
+        let Some(in_flight) = runtime.in_flight else {
+            return Ok(false);
+        };
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| in_flight.get(&candidate.account_id).copied().unwrap_or(0) == 0)
+        else {
+            return Ok(false);
+        };
+        let provider = self
+            .providers
+            .require(&command.provider)
+            .map_err(|error| map_provider_error(error, "provider account"))?;
+        let account_id = ProviderAccountId::new(candidate.account_id.clone())
+            .map_err(|_| AdminError::internal("原生刷新归组账号 ID 不合法"))?;
+        let Some(revision) = self
+            .accounts
+            .move_native_refresh_group_member(&command, candidate, context)
+            .await
+            .map_err(|error| map_store_error(error, "native refresh group update"))?
+        else {
+            return Ok(false);
+        };
+        super::notify_account_facts_changed(
+            self.upstream_info.as_deref(),
+            provider.as_ref(),
+            &[account_id],
+        )
+        .await;
+        publish_committed(self.snapshot.as_ref(), revision).await?;
+        Ok(true)
+    }
+
     async fn concurrency(
         &self,
         account_id: ProviderAccountId,
@@ -1233,10 +1306,11 @@ impl AccountsService for DefaultAccountsService {
             .await
             .map_err(|e| map_store_error(e, "reset-credit automation"))?
             .is_some_and(|record| {
-                record
-                    .state
-                    .pending
-                    .is_some_and(|pending| pending.credit.expires_at > Utc::now())
+                record.state.quota_refresh.is_some()
+                    || record
+                        .state
+                        .pending
+                        .is_some_and(|pending| pending.credit.expires_at > Utc::now())
             })
         {
             return Err(AdminError::new(
@@ -1244,7 +1318,19 @@ impl AccountsService for DefaultAccountsService {
                 "自动重置结果待确认，请稍后刷新",
             ));
         }
-        self.consume_reset_credit_upstream(context, command).await
+        let account_id = command.account_id.clone();
+        let baseline = self.quota_refresh_baseline(&account_id).await;
+        let result = self.consume_reset_credit_upstream(context, command).await?;
+        if matches!(result.code.as_str(), "reset" | "already_redeemed") {
+            self.remember_consumed_quota_refresh(&account_id, baseline, &result.code)
+                .await
+                .map_err(|_| {
+                    AdminError::upstream_result_unknown(
+                        "重置卡已返回确认结果，但额度核验任务尚未保存，请核对后沿用原操作编号",
+                    )
+                })?;
+        }
+        Ok(result)
     }
 
     async fn models(
@@ -1268,6 +1354,44 @@ impl AccountsService for DefaultAccountsService {
             .model_catalog_document(account_id)
             .await
             .map_err(|error| map_provider_error(error, "provider model catalog document"))
+    }
+
+    async fn diagnose(
+        &self,
+        account_id: ProviderAccountId,
+        upstream_model: UpstreamModelId,
+        mut body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<gateway_core::engine::probe::AccountProbeResult, AdminError> {
+        let (stored, _) = self.provider_for_account(&account_id).await?;
+        if stored.account.provider_kind.as_str() != "openai" {
+            return Err(AdminError::invalid("诊断仅支持 OpenAI 账号"));
+        }
+        body.insert(
+            "model".to_owned(),
+            serde_json::Value::String(upstream_model.as_str().to_owned()),
+        );
+        body.insert("store".to_owned(), serde_json::Value::Bool(false));
+        body.insert("stream".to_owned(), serde_json::Value::Bool(true));
+        if body.contains_key("previous_response_id") || body.contains_key("tools") {
+            return Err(AdminError::invalid("诊断不支持工具或会话续接"));
+        }
+        let payload = gateway_core::operation::ProtocolPayload::json_object("openai", body)
+            .map_err(|_| AdminError::invalid("诊断请求无效"))?;
+        let operation = gateway_core::operation::Operation::Generate(
+            gateway_core::operation::GenerateRequest::from_protocol_payload(payload),
+        );
+        self.probe
+            .probe(
+                AccountProbeRequest {
+                    target: AccountProbeTarget::ConnectionTest(account_id),
+                    provider_kind: stored.account.provider_kind,
+                    upstream_model,
+                    operation,
+                },
+                None,
+            )
+            .await
+            .map_err(|_| AdminError::invalid("账号诊断未能完成，上游请求不自动重放"))
     }
 
     async fn test_connection(

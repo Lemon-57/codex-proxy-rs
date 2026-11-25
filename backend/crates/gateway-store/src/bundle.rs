@@ -7,6 +7,7 @@ use super::*;
 
 /// 已完成连接、迁移与 hydration 的 Store 能力集合
 pub struct StoreBundle {
+    account_state_notifications: gateway_core::account::AccountStateNotifications,
     pool: sqlx::PgPool,
     diagnostics: Arc<dyn gateway_core::diagnostics::OperationalDiagnostics>,
     admin_ports: AdminStorePorts,
@@ -30,6 +31,10 @@ impl StoreBundle {
             .map_err(|source| postgres_unavailable("load peer routing identity", source))
     }
 
+    #[must_use]
+    pub fn account_state_notifications(&self) -> gateway_core::account::AccountStateNotifications {
+        self.account_state_notifications.clone()
+    }
     #[must_use]
     pub fn diagnostics(&self) -> Arc<dyn gateway_core::diagnostics::OperationalDiagnostics> {
         self.diagnostics.clone()
@@ -144,13 +149,15 @@ async fn connect(
         .await
         .map_err(|source| redis_unavailable("connect Redis manager", source))?;
 
+    let account_state_notifications = gateway_core::account::AccountStateNotifications::default();
     let cooldowns = Arc::new(redis::RedisCredentialCooldownRepository::new(
         redis_connection.clone(),
         REDIS_NAMESPACE,
     )?);
     let provider_accounts = Arc::new(
         postgres::PgProviderAccountRepository::new(pool.clone())
-            .with_account_error_protection(cooldowns.clone()),
+            .with_account_error_protection(cooldowns.clone())
+            .with_state_notifications(account_state_notifications.clone()),
     );
     let account_store: Arc<dyn ProviderAccountStore> = provider_accounts;
 
@@ -339,6 +346,7 @@ async fn connect(
         postgres::PgRequestAnalyticsRepository::new(pool.clone(), observability_query_budget)
             .with_projection_work_mem_mb(config.pool.analytics_projection_work_mem_mb);
     Ok(StoreBundle {
+        account_state_notifications,
         pool,
         analytics,
         diagnostics,

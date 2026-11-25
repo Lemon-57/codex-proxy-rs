@@ -2,6 +2,107 @@
 
 use super::*;
 
+#[tokio::test]
+async fn proxied_http_pool_reuses_connections_without_retaining_the_burst() {
+    use gateway_core::account::OutboundProxy;
+    use provider_openai::transport::client::build_account_http_client;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy =
+        OutboundProxy::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let client = build_account_http_client("acct_idle_pool_capacity", Some(&proxy)).unwrap();
+    let active = Arc::new(AtomicUsize::new(0));
+    let opened = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let accept = {
+        let active = Arc::clone(&active);
+        let opened = Arc::clone(&opened);
+        let gate = Arc::clone(&gate);
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                active.fetch_add(1, Ordering::SeqCst);
+                opened.fetch_add(1, Ordering::SeqCst);
+                let active = Arc::clone(&active);
+                let gate = Arc::clone(&gate);
+                tokio::spawn(async move {
+                    loop {
+                        let mut request = Vec::new();
+                        let mut byte = [0_u8; 1];
+                        while !request.ends_with(b"\r\n\r\n") {
+                            match socket.read(&mut byte).await {
+                                Ok(0) | Err(_) => {
+                                    active.fetch_sub(1, Ordering::SeqCst);
+                                    return;
+                                }
+                                Ok(_) => request.push(byte[0]),
+                            }
+                        }
+                        let permit = gate.acquire().await.unwrap();
+                        permit.forget();
+                        if socket
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                            .await
+                            .is_err()
+                        {
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                });
+            }
+        })
+    };
+    let mut requests = Vec::new();
+    for _ in 0..12 {
+        let client = client.clone();
+        requests.push(tokio::spawn(async move {
+            client
+                .get("http://upstream.invalid/")
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap()
+        }));
+    }
+    timeout(Duration::from_secs(5), async {
+        while active.load(Ordering::SeqCst) != 12 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // 在途请求完整返回，只有归还到池中的多余空闲socket被关闭
+    gate.add_permits(12);
+    for request in requests {
+        assert_eq!(request.await.unwrap(), "OK");
+    }
+    timeout(Duration::from_secs(5), async {
+        while active.load(Ordering::SeqCst) > 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let previous = opened.load(Ordering::SeqCst);
+    gate.add_permits(1);
+    assert_eq!(
+        client
+            .get("http://upstream.invalid/")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "OK"
+    );
+    assert_eq!(opened.load(Ordering::SeqCst), previous);
+    drop(client);
+    accept.abort();
+}
+
 #[test]
 fn custom_ca_should_report_environment_cache_key_consistently() {
     const CASE_ENV: &str = "CODEX_PROXY_TEST_CUSTOM_CA_CACHE_KEY_CASE";

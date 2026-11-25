@@ -113,7 +113,7 @@ export default antfu(
         localeDir: {
           pattern: './src/i18n/locales/*/*.json',
           localeKey: 'path',
-          localePattern: /\/locales\/(?<locale>[^/]+)\//,
+          localePattern: /[/\\]locales[/\\](?<locale>[^/\\]+)[/\\]/,
         },
         messageSyntaxVersion: '^11.0.0',
       },

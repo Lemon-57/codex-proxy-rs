@@ -32,6 +32,7 @@ impl DashboardQuery {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageQuery {
     pub client_api_key_name: Option<String>,
+    #[serde(alias = "accountName")]
     pub account_search: Option<String>,
     pub status: Option<String>,
     pub error_origin: Option<String>,

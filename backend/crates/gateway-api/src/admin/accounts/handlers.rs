@@ -15,6 +15,10 @@ where
         .merge(super::import_tasks::router::<S>())
         .route("/api/admin/accounts", get(list_accounts::<S>))
         .route(
+            "/api/admin/accounts/diagnostic",
+            post(diagnose_account::<S>),
+        )
+        .route(
             "/api/admin/accounts/concurrency",
             get(super::concurrency::list::<S>),
         )
@@ -22,6 +26,14 @@ where
         .route("/api/admin/accounts/export", get(export_accounts::<S>))
         .route("/api/admin/accounts/import", post(import_accounts::<S>))
         .route("/api/admin/accounts/refresh", post(refresh_account::<S>))
+        .route(
+            "/api/admin/accounts/groups/move-after-refresh",
+            post(move_native_refresh_group_member::<S>),
+        )
+        .route(
+            "/api/admin/accounts/oauth/replace-rt",
+            post(replace_account_rt::<S>),
+        )
         .route("/api/admin/accounts/recover", post(recover_account::<S>))
         .route("/api/admin/accounts/update", post(update_account::<S>))
         .route("/api/admin/accounts/delete", post(delete_accounts::<S>))
@@ -76,6 +88,27 @@ where
             "/api/admin/accounts/oauth/complete",
             post(complete_account_authorization::<S>),
         )
+}
+
+async fn move_native_refresh_group_member<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<NativeRefreshGroupMoveRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let command = request.into_command().map_err(map_wire_error)?;
+    let moved = state
+        .admin_services()
+        .accounts()
+        .move_native_refresh_group_member(&auth.context().mutation_context(), command)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(serde_json::json!({ "moved": moved })),
+    ))
 }
 
 async fn batch_update_accounts<S>(
@@ -336,6 +369,51 @@ where
         .await
         .map_err(map_service_error)?;
     let data = account_refresh_data(result, Utc::now(), time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+async fn replace_account_rt<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<ReplaceAccountRtRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync + 'static,
+{
+    let allow_any_status = request.allow_any_status;
+    let (account_id, provider_material) = request.into_parts().map_err(map_wire_error)?;
+    let services = state.admin_services();
+    let current = services
+        .accounts()
+        .quota(&account_id, false)
+        .await
+        .map_err(map_service_error)?;
+    if current.capacity.used_slots != Some(0) {
+        return Err(AdminError::conflict(
+            "账号仍有在途请求或并发状态未知，未更新 RT",
+        ));
+    }
+    if !allow_any_status && current.projection.status != gateway_core::account::AccountStatus::Error
+    {
+        return Err(AdminError::conflict("此操作只允许更新异常账号 RT"));
+    }
+    let provider = ProviderKind::new("openai").map_err(|_| AdminError::internal())?;
+    let saved = services
+        .credentials()
+        .for_provider(&provider)
+        .map_err(map_service_error)?
+        .rotate(RotateCredential {
+            mutation: CredentialMutation {
+                context: auth.context().mutation_context(),
+                account_id,
+            },
+            provider_material,
+            settings: None,
+        })
+        .await
+        .map_err(map_service_error)?;
+    let revision = saved.credential_revision.ok_or_else(AdminError::internal)?;
+    let data = serde_json::json!({"accountId": saved.account_id.to_string(), "credentialRevision": revision.get()});
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
 }
 
@@ -690,5 +768,39 @@ where
     Ok(AdminResponse::new(
         StatusCode::OK,
         AdminEnvelope::ok(AccountResetCreditAutomationData::from((result, time))),
+    ))
+}
+
+/// 接口只接受已经通过 AdminAuth 的调用，账号始终保持原调度状态
+async fn diagnose_account<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<AccountDiagnosticRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    if !matches!(&auth.context().principal, gateway_admin::model::auth::AdminPrincipal::Plugin { instance_id } if instance_id == "56483a1c-0a29-8744-9e91-06334612b8b8")
+    {
+        return Err(map_service_error(AdminServiceError::invalid(
+            "诊断入口仅允许已登记的巡检插件",
+        )));
+    }
+    request.validate().map_err(map_wire_error)?;
+    let account = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let model = UpstreamModelId::new(request.model_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("modelId")))?;
+    let result = state
+        .admin_services()
+        .accounts()
+        .diagnose(account, model, request.body)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(
+            serde_json::json!({"text":result.text.concat(),"completed":result.completed_text}),
+        ),
     ))
 }

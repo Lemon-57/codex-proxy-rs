@@ -20,6 +20,8 @@ export function useAccountEditor(options: {
   const editingAccount = shallowRef<Account | null>(null)
   const name = shallowRef('')
   const notes = shallowRef('')
+  const supplier = shallowRef('')
+  const manualExpiresAt = shallowRef<string | null>(null)
   const schedulingEnabled = shallowRef(true)
   const concurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
@@ -74,6 +76,8 @@ export function useAccountEditor(options: {
     editingAccount.value = account
     name.value = account.name
     notes.value = account.notes ?? ''
+    supplier.value = account.supplier ?? ''
+    manualExpiresAt.value = account.manualExpiresAt
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = account.enabled
@@ -107,6 +111,8 @@ export function useAccountEditor(options: {
         accountId: account.id,
         name: accountNameUpdate(name.value, account.name),
         notes: notes.value,
+        supplier: supplier.value,
+        manualExpiresAt: manualExpiresAt.value || '',
         outboundProxyId: proxyMode.value === 'preserve'
           ? undefined
           : proxyMode.value === 'deployment'
@@ -174,6 +180,8 @@ export function useAccountEditor(options: {
     editingAccount,
     name,
     notes,
+    supplier,
+    manualExpiresAt,
     schedulingEnabled,
     concurrencyLimit,
     weight,

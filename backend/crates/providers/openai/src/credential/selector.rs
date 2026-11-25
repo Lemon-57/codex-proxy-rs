@@ -596,7 +596,7 @@ impl CodexCredentialSelector {
                 .collect());
         }
         if diagnostic {
-            return Ok(self.repository.list_for_provider(false).await?);
+            return Ok(self.repository.list_for_provider().await?);
         }
         let account_ids: Vec<_> = attempt
             .account_scope()
@@ -1528,13 +1528,17 @@ impl CodexCredentialSelector {
                     ProviderLeaseAcquisition::Acquired(guard) => guard,
                 };
                 let mut binding_account = image_primary_to_keep.unwrap_or(account.id());
+                let binding_recovery = binding.as_ref().is_some_and(|primary| {
+                    request.attempt.session_binding_recovery_from() == Some(primary.account_id())
+                });
                 if affinity_mode == AccountAffinity::Preferred
                     && let Some(primary) = binding.as_ref()
                     && (primary.account_id() == account.id()
                         || pinned_account.is_some()
-                        || !self
-                            .preferred_primary_needs_migration(primary, queue_policy.timeout)
-                            .await?)
+                        || (!binding_recovery
+                            && !self
+                                .preferred_primary_needs_migration(primary, queue_policy.timeout)
+                                .await?))
                 {
                     binding_account = primary.account_id();
                 }
@@ -1564,7 +1568,11 @@ impl CodexCredentialSelector {
                             admission,
                             cache_preference && affinity_mode == AccountAffinity::Preferred,
                             request.attempt,
-                            queue_rejection,
+                            queue_rejection
+                                .map(|reason| reason.to_string())
+                                .or_else(|| {
+                                    binding_recovery.then(|| "upstream_recovery".to_owned())
+                                }),
                         )
                         .await?
                 {
@@ -1721,7 +1729,7 @@ impl CodexCredentialSelector {
         admission: ProviderAccountAdmission<'_>,
         optional_cache_binding: bool,
         attempt: &AttemptContext,
-        queue_rejection: Option<QueueRejection>,
+        binding_migration_reason: Option<String>,
     ) -> Result<bool, CredentialSelectionError> {
         let claim = admission.session();
         match self.admit_account(admission).await {
@@ -1746,7 +1754,7 @@ impl CodexCredentialSelector {
             Err(error) => return Err(error),
             Ok(true) => {}
         }
-        if let (Some(reason), Some(claim)) = (queue_rejection, claim)
+        if let (Some(reason), Some(claim)) = (binding_migration_reason, claim)
             && let Some(previous) = claim.expected
             && previous.account_id() != claim.account
         {
@@ -1756,12 +1764,12 @@ impl CodexCredentialSelector {
                 reason = %reason,
                 from_account_id = %previous.account_id(),
                 to_account_id = %claim.account,
-                "OpenAI 账号排队失败后已迁移绑定"
+                "OpenAI 账号恢复后已迁移绑定"
             );
             attempt.trace().record_evidence(
                 "account.binding.migrated",
                 serde_json::json!({
-                    "reason": reason.to_string(),
+                    "reason": reason,
                     "fromAccountId": previous.account_id().as_str(),
                     "toAccountId": claim.account.as_str(),
                 }),

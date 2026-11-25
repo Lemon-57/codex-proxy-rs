@@ -79,7 +79,7 @@ Linux/glibc 部署可选择更积极地归还请求结束后的空闲内存，�
 services:
   app-runtime:
     environment:
-      GLIBC_TUNABLES: 'glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072'
+      GLIBC_TUNABLES: 'glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072:glibc.malloc.arena_max=4'
 ```
 
 Compose 从 `services.app-runtime` 取得参数；不开启优化时保留该段并将值设为 `''`。
@@ -92,7 +92,7 @@ docker compose -f deploy/compose.yaml config --quiet
 docker compose -f deploy/compose.yaml up -d --no-build --no-deps --force-recreate codex-proxy-rs
 ```
 
-此配置将 glibc 的 mmap 与 trim 阈值固定为 128 KiB，关闭对应的动态阈值调整。
+此配置将 glibc 的 mmap 与 trim 阈值固定为 128 KiB，关闭对应的动态阈值调整，并把 arena 数量限制为 4。工作站同版本、550 个虚拟账号和 300 次 WebSocket 请求的对照中，arena=4 的空闲进程 PSS 低于默认 arena 配置；实际生产应在自己的负载下复测。
 如已有 `GLIBC_TUNABLES`，用冒号合并这两个参数，避免重复同名项；同时检查是否另设了 `MALLOC_MMAP_THRESHOLD_` 或 `MALLOC_TRIM_THRESHOLD_`，统一在一处维护。
 参数含义见 [glibc 文档](https://sourceware.org/glibc/manual/latest/html_node/Memory-Allocation-Tunables.html)
 
@@ -100,7 +100,7 @@ docker compose -f deploy/compose.yaml up -d --no-build --no-deps --force-recreat
 `services` 是 Compose 桥接区，直接运行二进制不会读取这一段。Linux/glibc 二进制部署需由启动器在进程启动前设置同一环境变量，例如：
 
 ```bash
-GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072 ./codex-proxy-rs
+GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072:glibc.malloc.arena_max=4 ./codex-proxy-rs
 ```
 
 该变量由 glibc 在进程启动时读取，不支持管理端热更新。
@@ -120,7 +120,8 @@ store:
 如果出现连接获取超时，应结合数据库负载调大池容量，不要仅延长等待时间
 
 统计 Worker 重算分组时，若临时文件写入较多且数据库有内存余量，可在 `store.pool` 下设置 `analytics_projection_work_mem_mb: 8`（单位 MB）。
-默认省略，沿用 PostgreSQL 的 `work_mem`；显式设置仅影响增量投影和历史回填所在的事务，队列确认、整桶重建和在线查询继续沿用原值
+默认省略，沿用 PostgreSQL 的 `work_mem`；显式设置仅影响增量投影和历史回填所在的事务，队列确认和在线查询继续沿用原值。
+本定制部署的整桶维护事务使用至少 32 MiB，保留更高的会话设置；预算在提交或回滚后恢复，不覆盖上述投影配置
 
 将 `deploy/compose.yaml` 中 `services.postgres.command` 替换为以下列表，保留 UTC 参数：
 
@@ -540,6 +541,8 @@ OpenAI Responses 上游 WebSocket 每 25 秒发送 Ping 保活，并回应上游
 心跳不重置上游业务消息的 `openai.ws_pool.stream_idle_timeout_ms`
 
 每条已保存代理可在管理端配置“上游 WS 连接上限”，默认留空、不限制连接数。
+OpenAI HTTP 客户端使用代理时，每个目标主机最多保留 4 条空闲连接，空闲 30 秒后回收；
+在途 HTTP/SSE 请求不受这个空闲回收阈值截断，直连客户端保留原连接池行为。
 预算限制单个 CPR 进程使用该代理的 OpenAI Responses 上游 WS 总数，关联账号共享，包含建连中、在途、空闲及非池化连接；直连不受影响。
 上限应按代理实际容量、其他流量与 CPR 实例数设置。例如 32 槽代理可配置为 24，为 HTTP 等流量留出 8 槽，但这不是统一默认值。
 不同代理 URL（含认证）分别计数；不同 URL 若共用服务商额度，需自行分配预算，各 CPR 实例之间也不协调容量。
@@ -907,6 +910,12 @@ OAuth 恢复开关为 `host.logging.oauth_recovery`，默认关闭，与普通�
 - **Redis**：容器创建时读取 `redis.password`。在维护窗口更新配置并重新创建 Redis 和应用容器，保留数据目录
 
 ## 镜像升级与源码构建
+
+本定制部署的迁移 0001–0036 保持冻结，CPR 互联及账号名称迁移使用 0037、0038。已有运行设置、账号并发和插件状态保持各实例原值，互联共享默认关闭。在线切换须启动隔离候选、核验摘要及功能后仅切换新连接，旧进程保留至 HTTP、SSE 和 WebSocket 自然排空。
+
+额度桶设置通过追加迁移保留 `quota_limits` 和 `quota_settings` 两列，并在同一账号事务内同步上限。
+旧版本修改上限时保留桶预热配置，预热默认关闭。旧进程可以继续排空已有请求；冷启动回退须使用包含相同迁移清单的兼容成品，不能直接启动缺少已登记迁移的历史二进制。
+
 
 每个 Release 独立提供 `config.example.yaml`、默认镜像固定到该版本的 `compose.yaml` 和校验和；
 各平台归档也包含 `deploy/config.example.yaml`。配置模板来自构建该版本的同一提交。

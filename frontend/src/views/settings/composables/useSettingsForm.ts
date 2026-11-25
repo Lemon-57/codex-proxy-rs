@@ -77,6 +77,7 @@ export function useSettingsForm() {
     accountWarmupEnabled: false,
     accountWarmupCron: [] as string[],
     accountWarmupModel: '',
+    resetCreditDefaultEnabled: false,
     resetCreditOnLowWeeklyQuota: false,
     resetCreditLeadMinutes: 10 as number | null,
     resetCreditMaxWeeklyRemainingPercent: null as number | null,
@@ -174,6 +175,7 @@ export function useSettingsForm() {
       ? data.accountWarmupCron.split(';')
       : []
     form.accountWarmupModel = data.accountWarmupModel ?? ''
+    form.resetCreditDefaultEnabled = data.resetCreditDefaultEnabled
     form.resetCreditOnLowWeeklyQuota = data.resetCreditOnLowWeeklyQuota
     form.resetCreditLeadMinutes = data.resetCreditLeadMinutes
     form.resetCreditMaxWeeklyRemainingPercent = data.resetCreditMaxWeeklyRemainingPercent
@@ -315,6 +317,7 @@ export function useSettingsForm() {
         accountWarmupEnabled: form.accountWarmupEnabled,
         accountWarmupCron: form.accountWarmupCron.join(';'),
         accountWarmupModel: form.accountWarmupModel.trim() || null,
+        resetCreditDefaultEnabled: form.resetCreditDefaultEnabled,
         resetCreditOnLowWeeklyQuota: form.resetCreditOnLowWeeklyQuota,
         resetCreditLeadMinutes: (form.resetCreditOnLowWeeklyQuota ? savedSettings.form.resetCreditLeadMinutes : resetCreditLeadMinutes)!,
         resetCreditMaxWeeklyRemainingPercent,

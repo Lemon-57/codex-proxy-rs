@@ -267,6 +267,7 @@ impl FakeProviderAdmin {
                 preserve_profile: false,
                 preserve_credential_state: false,
                 preserve_access_token_expiry: false,
+                native_refresh_plan: None,
                 provider_material: document(),
                 has_refresh_token: account.has_refresh_token,
                 access_token_expires_at: account
@@ -1141,10 +1142,22 @@ impl AccountStore for FakeAccountStore {
     }
 }
 
-#[derive(Default)]
 struct StaticSettingsStore {
+    reset_credit_default_enabled: bool,
+    reset_credit_lead_minutes: u32,
     reset_credit_on_low_weekly_quota: bool,
     reset_credit_max_weekly_remaining_percent: Option<u32>,
+}
+
+impl Default for StaticSettingsStore {
+    fn default() -> Self {
+        Self {
+            reset_credit_default_enabled: false,
+            reset_credit_on_low_weekly_quota: false,
+            reset_credit_lead_minutes: 10,
+            reset_credit_max_weekly_remaining_percent: None,
+        }
+    }
 }
 
 #[async_trait]
@@ -1204,7 +1217,8 @@ impl SettingsStore for StaticSettingsStore {
                 account_warmup_enabled: false,
                 account_warmup_cron: "0 8 * * *".to_owned(),
                 account_warmup_model: None,
-                reset_credit_lead_minutes: 10,
+                reset_credit_default_enabled: self.reset_credit_default_enabled,
+                reset_credit_lead_minutes: self.reset_credit_lead_minutes,
                 reset_credit_on_low_weekly_quota: self.reset_credit_on_low_weekly_quota,
                 reset_credit_max_weekly_remaining_percent: self
                     .reset_credit_max_weekly_remaining_percent,
@@ -1843,6 +1857,9 @@ async fn accounts_update_should_commit_then_release_disabled_account_and_publish
         .update(
             &context("update-request"),
             UpdateAccount {
+                supplier: None,
+                manual_starts_at: None,
+                manual_expires_at: None,
                 name: None,
                 notes: None,
                 model_access: Default::default(),
@@ -1883,6 +1900,9 @@ async fn accounts_update_should_not_notify_provider_when_store_commit_fails() {
         .update(
             &context("update-failure"),
             UpdateAccount {
+                supplier: None,
+                manual_starts_at: None,
+                manual_expires_at: None,
                 name: None,
                 notes: None,
                 model_access: Default::default(),
@@ -1975,6 +1995,8 @@ async fn accounts_list_should_return_complete_directory_semantics() {
     let page = services
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
             provider_kind: None,
@@ -2064,6 +2086,8 @@ async fn accounts_should_fill_missing_plan_from_quota_without_overriding_known_s
         let page = services
             .accounts()
             .list(AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
                 provider_kind: None,
@@ -2152,6 +2176,8 @@ async fn accounts_list_should_degrade_quota_failure_to_empty_window_without_drop
     let page = services
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
             provider_kind: None,
@@ -2208,6 +2234,8 @@ async fn accounts_list_should_prefer_credential_error_over_quota_exhaustion() {
         .await
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
             provider_kind: None,
@@ -2237,6 +2265,8 @@ async fn accounts_list_should_map_unknown_credential_to_error_not_normal() {
         .await
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
             provider_kind: None,
@@ -2289,6 +2319,8 @@ async fn accounts_list_should_not_derive_rate_limited_from_provider_quota_view()
         .await
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
             provider_kind: None,
@@ -2341,6 +2373,8 @@ async fn accounts_list_should_not_derive_exhaustion_from_provider_quota_view() {
         .await
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
             provider_kind: None,
@@ -2849,6 +2883,8 @@ async fn peer_account_usage_should_follow_budget_windows_without_borrowing_pool_
         let page = services
             .accounts()
             .list(AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: gateway_admin::model::PageSize::new(20).unwrap(),
                 provider_kind: None,
@@ -2947,6 +2983,8 @@ async fn api_key_list_and_detail_should_accumulate_local_usage_without_subscript
     let page = services
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).unwrap(),
             provider_kind: None,
@@ -3017,6 +3055,8 @@ async fn accounts_list_should_attach_local_usage_to_quota_windows() {
         .await
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
             provider_kind: None,
@@ -3105,6 +3145,8 @@ async fn accounts_list_and_quota_refresh_should_select_the_same_weekly_or_monthl
         let page = services
             .accounts()
             .list(AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
                 provider_kind: None,
@@ -3207,6 +3249,8 @@ async fn accounts_list_should_not_attach_account_usage_to_model_specific_quota_w
         .await
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
             provider_kind: None,
@@ -3493,6 +3537,9 @@ pub(super) fn account_record(kind: &str) -> AccountRecord {
         quota_paused: false,
         quota_settings: Default::default(),
         auto_use_quota_credits: false,
+        supplier: None,
+        manual_starts_at: None,
+        manual_expires_at: None,
         outbound_proxy_id: None,
         outbound_proxy_enabled: true,
         notes: None,
@@ -3581,6 +3628,7 @@ fn plugin_rotation_facts(account: &AccountRecord) -> PreparedCredentialRotationF
         preserve_profile: true,
         preserve_credential_state: false,
         preserve_access_token_expiry: false,
+        native_refresh_plan: None,
         provider_material: document(),
         has_refresh_token: account.has_refresh_token,
         access_token_expires_at: account.access_token_expires_at,
@@ -3780,6 +3828,7 @@ impl AccountProbe for SuccessfulAccountProbe {
     ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
         Box::pin(async {
             Ok(AccountProbeResult {
+                completed_text: true,
                 text: vec!["OK".to_owned()],
             })
         })
@@ -3876,6 +3925,8 @@ async fn unregistered_provider_accounts_have_no_live_management_capabilities() {
     let page = services
         .accounts()
         .list(AccountListQuery {
+            plan_type: None,
+            supplier: None,
             page: 1,
             page_size: gateway_admin::model::PageSize::new(20).unwrap(),
             provider_kind: None,
@@ -4013,6 +4064,8 @@ async fn account_capacity_should_batch_page_ids_and_distinguish_idle_from_unavai
             let page = services
                 .accounts()
                 .list(AccountListQuery {
+                    plan_type: None,
+                    supplier: None,
                     page: 1,
                     page_size: gateway_admin::model::PageSize::new(20).unwrap(),
                     provider_kind: None,
@@ -4089,4 +4142,41 @@ impl gateway_admin::ports::reset_credit_automation::ResetCreditAutomationStore
         }
         Ok(revision)
     }
+}
+
+#[tokio::test]
+async fn protected_diagnostic_preserves_disabled_account_and_rejects_tools() {
+    let provider = FakeProviderAdmin::new("openai", events());
+    let mut account = account_record("openai");
+    account.enabled = false;
+    let store = FakeAccountStore::with_account(account, events());
+    let services = accounts_service(provider, store.clone()).await;
+    let body = serde_json::json!({"input":[{"role":"user","content":"Reply 21"}],"reasoning":{"effort":"medium"}}).as_object().unwrap().clone();
+    let result = services
+        .accounts()
+        .diagnose(
+            ProviderAccountId::new("acct_test").unwrap(),
+            gateway_core::routing::UpstreamModelId::new("gpt-6.1-sol").unwrap(),
+            body,
+        )
+        .await
+        .unwrap();
+    assert!(result.completed_text);
+    assert!(!store.accounts.lock().unwrap()[0].enabled);
+    let invalid = serde_json::json!({"input":"hello","tools":[]})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert!(
+        services
+            .accounts()
+            .diagnose(
+                ProviderAccountId::new("acct_test").unwrap(),
+                gateway_core::routing::UpstreamModelId::new("gpt-6.1-sol").unwrap(),
+                invalid
+            )
+            .await
+            .is_err()
+    );
+    assert!(!store.accounts.lock().unwrap()[0].enabled);
 }

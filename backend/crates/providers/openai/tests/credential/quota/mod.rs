@@ -593,6 +593,7 @@ async fn passive_plan_observations_update_account_without_replaying_stale_plan()
             secret("rotated-after-plan-update"),
             original.access_token_expires_at(),
             None,
+            None,
         )
         .await
         .expect("quota changes must not invalidate credential rotation");

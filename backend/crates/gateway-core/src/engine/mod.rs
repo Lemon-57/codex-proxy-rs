@@ -131,6 +131,7 @@ pub struct AccountAttemptContext {
     credential_recovery_attempted: bool,
     eligibility: AccountEligibilityPolicy,
     account_scope: Option<Arc<crate::account::scope::FrozenAccountScope>>,
+    session_binding_recovery_from: Option<ProviderAccountId>,
 }
 
 impl AccountAttemptContext {
@@ -148,6 +149,7 @@ impl AccountAttemptContext {
             credential_recovery_attempted: false,
             eligibility: AccountEligibilityPolicy::Enforce,
             account_scope: None,
+            session_binding_recovery_from: None,
         }
     }
 
@@ -169,6 +171,7 @@ impl AccountAttemptContext {
             credential_recovery_attempted: false,
             eligibility,
             account_scope: None,
+            session_binding_recovery_from: None,
         }
     }
 
@@ -207,6 +210,16 @@ impl AccountAttemptContext {
     #[must_use]
     pub const fn credential_recovery_attempted(&self) -> bool {
         self.credential_recovery_attempted
+    }
+
+    /// 只有绑定仍属于该失败账号时，Provider 才可在新账号准入时迁移绑定
+    #[must_use]
+    pub fn with_session_binding_recovery_from(
+        mut self,
+        account: Option<ProviderAccountId>,
+    ) -> Self {
+        self.session_binding_recovery_from = account;
+        self
     }
 
     #[must_use]
@@ -948,6 +961,11 @@ impl AttemptContext {
     #[must_use]
     pub const fn excluded_accounts(&self) -> &BTreeSet<ProviderAccountId> {
         self.account.excluded_accounts()
+    }
+
+    #[must_use]
+    pub const fn session_binding_recovery_from(&self) -> Option<&ProviderAccountId> {
+        self.account.session_binding_recovery_from.as_ref()
     }
 
     #[must_use]

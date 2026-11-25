@@ -22,8 +22,16 @@ pub(super) async fn next_websocket_message(
 
 pub(super) fn reused_stream_receive_error(
     error: CodexWebSocketExchangeError,
+    upstream_event_seen: bool,
 ) -> CodexWebSocketExchangeError {
+    if upstream_event_seen {
+        return error;
+    }
     match error {
+        CodexWebSocketExchangeError::ConnectionObserved {
+            observation,
+            source,
+        } => reused_stream_receive_error(*source, false).with_connection_observation(observation),
         CodexWebSocketExchangeError::ClosedBeforeTerminal(_)
         | CodexWebSocketExchangeError::StreamEndedBeforeTerminal { .. }
         | CodexWebSocketExchangeError::ReceiveIdleTimeout { .. }

@@ -62,7 +62,7 @@ async fn scoped_account_list_filters_ids_provider_and_live_enabled_state() {
         ["acct_scope_a", "acct_scope_z"]
     );
     let full_pool = repository
-        .list_for_provider(&provider, false)
+        .list_for_provider(&provider)
         .await
         .expect("load full provider pool");
     assert_eq!(
@@ -71,22 +71,6 @@ async fn scoped_account_list_filters_ids_provider_and_live_enabled_state() {
             .map(|account| account.id().as_str())
             .collect::<Vec<_>>(),
         ["acct_scope_a", "acct_scope_outside", "acct_scope_z"]
-    );
-    let maintenance = repository
-        .list_for_provider(&provider, true)
-        .await
-        .expect("load provider accounts for maintenance");
-    assert_eq!(
-        maintenance
-            .iter()
-            .map(|account| account.id().as_str())
-            .collect::<Vec<_>>(),
-        [
-            "acct_scope_a",
-            "acct_scope_disabled",
-            "acct_scope_outside",
-            "acct_scope_z"
-        ]
     );
     let all = repository
         .list_provider_accounts(None, true)
@@ -253,6 +237,8 @@ async fn revoked_access_token_moves_exhausted_account_into_error_list_until_rota
                 page_size: PageSize::new(10).unwrap(),
                 provider_kind: None,
                 group_filter: None,
+                plan_type: None,
+                supplier: None,
                 search: None,
                 sort: None,
             },

@@ -2,10 +2,35 @@
 
 use super::*;
 
+#[derive(Debug, Clone)]
+pub struct AccountProxyUpdate(pub Option<gateway_core::account::OutboundProxy>);
+
+impl<'de> Deserialize<'de> for AccountProxyUpdate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() {
+            return Ok(Self(None));
+        }
+        gateway_core::account::OutboundProxy::parse(&value)
+            .map(|proxy| Self(Some(proxy)))
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 pub(super) fn proxy_selection(
     id: Option<String>,
+    url: Option<AccountProxyUpdate>,
 ) -> Result<Option<gateway_admin::model::proxies::AccountProxySelection>, WireValidationError> {
     use gateway_admin::model::proxies::AccountProxySelection;
+    if let Some(AccountProxyUpdate(proxy)) = url {
+        if id.is_some() {
+            return Err(WireValidationError::new("outboundProxyId"));
+        }
+        return Ok(Some(proxy.map_or(
+            AccountProxySelection::Direct,
+            AccountProxySelection::Url,
+        )));
+    }
     let Some(id) = id else { return Ok(None) };
     if id.is_empty() {
         return Ok(Some(AccountProxySelection::Direct));
@@ -24,6 +49,8 @@ pub(super) fn proxy_selection(
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListQuery {
+    pub plan_type: Option<String>,
+    pub supplier: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub provider: Option<String>,
@@ -40,6 +67,7 @@ pub struct BatchUpdateAccountsRequest {
     pub quota_settings: Option<gateway_core::account::AccountQuotaSettings>,
     pub auto_use_quota_credits: Option<bool>,
     pub outbound_proxy_id: Option<String>,
+    pub outbound_proxy_url: Option<AccountProxyUpdate>,
     pub account_ids: Vec<String>,
     pub enabled: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_optional_nullable_limit")]
@@ -47,6 +75,55 @@ pub struct BatchUpdateAccountsRequest {
     pub weight: Option<u64>,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct NativeRefreshGroupMoveRequest {
+    provider: String,
+    source_group: String,
+    target_group: String,
+    plan_type: String,
+}
+
+impl NativeRefreshGroupMoveRequest {
+    pub(super) fn into_command(
+        self,
+    ) -> Result<gateway_admin::model::accounts::NativeRefreshGroupMove, WireValidationError> {
+        for (name, field) in [
+            (&self.source_group, "sourceGroup"),
+            (&self.target_group, "targetGroup"),
+        ] {
+            if name.is_empty()
+                || name.trim() != name
+                || name.chars().count() > 100
+                || name.chars().any(char::is_control)
+            {
+                return Err(WireValidationError::new(field));
+            }
+        }
+        if self.source_group.eq_ignore_ascii_case(&self.target_group) {
+            return Err(WireValidationError::new("targetGroup"));
+        }
+        let provider = gateway_core::routing::ProviderKind::new(self.provider)
+            .map_err(|_| WireValidationError::new("provider"))?;
+        let plan_type = self.plan_type.to_ascii_lowercase();
+        if plan_type.is_empty()
+            || plan_type == "unknown"
+            || plan_type.len() > 128
+            || !plan_type
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(WireValidationError::new("planType"));
+        }
+        Ok(gateway_admin::model::accounts::NativeRefreshGroupMove {
+            provider,
+            source_group: self.source_group,
+            target_group: self.target_group,
+            plan_type,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +179,7 @@ impl BatchUpdateAccountsRequest {
             && self.group_ids.is_none()
             && self.model_access.is_none()
             && self.outbound_proxy_id.is_none()
+            && self.outbound_proxy_url.is_none()
         {
             return Err(WireValidationError::new("accountSettings"));
         }
@@ -113,7 +191,7 @@ impl BatchUpdateAccountsRequest {
         Ok(BatchUpdateAccounts {
             quota_settings: self.quota_settings,
             auto_use_quota_credits: self.auto_use_quota_credits,
-            outbound_proxy: proxy_selection(self.outbound_proxy_id)?,
+            outbound_proxy: proxy_selection(self.outbound_proxy_id, self.outbound_proxy_url)?,
             account_ids: self.account_ids,
             enabled: self.enabled,
             concurrency_limit: self
@@ -151,6 +229,28 @@ impl ListQuery {
                     .map_err(|_| WireValidationError::new("groupId"))?,
             )),
         };
+        let plan_type = self
+            .plan_type
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+        if plan_type.as_deref().is_some_and(|value| {
+            value.len() > 100
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        }) {
+            return Err(WireValidationError::new("planType"));
+        }
+        let supplier = self
+            .supplier
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if supplier
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > 100 || value.chars().any(char::is_control))
+        {
+            return Err(WireValidationError::new("supplier"));
+        }
         let search = self
             .search
             .map(|value| value.trim().to_owned())
@@ -177,6 +277,8 @@ impl ListQuery {
             _ => return Err(WireValidationError::new("sort")),
         };
         Ok(AccountListQuery {
+            plan_type,
+            supplier,
             page,
             page_size: PageSize::new(
                 u16::try_from(page_size).map_err(|_| WireValidationError::new("pageSize"))?,
@@ -249,6 +351,11 @@ pub struct AccountSummaryView {
 pub struct AccountView {
     pub quota_settings: gateway_core::account::AccountQuotaSettings,
     pub auto_use_quota_credits: bool,
+    pub supplier: Option<String>,
+    pub manual_starts_at: Option<String>,
+    pub manual_expires_at: Option<String>,
+    pub manual_starts_at_display: Option<String>,
+    pub manual_expires_at_display: Option<String>,
     pub upstream: Option<super::AccountUpstreamInfoView>,
     pub capabilities: AccountCapabilitiesView,
     pub outbound_proxy_id: Option<String>,
@@ -1262,5 +1369,31 @@ impl
                 .map(|value| time.datetime(value)),
             last_result: status.last_result,
         }
+    }
+}
+
+/// 管理诊断的账号固定与有界输入，不接受账号启停字段
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountDiagnosticRequest {
+    pub account_id: String,
+    pub model_id: String,
+    pub body: serde_json::Map<String, serde_json::Value>,
+}
+impl AccountDiagnosticRequest {
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        require_account_id(&self.account_id, "accountId")?;
+        if self.model_id.is_empty()
+            || self.model_id.len() > 128
+            || self.model_id.chars().any(char::is_control)
+        {
+            return Err(WireValidationError::new("modelId"));
+        }
+        if serde_json::to_vec(&self.body).map_or(true, |value| value.len() > 128 * 1024)
+            || !self.body.contains_key("input")
+        {
+            return Err(WireValidationError::new("body"));
+        }
+        Ok(())
     }
 }

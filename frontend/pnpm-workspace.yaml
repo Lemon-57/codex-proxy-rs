@@ -9,3 +9,7 @@ audit:
 allowBuilds:
   '@codex-proxy/ui@git+https://github.com/zyycn/codex-proxy-ui.git': true
   esbuild@0.25.12: true
+
+onlyBuiltDependencies:
+  - "@codex-proxy/ui@https://codeload.github.com/zyycn/codex-proxy-ui/tar.gz/8ffe8a2386603961f48e7fb12ba03be7a81539ec"
+  - esbuild

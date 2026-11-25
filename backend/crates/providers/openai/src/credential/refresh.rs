@@ -22,10 +22,11 @@ use gateway_core::routing::ProviderKind;
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
+use super::admin::{RtProfilePolicy, verify_replacement_claims};
 use super::recovery_log::{CodexOAuthRecoveryOperation, record_oauth_recovery};
 use super::repository::{CodexCredentialRepository, CredentialRepositoryError};
 use super::token_client::{RefreshFailure, RefreshUpstreamFailure, TokenPair, TokenRefresher};
-use super::types::{CodexOAuthSecret, parse_access_token_expiration};
+use super::types::{CodexOAuthSecret, decode_jwt_payload, parse_access_token_expiration};
 
 const PROVIDER_NAME: &str = "openai";
 const MAX_REFRESH_BATCH: u32 = 1_000;
@@ -37,6 +38,64 @@ const REFRESH_BACKOFF_MAX_ATTEMPTS: u32 = 5;
 const REFRESH_RECOVERY_DELAY: Duration = Duration::from_secs(10 * 60);
 /// 过期 AT 仍允许 RT 恢复的最长窗口
 const REFRESH_RECOVERY_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
+
+pub(super) fn verified_refresh_plan(
+    account: &ProviderAccount,
+    previous: &CodexOAuthSecret,
+    tokens: &TokenPair,
+) -> Option<String> {
+    account
+        .upstream_user_id()
+        .filter(|value| !value.is_empty())?;
+    account
+        .upstream_account_id()
+        .filter(|value| !value.is_empty())?;
+    let prior = previous.id_token.as_ref().unwrap_or(&previous.access_token);
+    let prior_claims = decode_jwt_payload::<serde_json::Value>(prior.expose_secret()).ok()?;
+    let subject = prior_claims["sub"]
+        .as_str()
+        .filter(|value| !value.is_empty())?;
+    let access_token = tokens.access_token.as_deref()?;
+    if access_token == previous.access_token.expose_secret() {
+        return None;
+    }
+    let access = verify_replacement_claims(
+        account,
+        access_token,
+        subject,
+        false,
+        RtProfilePolicy::MatchWorkspace,
+    )
+    .ok()?;
+    let plan = access.chatgpt_plan_type?.to_ascii_lowercase();
+    if plan.is_empty()
+        || plan == "unknown"
+        || plan.len() > 128
+        || !plan
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    if let Some(identity) = tokens.id_token.as_deref() {
+        let claims = verify_replacement_claims(
+            account,
+            identity,
+            subject,
+            true,
+            RtProfilePolicy::MatchWorkspace,
+        )
+        .ok()?;
+        if !claims
+            .chatgpt_plan_type
+            .as_deref()?
+            .eq_ignore_ascii_case(&plan)
+        {
+            return None;
+        }
+    }
+    Some(plan)
+}
 
 pub(crate) fn refresh_recovery_deadline(
     access_token_expires_at: Option<SystemTime>,
@@ -496,6 +555,7 @@ impl CodexCredentialRefreshService {
         due: DueCodexCredential,
         tokens: TokenPair,
     ) -> Result<CodexCredentialRefreshOutcome, CodexCredentialRefreshError> {
+        let native_refresh_plan = verified_refresh_plan(&due.account, &due.secret, &tokens);
         let TokenPair {
             access_token,
             refresh_token: rotated_refresh_token,
@@ -541,6 +601,7 @@ impl CodexCredentialRefreshService {
                 secret,
                 access_token_expires_at,
                 next_refresh_at,
+                native_refresh_plan,
             )
             .await;
         match result {

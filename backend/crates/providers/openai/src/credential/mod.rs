@@ -30,6 +30,7 @@ pub(crate) use oauth::oauth_owner_ref;
 pub(crate) use types::parse_access_token_expiration;
 
 pub(crate) use crate::CODEX_AUTHENTICATION_KIND_API_KEY;
+pub(crate) use admin::RtProfilePolicy;
 
 pub use api_key::{
     ApiKeyAuthentication, ApiKeyConfiguration, ApiKeyCredentialData, ApiKeyProtocol,

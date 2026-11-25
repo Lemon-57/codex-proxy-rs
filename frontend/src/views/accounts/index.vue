@@ -52,6 +52,10 @@ const {
   loadAccounts,
   refreshAccountsSilently,
   searchQuery,
+  supplierQuery,
+  supplierOptions,
+  loadSupplierOptions,
+  planTypeQuery,
   providerQuery,
   statusQuery,
   groupQuery,
@@ -64,6 +68,13 @@ const {
   handleSortChange,
 } = useAccountsQuery()
 
+async function reloadAccountsAndSuppliers() {
+  await Promise.all([
+    loadAccounts(),
+    loadSupplierOptions(),
+  ])
+}
+
 const {
   groups,
   loading: groupsLoading,
@@ -72,7 +83,7 @@ const {
 
 const importTasks = useAccountImportTasks({
   reload: () => Promise.all([
-    loadAccounts(),
+    reloadAccountsAndSuppliers(),
     loadGroups(),
   ]),
 })
@@ -127,7 +138,7 @@ const {
   accounts,
   selectedIds,
   reload: () => Promise.all([
-    loadAccounts(),
+    reloadAccountsAndSuppliers(),
     loadGroups(),
   ]),
   replaceAccount,
@@ -183,7 +194,7 @@ const {
 } = useAccountBatchEditor({
   accounts,
   selectedIds,
-  reloadAccounts: loadAccounts,
+  reloadAccounts: reloadAccountsAndSuppliers,
   reloadGroups: loadGroups,
 })
 
@@ -195,6 +206,8 @@ const {
   editingAccount,
   name: editingName,
   notes: editingNotes,
+  supplier: editingSupplier,
+  manualExpiresAt: editingManualExpiresAt,
   schedulingEnabled,
   concurrencyLimit: editingConcurrencyLimit,
   weight: editingWeight,
@@ -207,7 +220,7 @@ const {
   save: saveAccountEdit,
   clearCredentials,
 } = useAccountEditor({
-  reloadAccounts: loadAccounts,
+  reloadAccounts: reloadAccountsAndSuppliers,
   reloadGroups: loadGroups,
 })
 </script>
@@ -227,11 +240,14 @@ const {
       <template #header>
         <AccountFilters
           v-model:search="searchQuery"
+          v-model:supplier="supplierQuery"
+          v-model:plan-type="planTypeQuery"
           v-model:status="statusQuery"
           v-model:provider="providerQuery"
           v-model:group="groupQuery"
           :groups="groups"
           :groups-loading="groupsLoading"
+          :supplier-options="supplierOptions"
           :selected-count="selectedIds.size"
           :batch-deleting="batchDeleting"
           :exporting-accounts="exportingAccounts"
@@ -342,6 +358,10 @@ const {
               </div>
             </template>
 
+            <template #supplier="{ row }">
+              <span class="block truncate" :title="row.supplier || undefined">{{ row.supplier }}</span>
+            </template>
+
             <template #lastUsedAt="{ row }">
               <LastUsedAtCell :value="row.usage.lastUsedAt" :full-display="row.usage.lastUsedAtFullDisplay" />
             </template>
@@ -421,7 +441,7 @@ const {
       @select="importTasks.select"
       @stop="importTasks.stop"
       @after-leave="importTasks.refresh(true)"
-      @view-accounts="showImportTasks = false; loadAccounts()"
+      @view-accounts="showImportTasks = false; reloadAccountsAndSuppliers()"
     />
 
     <AccountCreateModal
@@ -445,6 +465,8 @@ const {
       v-model:oauth-transport="editingOAuthTransport"
       v-model:name="editingName"
       v-model:notes="editingNotes"
+      v-model:supplier="editingSupplier"
+      v-model:manual-expires-at="editingManualExpiresAt"
       v-model:enabled="schedulingEnabled"
       v-model:concurrency-limit="editingConcurrencyLimit"
       v-model:weight="editingWeight"

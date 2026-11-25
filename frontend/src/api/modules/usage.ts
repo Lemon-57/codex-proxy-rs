@@ -440,10 +440,11 @@ type UsageDiagnosticsQuery = UsageRangeQuery & { dimension: string, model?: stri
 type DiagnosticsDownloadParams = { requestId: string } | { errorId: string }
 
 export function getUsageRecords(data: UsagePageQuery, options: RequestOptions = {}) {
+  const { accountSearch, ...params } = data
   return request<UsageRecordsResponse>({
     url: '/api/admin/usage/records',
     method: 'GET',
-    params: data,
+    params: { ...params, accountName: accountSearch },
     ...options,
   })
 }

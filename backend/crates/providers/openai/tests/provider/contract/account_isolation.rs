@@ -221,7 +221,7 @@ async fn rotated_fedramp_claim_opens_a_new_socket_for_the_same_account_and_sessi
             let rotated = fedramp_secret(&format!("at-{SELECTED_ACCOUNT}"));
             store
                 .repository()
-                .rotate_refreshed_oauth_secret(&account, rotated, None, None)
+                .rotate_refreshed_oauth_secret(&account, rotated, None, None, None)
                 .await
                 .unwrap();
         }

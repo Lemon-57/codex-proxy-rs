@@ -360,7 +360,9 @@
       "oauthDescription": "Import a {label} account through browser authorization",
       "apiKeyDescription": "Connect an upstream service using Responses or Messages",
       "pasteAccessTokenLineByLineIf": "Paste one access token per line (automatic renewal requires a refresh token)",
-      "refreshTokenDescription": "Paste one refresh token per line, access tokens are obtained automatically during import",
+      "refreshTokenDescription": "Enter the account email for one RT, or use email----RT per line for batch import",
+      "refreshTokenEmail": "Account email (single RT)",
+      "refreshTokenEmailPlaceholder": "Enter the email belonging to this RT",
       "accountSettings": "Account settings",
       "reauthorizeAccount": "Reauthorize account",
       "settingsDescription": "These settings apply to accounts in this import",
@@ -370,7 +372,7 @@
       "callbackPlaceholder": "Callback URL, ?code=...&state=..., or authorization code",
       "callbackHelp": "Open the authorization link, authorize in your browser, then paste the callback URL or authorization code",
       "pasteOneAccessTokenPerLine": "Paste one Access token per line",
-      "pasteOneRefreshTokenPerLine": "Paste one Refresh token per line",
+      "pasteOneRefreshTokenPerLine": "Paste one Refresh Token, or use email----RT per line",
       "batchAccountFiles": "Batch account files",
       "accountFile": "Account file",
       "packagePlaceholder": "Paste a CPR account export",
@@ -537,7 +539,8 @@
         "resetIncomplete": "The upstream service did not complete the last automatic reset",
         "scheduleHelp": "Check once a day at a random time, staggered across accounts",
         "verifyHelp": "Recheck the credit and any weekly quota conditions before use",
-        "label": "Automatically use expiring reset credits"
+        "label": "Automatically use expiring reset credits",
+        "quotaRefreshPending": "Reset credit used; verifying quota without redeeming another credit"
       },
       "automaticallyUseResetCard": "Automatically use resets",
       "automaticUsageRules": "Automatic usage rules",
@@ -645,6 +648,8 @@
       "invalidProvider": "The import file contains an invalid provider document",
       "noAccounts": "The import file contains no importable account documents",
       "pasteAtLeastOne": "Paste at least one {label}",
+      "refreshTokenIdentityRequired": "Line {line} needs a valid email and RT, enter the account email or use email----RT per line",
+      "duplicateRefreshTokenAccount": "Duplicate email or RT on line {line}, remove the duplicate account",
       "missingProvider": "The import file contains no {provider} accounts",
       "importFilesMustBeJsonObjects": "Import files must be JSON objects"
     },

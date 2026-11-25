@@ -621,6 +621,7 @@ pub struct CompleteAuthorization {
     pub context: MutationContext,
     pub flow_id: String,
     pub callback_url: String,
+    pub expected_identity_revision: Option<std::num::NonZeroU64>,
 }
 
 impl fmt::Debug for CompleteAuthorization {
@@ -701,6 +702,7 @@ pub struct PreparedCredentialRotationFacts {
     /// 连接配置变更保留当前凭据健康状态与错误事实
     pub preserve_credential_state: bool,
     pub preserve_access_token_expiry: bool,
+    pub native_refresh_plan: Option<String>,
     pub provider_material: ProviderDocument,
     pub has_refresh_token: bool,
     pub access_token_expires_at: Option<DateTime<Utc>>,

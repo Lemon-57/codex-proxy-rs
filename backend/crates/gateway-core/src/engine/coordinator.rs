@@ -24,8 +24,8 @@ use crate::engine::{
     AccountAttemptContext, AttemptContext, AttemptRecord, AttemptTransport, AttemptTrigger,
     CommitRequirement, ContinuationAttempt, CoordinatedEvent, EngineError, ExecutionOutcome,
     ExecutionStore, GatewayEngine, IntermediateFailure, ModelRequestFailureObservation,
-    ModelRequestFinalization, ModelRequestId, NewModelRequest, ProviderAccountStateOwner,
-    RequestAttemptContext, UpstreamSendState,
+    ModelRequestFinalization, ModelRequestId, NewModelRequest, ProviderAccountId,
+    ProviderAccountStateOwner, RequestAttemptContext, UpstreamSendState,
 };
 use crate::error::{
     ContinuationRecoveryDisposition, GatewayError, GatewayErrorKind, ProviderError,
@@ -1030,6 +1030,9 @@ where
         let is_transport_recovery = pending_retry
             .as_ref()
             .is_some_and(|retry| retry.transport_recovery);
+        let is_transient_recovery = pending_retry
+            .as_ref()
+            .is_some_and(|retry| !retry.transport_recovery);
         let connection_rotation_reserved = pending_retry
             .as_ref()
             .is_some_and(|retry| retry.reserve_connection_rotation);
@@ -1116,7 +1119,13 @@ where
         .with_credential_recovery_attempted(pinned_account.as_ref().is_some_and(|account| {
             self.credential_recovery_attempted_accounts
                 .contains(account)
-        }));
+        }))
+        .with_session_binding_recovery_from(
+            self.last_retryable_failure
+                .as_ref()
+                .filter(|failure| failure.requests_session_binding_recovery())
+                .and_then(|_| self.last_attempt_account.clone()),
+        );
         account_context
             .excluded_proxy_endpoints
             .clone_from(&self.excluded_proxy_endpoints);
@@ -1242,7 +1251,13 @@ where
                 Ok(stream) => stream,
                 Err(error) => {
                     return self
-                        .handle_prepare_failure(error, &candidate, next_attempt, &attempt_trace)
+                        .handle_prepare_failure(
+                            error,
+                            &candidate,
+                            next_attempt,
+                            &attempt_trace,
+                            pinned_account.as_ref().filter(|_| is_transient_recovery),
+                        )
                         .await
                         .map(Some);
                 }
@@ -1436,6 +1451,7 @@ where
         candidate: &ProviderCandidate,
         next_attempt: NonZeroU32,
         attempt_trace: &TraceContext,
+        transient_retry_account: Option<&ProviderAccountId>,
     ) -> Result<PullOutcome, EngineError> {
         attempt_trace.record_provider_failure(&error);
         if self.continuation_attempt == ContinuationAttempt::RotateForClientReplay
@@ -1474,9 +1490,12 @@ where
             && account_unavailable;
         let continuation_retry =
             retry_allowed && self.prepare_unavailable_native_continuation_replay(&error);
+        let transient_rotation = transient_retry_account
+            .filter(|_| self.can_rotate_unavailable_transient_account(&error));
         let candidate_retry = retry_allowed
             && !connection_fallback
             && !continuation_retry
+            && transient_rotation.is_none()
             && (account_unavailable || infrastructure_unavailable)
             && not_sent
             && self.current_send_state() == UpstreamSendState::NotSent
@@ -1504,13 +1523,17 @@ where
                     .get()
                     .saturating_sub(self.routing_attempts),
                 remaining_deadline: Duration::ZERO,
-                retry_allowed: connection_fallback || continuation_retry || candidate_retry,
+                retry_allowed: connection_fallback
+                    || continuation_retry
+                    || transient_rotation.is_some()
+                    || candidate_retry,
             })
             .await?;
         attempt_trace.record("retry.decided", json!({
             "phase": "prepare", "retryable": retryable,
             "continuationRetry": continuation_retry, "candidateRetry": candidate_retry,
             "connectionFallback": connection_fallback,
+            "transientRotation": transient_rotation.is_some(),
             "retryProhibited": error.retry_is_prohibited(),
             "sendState": error.send_state().as_str(),
             "requestSendState": self.current_send_state().as_str(),
@@ -1527,6 +1550,8 @@ where
                     .expect("pending connection rotation");
                 self.excluded_accounts.remove(&recovery.account);
                 self.pending_retry = Some(recovery);
+            } else if let Some(account) = transient_rotation {
+                self.excluded_accounts.insert(account.clone());
             } else if candidate_retry {
                 // 原账号只属于原 Provider，跨候选后不能拿旧钉选作恢复兜底
                 self.connection_rotation = None;
@@ -2311,6 +2336,37 @@ where
         self.continuation_attempt = ContinuationAttempt::ReplayAny;
         self.excluded_accounts.insert(pin.account().clone());
         true
+    }
+
+    fn can_rotate_unavailable_transient_account(&self, error: &ProviderError) -> bool {
+        self.account_selection.required_account().is_none()
+            && self.continuation_attempt == ContinuationAttempt::None
+            && !self.replay_barrier_reached
+            && !self.delivery_pending
+            && !self.execution_effect_observed()
+            && !error.retry_is_prohibited()
+            && error.send_state() == UpstreamSendState::NotSent
+            && matches!(
+                error.kind(),
+                ProviderErrorKind::NoEligibleAccount
+                    | ProviderErrorKind::AccountCapacityUnavailable
+                    | ProviderErrorKind::QuotaExhausted
+                    | ProviderErrorKind::ConcurrencyQueueFull
+                    | ProviderErrorKind::ConcurrencyQueueTimeout
+            )
+            && self.routing_attempts < self.plan.max_attempts().get()
+            && self.account_rotations < self.plan.account_selection_policy().max_account_rotations()
+            && self.last_retryable_failure.as_ref().is_some_and(|failure| {
+                !failure.retry_is_prohibited()
+                    && provider_proved_replay_safe(failure)
+                    && matches!(
+                        failure.pre_delivery_retry(),
+                        Some(crate::error::PreDeliveryRetry::SameAccountTransientRetry {
+                            policy: crate::error::TransientRetryPolicy::RetryThenRotateAccount,
+                            ..
+                        })
+                    )
+            })
     }
 
     fn reset_uncommitted_observations(&mut self) {

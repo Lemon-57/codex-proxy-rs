@@ -42,7 +42,7 @@ export function useSettingsFormRules(form: () => SettingsForm) {
     'accountQueueTimeoutSeconds': integer(1, 120, t('settings.form.invalidQueueSettings')),
     'maxRetryAfterSeconds': integer(0, 4_294_967_295, t('settings.form.invalidRetryAfterLimit')),
     'responsesMaxDecompressedBodyMiB': integer(1, Math.floor(Number.MAX_SAFE_INTEGER / 1024 / 1024), t('settings.form.invalidBodyLimit')),
-    'resetCreditLeadMinutes': integer(1, 1440, t('settings.form.invalidResetLeadTime')),
+    'resetCreditLeadMinutes': integer(1, Number.MAX_SAFE_INTEGER, t('settings.form.invalidResetLeadTime')),
     'resetCreditMaxWeeklyRemainingPercent': {
       ...integer(0, 100, t('settings.form.invalidQuotaThreshold')),
       required: false,

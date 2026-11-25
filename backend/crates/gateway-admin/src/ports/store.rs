@@ -18,7 +18,8 @@ use crate::model::{
     accounts::{
         AccountListQuery, AccountPage, AccountPageItem, AccountRuntimeSnapshot,
         AccountUpdateResult, AccountUsage, AccountUsageWindowQuery, AccountUsageWindowResult,
-        AccountsUpdateResult, BatchUpdateAccounts, DeleteAccounts, UpdateAccount,
+        AccountsUpdateResult, BatchUpdateAccounts, DeleteAccounts, NativeRefreshGroupCandidate,
+        NativeRefreshGroupMove, UpdateAccount,
     },
     auth::{AdminAuditEvent, AuthSession},
     client_keys::{
@@ -122,6 +123,30 @@ pub type BatchClientKeyProfileMerger = Box<
 pub trait AccountStore:
     super::reset_credit_automation::ResetCreditAutomationStore + Send + Sync
 {
+    async fn native_refresh_group_candidates(
+        &self,
+        _command: &NativeRefreshGroupMove,
+    ) -> AdminStoreResult<Vec<NativeRefreshGroupCandidate>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "provider_account",
+            "native refresh observations unavailable",
+        ))
+    }
+
+    async fn move_native_refresh_group_member(
+        &self,
+        _command: &NativeRefreshGroupMove,
+        _candidate: &NativeRefreshGroupCandidate,
+        _context: &MutationContext,
+    ) -> AdminStoreResult<Option<Revision>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "provider_account",
+            "native refresh group update unavailable",
+        ))
+    }
+
     /// 插件回调按授权 Provider/账号在数据库过滤后做稳定 cursor 分页
     async fn list_plugin_accounts(
         &self,

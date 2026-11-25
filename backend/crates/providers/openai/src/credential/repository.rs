@@ -45,6 +45,7 @@ impl CodexCredentialRepository {
         secret: CodexOAuthSecret,
         access_token_expires_at: Option<SystemTime>,
         next_refresh_at: Option<SystemTime>,
+        native_refresh_plan: Option<String>,
     ) -> Result<CredentialRevision, CredentialRepositoryError> {
         let current = self
             .store
@@ -80,6 +81,7 @@ impl CodexCredentialRepository {
             CredentialRepositoryError::InvalidCredentialData(Some(ErrorSource::new(source)))
         })?
         .preserving_profile()
+        .with_native_refresh_plan(native_refresh_plan)
         .with_account_state(
             oauth_account_state(account, CredentialState::Ready),
             SystemTime::now(),
@@ -136,13 +138,12 @@ impl CodexCredentialRepository {
 
     pub async fn list_for_provider(
         &self,
-        include_disabled: bool,
     ) -> Result<Vec<ProviderAccount>, CredentialRepositoryError> {
         let provider = ProviderKind::new(PROVIDER_NAME).map_err(|source| {
             CredentialRepositoryError::InvalidCredentialData(Some(ErrorSource::new(source)))
         })?;
         self.store
-            .list_for_provider(&provider, include_disabled)
+            .list_for_provider(&provider)
             .await
             .map_err(Into::into)
     }

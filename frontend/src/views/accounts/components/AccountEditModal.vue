@@ -4,7 +4,7 @@ import type { ApiKeyAccountForm } from '../utils/upstreamApiKey'
 
 import type { Account, AccountGroupRef, AccountModelAccess } from '@/api'
 
-import { ZButton, ZDialog, ZForm, ZFormItem, ZSegmented } from '@codex-proxy/ui'
+import { ZButton, ZDatePicker, ZDialog, ZForm, ZFormItem, ZInput, ZSegmented } from '@codex-proxy/ui'
 
 import { computed, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -40,6 +40,8 @@ const transportOptions = [
   { label: 'SSE', value: 'http' },
 ]
 const notes = defineModel<string>('notes', { required: true })
+const supplier = defineModel<string>('supplier', { required: true })
+const manualExpiresAt = defineModel<string | null>('manualExpiresAt', { required: true })
 const name = defineModel<string>('name', { required: true })
 const enabled = defineModel<boolean>('enabled', { required: true })
 const concurrencyLimit = defineModel<string>('concurrencyLimit', { required: true })
@@ -94,7 +96,6 @@ async function requestSave() {
           class="min-w-0 flex-1"
           :account="account"
           size="lg"
-          show-notes
         />
         <div class="flex shrink-0 items-center gap-3">
           <AccountPlanBadge :upstream="account.upstream" :authentication-kind="account.authenticationKind" :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
@@ -130,6 +131,13 @@ async function requestSave() {
           </ZFormItem>
         </template>
       </AccountSettingsFields>
+
+      <ZFormItem label="供应商">
+        <ZInput v-model="supplier" :maxlength="100" placeholder="手动填写供应商，留空可清除" :disabled="saving" />
+      </ZFormItem>
+      <ZFormItem label="到期时间" description="手动记录，不自动停用账号">
+        <ZDatePicker v-model="manualExpiresAt" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" placeholder="选择到期时间" :disabled="saving" class="w-full" />
+      </ZFormItem>
     </ZForm>
 
     <template #footer>

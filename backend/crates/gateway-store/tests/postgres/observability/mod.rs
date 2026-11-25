@@ -962,7 +962,7 @@ async fn usage_search_should_ignore_request_ids_and_preserve_exact_filters() {
 }
 
 #[tokio::test]
-async fn usage_account_filter_matches_only_historical_names_and_emails() {
+async fn usage_account_filter_matches_historical_names_and_emails_across_statuses() {
     use admin_observability::UsageRecordStatus::{All, Error, Success};
 
     let Some(database) = TestDatabase::create("usage_account_filter").await else {
@@ -997,7 +997,7 @@ async fn usage_account_filter_matches_only_historical_names_and_emails() {
         (All, "alice", 1, 2, Some("req_observe_failed")),
         (All, "alice", 2, 2, Some("req_observe_success")),
         (Error(None), "@example", 1, 0, None),
-        (All, "ALICE", 1, 0, None),
+        (All, "ALICE", 1, 2, Some("req_observe_failed")),
         (All, "alice%ops", 1, 0, None),
         (All, "public-model", 1, 0, None),
     ] {

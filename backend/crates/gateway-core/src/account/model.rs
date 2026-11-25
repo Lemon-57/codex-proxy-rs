@@ -739,7 +739,8 @@ pub fn resolve_account_status(
     facts: &AccountStatusFacts,
     now: SystemTime,
 ) -> AccountStatusProjection {
-    if !facts.enabled {
+    // 已确认无效的授权必须可见，暂停事实仍由 enabled 独立保护调度
+    if !facts.enabled && facts.credential_state != CredentialState::Invalid {
         return status_projection(AccountStatus::Disabled);
     }
     let credential_error = facts.credential_state.error_reason().or_else(|| {
@@ -1298,6 +1299,7 @@ pub struct CredentialCasUpdateParts {
     pub access_token_expires_at: Option<SystemTime>,
     pub next_refresh_at: Option<SystemTime>,
     pub account_state: Option<Box<CredentialStateWrite>>,
+    pub native_refresh_plan: Option<String>,
 }
 
 /// 刷新后的完整 CAS 写回
@@ -1313,6 +1315,7 @@ pub struct CredentialCasUpdate {
     access_token_expires_at: Option<SystemTime>,
     next_refresh_at: Option<SystemTime>,
     account_state: Option<Box<CredentialStateWrite>>,
+    native_refresh_plan: Option<String>,
 }
 
 impl fmt::Debug for CredentialCasUpdate {
@@ -1368,7 +1371,14 @@ impl CredentialCasUpdate {
             access_token_expires_at,
             next_refresh_at,
             account_state: None,
+            native_refresh_plan: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_native_refresh_plan(mut self, plan: Option<String>) -> Self {
+        self.native_refresh_plan = plan;
+        self
     }
 
     /// 仅轮换凭据，保留提交时的账号资料，避免覆盖并发额度观测更新的套餐
@@ -1457,6 +1467,7 @@ impl CredentialCasUpdate {
             access_token_expires_at: self.access_token_expires_at,
             next_refresh_at: self.next_refresh_at,
             account_state: self.account_state,
+            native_refresh_plan: self.native_refresh_plan,
         }
     }
 }

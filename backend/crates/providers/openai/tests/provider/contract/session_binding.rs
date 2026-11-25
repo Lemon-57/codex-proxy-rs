@@ -4,6 +4,76 @@ use super::*;
 use gateway_core::engine::policy::AccountScheduleRole;
 
 #[tokio::test]
+async fn late_failed_account_recovery_does_not_overwrite_the_replacement_binding() {
+    use gateway_core::account::AccountAffinity;
+
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let server = MockServer::start().await;
+    let provider = provider_with_affinity_and_base_url(&store, affinity, server.uri());
+    let operation = || planned_request("openai", turn_request("recovery-session", "recovery-turn"));
+    let attempt = |excluded, recovery| {
+        AttemptContext::new(
+            RequestAttemptContext::new(
+                ModelRequestId::new("req_binding_recovery").unwrap(),
+                ClientApiKeyId::new("key_openai_contract").unwrap(),
+            ),
+            NonZeroU32::new(2).unwrap(),
+            SystemTime::now() + Duration::from_secs(5),
+            account_policy().with_openai_account_affinity(AccountAffinity::Preferred),
+            AccountAttemptContext::new(excluded, None, None)
+                .with_account_scope(contract_account_scope())
+                .with_session_binding_recovery_from(recovery),
+            None,
+            CancellationToken::new(),
+        )
+    };
+    drop(
+        provider
+            .clone()
+            .execute(operation(), attempt(BTreeSet::new(), None))
+            .await
+            .unwrap(),
+    );
+    for id in ["acct_subagent_a", "acct_subagent_b"] {
+        create_account(&store, id).await;
+    }
+    let original = ProviderAccountId::new("acct_provider_contract").unwrap();
+    let replacement = provider
+        .clone()
+        .execute(
+            operation(),
+            attempt(BTreeSet::from([original.clone()]), Some(original.clone())),
+        )
+        .await
+        .unwrap();
+    let owner = replacement.metadata().provider_account_id().clone();
+    assert_ne!(owner, original);
+    drop(replacement);
+    // 迟到的 A 失败只能恢复 A 的绑定，即便 B 暂时不可选也不能把主绑定改成 C
+    let late = provider
+        .clone()
+        .execute(
+            operation(),
+            attempt(
+                BTreeSet::from([original.clone(), owner.clone()]),
+                Some(original),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_ne!(late.metadata().provider_account_id(), &owner);
+    drop(late);
+    let next = provider
+        .execute(operation(), attempt(BTreeSet::new(), None))
+        .await
+        .unwrap();
+    assert_eq!(next.metadata().provider_account_id(), &owner);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn session_affinity_storage_tolerates_delays_but_rejects_expired_requests_before_sending() {
     for (delay_ms, should_succeed) in [(250, true), (750, false)] {
         let store = Arc::new(MemoryAccountStore::default());

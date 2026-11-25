@@ -29,6 +29,7 @@ const timingLabel = computed(() => {
 })
 const resultText = computed(() => {
   switch (status.value?.lastResult) {
+    case 'quota_refresh_pending': return t('accounts.quotaReset.automation.quotaRefreshPending')
     case 'pending': return status.value?.enabled
       ? t('accounts.quotaReset.automation.confirming')
       : t('accounts.quotaReset.automation.unconfirmed')

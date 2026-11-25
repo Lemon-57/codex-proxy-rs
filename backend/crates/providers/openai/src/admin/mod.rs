@@ -64,7 +64,8 @@ use crate::credential::{
     ExportManagedCodexCredential, StartCodexOAuthAuthorization, StoredCodexPendingAuthorization,
 };
 use crate::credential::{
-    CodexCredentialCodec, CodexOAuthSecret, oauth_owner_ref, parse_access_token_expiration,
+    CodexCredentialCodec, CodexOAuthSecret, RtProfilePolicy, oauth_owner_ref,
+    parse_access_token_expiration,
 };
 use crate::transport::CodexWebSocketPool;
 use crate::transport::profile::{
@@ -577,6 +578,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
                 owner_ref: oauth_owner_ref(binding.owner()),
                 flow_id: command.flow_id,
                 callback_url: SecretString::from(command.callback_url),
+                expected_identity_revision: command.expected_identity_revision,
             })
             .await
             .inspect_err(|error| {
@@ -638,6 +640,39 @@ impl ProviderAdmin for OpenAiAdminProvider {
         if !account_matches_record(&current.account, &command.account) {
             return Err(provider_admin_error(ProviderAdminErrorKind::Conflict)
                 .with_public_message("凭据已更新，请刷新账号列表"));
+        }
+        let material = command
+            .provider_material
+            .expose_to_provider()
+            .expose_to_provider();
+        if let Some(replacement) = material.get("supplied_refresh_token") {
+            let replacement = replacement
+                .as_str()
+                .ok_or_else(|| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+            if material
+                .get("expected_credential_revision")
+                .and_then(Value::as_u64)
+                != Some(current.account.revision().get())
+            {
+                return Err(provider_admin_error(ProviderAdminErrorKind::Conflict)
+                    .with_public_message("账号凭据版本已变化，未验证所提供的 RT"));
+            }
+            let flag = |key| material.get(key).and_then(Value::as_bool) == Some(true);
+            let profile_policy = match (
+                flag("allow_plan_mismatch"),
+                flag("allow_workspace_and_plan_change"),
+            ) {
+                (true, true) => RtProfilePolicy::UpdateProfileOnWorkspaceChange,
+                (true, false) => RtProfilePolicy::MatchWorkspace,
+                (false, true) => RtProfilePolicy::UpdateWorkspaceAndPlan,
+                (false, false) => RtProfilePolicy::MatchWorkspaceAndPlan,
+            };
+            let prepared = self
+                .credentials
+                .replace_refresh_token(current, replacement, profile_policy)
+                .await
+                .map_err(map_credential_admin_error)?;
+            return prepared_rotation(prepared, command.account.provider_kind);
         }
         if current.account.authentication_kind()
             == crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY
@@ -1096,6 +1131,7 @@ fn prepared_rotation(
         access_token_expires_at,
         next_refresh_at,
         account_state: _,
+        native_refresh_plan,
     } = credential.into_parts();
     if profile != credential_profile || profile.account_id != account_id {
         return Err(provider_admin_error(ProviderAdminErrorKind::Internal));
@@ -1114,6 +1150,7 @@ fn prepared_rotation(
             preserve_profile,
             preserve_credential_state: false,
             preserve_access_token_expiry,
+            native_refresh_plan,
             provider_material: ProviderDocument::new(OpaqueProviderData::new(
                 credential.into_inner(),
             )),

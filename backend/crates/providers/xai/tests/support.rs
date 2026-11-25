@@ -356,17 +356,14 @@ impl ProviderAccountStore for MemoryProviderAccountStore {
     async fn list_for_provider(
         &self,
         provider: &ProviderKind,
-        include_disabled: bool,
     ) -> Result<Vec<ProviderAccount>, StoreError> {
         if self.fail_provider_listing.load(Ordering::SeqCst) {
             return Err(invalid());
         }
+        // 与 Postgres 实现的调度列表语义一致：停用账号不进入常规候选
         Ok(lock(&self.accounts)
             .values()
-            .filter(|stored| {
-                stored.account.provider() == provider
-                    && (include_disabled || stored.account.enabled())
-            })
+            .filter(|stored| stored.account.provider() == provider && stored.account.enabled())
             .map(|stored| stored.account.clone())
             .collect())
     }
@@ -452,6 +449,7 @@ impl ProviderAccountStore for MemoryProviderAccountStore {
             access_token_expires_at,
             next_refresh_at,
             account_state,
+            native_refresh_plan: _,
         } = update.into_parts();
         let mut accounts = lock(&self.accounts);
         let stored = accounts.get_mut(&account_id).ok_or_else(invalid)?;

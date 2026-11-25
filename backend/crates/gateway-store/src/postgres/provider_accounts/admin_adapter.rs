@@ -230,6 +230,22 @@ impl PgAdminAccountStore {
 
 #[async_trait]
 impl AccountStore for PgAdminAccountStore {
+    async fn native_refresh_group_candidates(
+        &self,
+        command: &gateway_admin::model::accounts::NativeRefreshGroupMove,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::accounts::NativeRefreshGroupCandidate>> {
+        super::refresh_groups::candidates(&self.pool, command).await
+    }
+
+    async fn move_native_refresh_group_member(
+        &self,
+        command: &gateway_admin::model::accounts::NativeRefreshGroupMove,
+        candidate: &gateway_admin::model::accounts::NativeRefreshGroupCandidate,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Option<AdminRevision>> {
+        super::refresh_groups::move_member(&self.pool, command, candidate, context).await
+    }
+
     async fn load_account_record(
         &self,
         account_id: &CoreProviderAccountId,
@@ -675,6 +691,15 @@ impl AccountStore for PgAdminAccountStore {
         if command.outbound_proxy.is_some() {
             changed_fields.push("outbound_proxy".to_owned());
         }
+        if command.supplier.is_some() {
+            changed_fields.push("supplier".to_owned());
+        }
+        if command.manual_starts_at.is_some() {
+            changed_fields.push("manual_starts_at".to_owned());
+        }
+        if command.manual_expires_at.is_some() {
+            changed_fields.push("manual_expires_at".to_owned());
+        }
         if command.notes.is_some() {
             changed_fields.push("notes".to_owned());
         }
@@ -690,6 +715,9 @@ impl AccountStore for PgAdminAccountStore {
                 auto_use_quota_credits: None,
                 name: command.name,
                 notes: command.notes,
+                supplier: command.supplier,
+                manual_starts_at: command.manual_starts_at,
+                manual_expires_at: command.manual_expires_at,
                 enabled: Some(command.enabled),
                 concurrency_limit: Some(command.concurrency_limit),
                 weight: Some(command.weight),
@@ -795,6 +823,9 @@ impl AccountStore for PgAdminAccountStore {
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
+                supplier: None,
+                manual_starts_at: None,
+                manual_expires_at: None,
                 account_ids: command.account_ids,
                 pauses,
                 quota_settings: command.quota_settings,
@@ -1066,6 +1097,13 @@ pub(super) fn prepare_rotation(
             preserve_profile: prepared.preserve_profile,
             preserve_credential_state: prepared.preserve_credential_state,
             preserve_access_token_expiry: prepared.preserve_access_token_expiry,
+            native_refresh_plan: if action
+                == MutationAuditOperation::ProviderAccountRefreshCredential
+            {
+                prepared.native_refresh_plan
+            } else {
+                None
+            },
         },
         audit: mutation_audit(context, action, account_id.as_str(), changed_fields),
     })

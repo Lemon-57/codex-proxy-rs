@@ -58,6 +58,302 @@ impl ExecutionStore for NoopExecutionStore {
 }
 
 #[tokio::test]
+async fn websocket_pool_opening_403_shares_the_turn_rate_limit_rotation_budget() {
+    use gateway_core::account::AccountAffinity;
+    for exhaust in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        for account in ["acct_provider_contract", "acct_subagent_a", "acct_subagent_b", "acct_affinity", "acct_local_affinity"] {
+            create_account(&store, account).await;
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let expected_attempts = if exhaust { 4 } else { 3 };
+        let server = tokio::spawn(async move {
+            for index in 0..expected_attempts {
+                let (stream, _) = listener.accept().await.unwrap();
+                if index == 0 || (!exhaust && index == 2) {
+                    let mut socket = accept_codex_test_websocket(stream).await;
+                    assert!(matches!(socket.next().await.unwrap().unwrap(), Message::Text(_)));
+                    if index == 0 {
+                        socket.send(Message::Text(json!({
+                            "type":"error", "status":429,
+                            "error":{"type":"rate_limit_error", "code":"turn_rate_limit_exceeded", "message":"Turn rate limited."}
+                        }).to_string().into())).await.unwrap();
+                    } else {
+                        for line in CAPTURE_COMPLETED_SSE.lines() {
+                            if let Some(data) = line.strip_prefix("data: ") && data != "[DONE]" {
+                                socket.send(Message::Text(data.to_owned().into())).await.unwrap();
+                            }
+                        }
+                    }
+                } else {
+                    #[allow(clippy::result_large_err)]
+                    let result = tokio_tungstenite::accept_hdr_async_with_config(
+                        stream,
+                        |_request: &tungstenite::handshake::server::Request,
+                         _response: tungstenite::handshake::server::Response| {
+                            Err(tungstenite::http::Response::builder().status(403)
+                                .header("content-length", "0").body(None::<String>).unwrap())
+                        },
+                        Some(crate::transport::websocket_accept_config()),
+                    ).await;
+                    assert!(result.is_err());
+                }
+            }
+        });
+        let leases = Arc::new(TestLeaseCoordinator::default());
+        let provider = provider_with_affinity_and_base_url_and_leases(
+            &store, Arc::new(MemorySessionAffinity::default()), base, Arc::clone(&leases),
+        );
+        let providers = ProviderRegistry::new([provider as Arc<dyn gateway_core::engine::provider::Provider>]).unwrap();
+        let coordinator = AttemptCoordinator::new(GatewayEngine::new(Arc::new(NoopExecutionStore), providers));
+        let Operation::Generate(generate) = turn_request("mixed-websocket-session", "mixed-websocket-turn") else {
+            unreachable!()
+        };
+        let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+            generate.protocol_payload().clone().with_context(Map::from_iter([
+                ("use_websocket".into(), json!(true)),
+            ])),
+        ));
+        let settings = SettingsValues::new(3, "smart", Default::default(), None, None)
+            .with_openai_account_affinity(AccountAffinity::Preferred)
+            .with_max_retry_after_seconds(120)
+            .with_max_account_rotations(3);
+        let mut session = coordinator.start(
+            execution_request("req_mixed_websocket_rotation", &operation, Duration::from_secs(5)),
+            operation.clone(), execution_plan_with_settings(&operation, settings),
+            None, None, CancellationToken::new(),
+        ).await.unwrap();
+        let result = timeout(Duration::from_secs(5), session.collect_uncommitted()).await.unwrap();
+        if exhaust {
+            let EngineError::Provider(error) = result.unwrap_err() else {
+                panic!("expected provider rejection");
+            };
+            assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+            assert_eq!(error.diagnostic().and_then(|diagnostic| diagnostic.code()), Some("websocket_upgrade_403"));
+            let response = error.client_visible_upstream_response().unwrap();
+            assert_eq!(response.status(), 403);
+            assert!(response.body().is_empty());
+        } else {
+            assert!(result.is_ok(), "{result:?}");
+            session.commit_downstream(Some(200)).await.unwrap();
+        }
+        timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        let requests = leases.requests.lock().unwrap();
+        assert_eq!(requests.len(), expected_attempts);
+        assert_eq!(requests.iter().map(|request| request.account_id()).collect::<BTreeSet<_>>().len(), expected_attempts);
+    }
+}
+
+#[tokio::test]
+async fn turn_rate_limit_rotates_and_hands_preferred_session_to_the_admitted_account() {
+    use gateway_core::account::AccountAffinity;
+    use std::sync::atomic::AtomicUsize;
+
+    for transport in ["http", "sse", "websocket"] {
+        for (rotations, all_fail, account_count, expected_attempts) in [
+            (0, false, 3, 1),
+            (1, false, 3, 2),
+            (1, true, 3, 2),
+            (2, true, 3, 3),
+            (2, true, 1, 1),
+        ] {
+            let store = Arc::new(MemoryAccountStore::default());
+            create_account(&store, "acct_provider_contract").await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let failure = json!({
+                "type":"error", "status":429, "headers":{"Retry-After":"110"},
+                "error":{"type":"rate_limit_error", "code":"turn_rate_limit_exceeded",
+                    "message":"Codex is at capacity, please try again later"}
+            });
+            let upstream = MockServer::start().await;
+            let upstream_calls = Arc::clone(&calls);
+            let (base, websocket_server) = if transport == "websocket" {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let base = format!("http://{}", listener.local_addr().unwrap());
+                let failure = failure.clone();
+                let server = tokio::spawn(async move {
+                    loop {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let mut socket = accept_codex_test_websocket(socket).await;
+                        socket.next().await.unwrap().unwrap();
+                        let attempt = upstream_calls.fetch_add(1, Ordering::SeqCst);
+                        if all_fail || attempt == 0 {
+                            socket
+                                .send(Message::Text(failure.to_string().into()))
+                                .await
+                                .unwrap();
+                        } else {
+                            for line in CAPTURE_COMPLETED_SSE.lines() {
+                                if let Some(data) = line.strip_prefix("data: ")
+                                    && data != "[DONE]"
+                                {
+                                    socket
+                                        .send(Message::Text(data.to_owned().into()))
+                                        .await
+                                        .unwrap();
+                                }
+                            }
+                        }
+                    }
+                });
+                (base, Some(server))
+            } else {
+                let failure = failure.clone();
+                Mock::given(method("POST"))
+                    .and(path("/codex/responses"))
+                    .respond_with(move |_: &wiremock::Request| {
+                        let attempt = upstream_calls.fetch_add(1, Ordering::SeqCst);
+                        if all_fail || attempt == 0 {
+                            if transport == "http" {
+                                ResponseTemplate::new(429)
+                                    .insert_header("retry-after", "110")
+                                    .set_body_json(&failure)
+                            } else {
+                                ResponseTemplate::new(200).set_body_raw(
+                                    format!("event: error\ndata: {failure}\n\n"),
+                                    "text/event-stream",
+                                )
+                            }
+                        } else {
+                            ResponseTemplate::new(200)
+                                .set_body_raw(CAPTURE_COMPLETED_SSE, "text/event-stream")
+                        }
+                    })
+                    .mount(&upstream)
+                    .await;
+                (upstream.uri(), None)
+            };
+            let leases = Arc::new(TestLeaseCoordinator::default());
+            let provider = provider_with_affinity_and_base_url_and_leases(
+                &store,
+                Arc::new(MemorySessionAffinity::default()),
+                base,
+                Arc::clone(&leases),
+            );
+            let Operation::Generate(generate) = turn_request("turn-limit-session", "turn-limit")
+            else {
+                unreachable!()
+            };
+            let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+                generate
+                    .protocol_payload()
+                    .clone()
+                    .with_context(Map::from_iter([(
+                        "use_websocket".into(),
+                        json!(transport == "websocket"),
+                    )])),
+            ));
+            // 先认领唯一账号，再增加替代账号，验证重试确实跳过原有亲和
+            drop(
+                provider
+                    .clone()
+                    .execute(
+                        planned_request("openai", turn_request("turn-limit-session", "turn-limit")),
+                        context("req_turn_limit_seed", CancellationToken::new()),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            leases.requests.lock().unwrap().clear();
+            if account_count > 1 {
+                for id in ["acct_subagent_a", "acct_subagent_b"] {
+                    create_account(&store, id).await;
+                }
+            }
+            let providers = ProviderRegistry::new([
+                provider as Arc<dyn gateway_core::engine::provider::Provider>
+            ])
+            .unwrap();
+            let coordinator = AttemptCoordinator::new(GatewayEngine::new(
+                Arc::new(NoopExecutionStore),
+                providers,
+            ));
+            let settings = SettingsValues::new(3, "smart", Default::default(), None, None)
+                .with_openai_account_affinity(AccountAffinity::Preferred)
+                .with_max_account_rotations(rotations);
+            let plan = execution_plan_with_settings(&operation, settings);
+            let mut session = coordinator
+                .start(
+                    execution_request("req_turn_limit", &operation, Duration::from_secs(5)),
+                    operation.clone(),
+                    plan.clone(),
+                    None,
+                    None,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let result = timeout(Duration::from_secs(5), session.collect_uncommitted())
+                .await
+                .unwrap();
+            if rotations > 0 && !all_fail {
+                assert!(result.is_ok(), "{transport}: {result:?}");
+                session.commit_downstream(Some(200)).await.unwrap();
+            } else {
+                let EngineError::Provider(error) = result.unwrap_err() else {
+                    panic!("expected original upstream rejection")
+                };
+                assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
+                assert_eq!(error.retry_after(), Some(Duration::from_secs(110)));
+                assert_eq!(
+                    serde_json::from_str::<Value>(error.raw_upstream_error().unwrap().as_str())
+                        .unwrap(),
+                    failure,
+                );
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                expected_attempts,
+                "{transport}"
+            );
+            let selected = leases
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.account_id().clone())
+                .collect::<Vec<_>>();
+            assert_eq!(selected.len(), expected_attempts);
+            assert_eq!(selected[0].as_str(), "acct_provider_contract");
+            assert_eq!(
+                selected.iter().collect::<BTreeSet<_>>().len(),
+                expected_attempts
+            );
+            if rotations > 0 && !all_fail {
+                let mut next = coordinator
+                    .start(
+                        execution_request(
+                            "req_turn_limit_next",
+                            &operation,
+                            Duration::from_secs(5),
+                        ),
+                        operation,
+                        plan,
+                        None,
+                        None,
+                        CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                next.collect_uncommitted().await.unwrap();
+                next.commit_downstream(Some(200)).await.unwrap();
+                assert_eq!(calls.load(Ordering::SeqCst), expected_attempts + 1);
+                assert_eq!(
+                    leases.requests.lock().unwrap().last().unwrap().account_id(),
+                    &selected[1],
+                    "next request must directly prefer the replacement account: {transport}"
+                );
+            }
+            if let Some(server) = websocket_server {
+                server.abort();
+                let _ = server.await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn contributed_model_scope_survives_affinity_and_account_rotation() {
     use gateway_core::routing::ContributedModel;
     use std::sync::atomic::{AtomicUsize, Ordering};

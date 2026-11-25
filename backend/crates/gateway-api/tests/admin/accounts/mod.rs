@@ -125,6 +125,7 @@ mod query {
             "pageSize": 20,
             "provider": "xai",
             "search": "  operator  ",
+            "planType": "  TEAM  ",
             "status": "normal",
             "sortBy": "lastUsedAt",
             "sortDirection": "desc"
@@ -138,6 +139,7 @@ mod query {
             Some(ref provider) if provider.as_str() == "xai"
         ));
         assert_eq!(query.search.as_deref(), Some("operator"));
+        assert_eq!(query.plan_type.as_deref(), Some("team"));
         assert_eq!(query.status, Some(AccountStatus::Normal));
         assert_eq!(
             query.sort.expect("sort").field,
@@ -511,6 +513,38 @@ fn single_update_should_reject_oversized_notes_and_control_characters() {
         }))
         .unwrap();
         assert_eq!(request.validate().unwrap_err().field(), "notes");
+    }
+}
+
+#[test]
+fn single_update_validates_manual_details_independently_of_authorization_notes() {
+    use gateway_api::admin::accounts::UpdateAccountRequest;
+    use serde_json::json;
+    let baseline = json!({
+        "accountId": "acct_manual", "enabled": false, "concurrencyLimit": null,
+        "weight": 1, "groupIds": [], "notes": "unchanged authorization data",
+        "supplier": "示例供应商", "manualStartsAt": "2026-12-01T23:59:00+08:00",
+        "manualExpiresAt": "2026-12-31T23:59:00+08:00"
+    });
+    for expiration in [json!(null), json!(""), baseline["manualExpiresAt"].clone()] {
+        let mut value = baseline.clone();
+        value["manualExpiresAt"] = expiration;
+        value["manualStartsAt"] = value["manualExpiresAt"].clone();
+        let request: UpdateAccountRequest = serde_json::from_value(value).unwrap();
+        request.validate().unwrap();
+    }
+    for (field, invalid) in [
+        ("supplier", json!("备".repeat(101))),
+        ("supplier", json!("备注\u{0000}")),
+        ("manualExpiresAt", json!("2026-02-30T00:00:00Z")),
+        ("manualExpiresAt", json!("2026-12-31T23:59:00")),
+        ("manualStartsAt", json!("2026-02-30T00:00:00Z")),
+        ("manualStartsAt", json!("2026-12-01T23:59:00")),
+    ] {
+        let mut value = baseline.clone();
+        value[field] = invalid;
+        let request: UpdateAccountRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.validate().unwrap_err().field(), field);
     }
 }
 

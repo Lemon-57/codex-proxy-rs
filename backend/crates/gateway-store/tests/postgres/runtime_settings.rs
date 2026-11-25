@@ -52,6 +52,7 @@ pub(super) fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettin
             account_warmup_enabled: false,
             account_warmup_cron: "0 8 * * *".to_owned(),
             account_warmup_model: None,
+            reset_credit_default_enabled: false,
             reset_credit_lead_minutes: 10,
             reset_credit_on_low_weekly_quota: false,
             reset_credit_max_weekly_remaining_percent: None,
@@ -1354,6 +1355,35 @@ async fn reset_credit_weekly_threshold_defaults_unset_and_round_trips() {
 }
 
 #[tokio::test]
+async fn reset_credit_lead_window_round_trips_long_durations() {
+    let Some(database) = TestDatabase::create("reset_long_lead").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    for lead in [1, 1_441, 43_200, 525_600, i32::MAX as u32] {
+        let mut update = settings_with_margin(600);
+        update.values.reset_credit_lead_minutes = lead;
+        update.values.reset_credit_max_weekly_remaining_percent = Some(0);
+        repository.update_runtime_settings(update).await.unwrap();
+        let after = repository.load_runtime_settings().await.unwrap();
+        assert_eq!(after.values.reset_credit_lead_minutes, lead);
+        assert_eq!(
+            after.values.reset_credit_max_weekly_remaining_percent,
+            Some(0)
+        );
+    }
+    for invalid in [-1, 0] {
+        assert!(
+            sqlx::query("update runtime_settings set reset_credit_lead_minutes = $1 where id = 1")
+                .bind(invalid)
+                .execute(&database.pool)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
 async fn protection_revision_tracks_only_policy_changes_and_survives_return_to_previous_rules() {
     let Some(database) = TestDatabase::create("protection_revision").await else {
         return;
@@ -1361,7 +1391,8 @@ async fn protection_revision_tracks_only_policy_changes_and_survives_return_to_p
     let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
     let initial = repository.load_runtime_settings().await.unwrap();
     assert!(!initial.values.account_error_protection.enabled);
-    assert!(initial.values.account_error_protection.rules.is_empty());
+    // 现有迁移预置保护规则，但默认保持关闭；策略修订测试保留该初始配置。
+    assert!(!initial.values.account_error_protection.rules.is_empty());
     let a = settings_with_margin(300);
     repository.update_runtime_settings(a.clone()).await.unwrap();
     let first = repository.load_runtime_settings().await.unwrap();

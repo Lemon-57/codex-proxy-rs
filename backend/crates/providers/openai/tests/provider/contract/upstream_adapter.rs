@@ -1265,6 +1265,7 @@ async fn upstream_adapter_reloads_rotated_credentials_and_proxy_without_acceptin
             secret("rotated-adapter-access-token"),
             Some(SystemTime::now() + Duration::from_secs(3600)),
             None,
+            None,
         )
         .await
         .unwrap();

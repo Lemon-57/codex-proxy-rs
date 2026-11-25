@@ -42,6 +42,8 @@ export interface AccountDeletionResponse {
 
 // 请求参数类型：仅定义 API 边界的形状，调用方不依赖显式声明。
 interface AccountListParams {
+  planType?: string
+  supplier?: string
   page: number
   pageSize: number
   search?: string
@@ -53,6 +55,8 @@ interface AccountListParams {
 }
 
 interface AccountUpdateParam {
+  supplier?: string
+  manualExpiresAt?: string
   connection?: { baseUrl?: string, protocol?: ApiKeyConfiguration['protocol'], transport: ApiKeyConfiguration['transport'], apiKey?: string }
   outboundProxyId?: string
   accountId: string

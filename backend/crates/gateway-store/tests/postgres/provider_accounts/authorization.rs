@@ -1,6 +1,5 @@
 //! 验证账号授权回执的并发幂等、事务回滚与过期清理
 
-use chrono::SubsecRound;
 use gateway_admin::model::provider_credentials::{
     AuthorizationReceiptKey, PreparedCredentialRotationFacts,
 };
@@ -282,21 +281,36 @@ async fn expired_receipts_are_unreadable_and_reclaimed_without_removing_accounts
     database.close().await;
 }
 
-fn reauthorization(
-    id: &ProviderAccountId,
-    context: &MutationContext,
-    flow_id: &str,
-    replacement_identity: Option<ProviderAccountIdentity>,
-) -> AuthorizationCommit {
-    AuthorizationCommit {
-        key: AuthorizationReceiptKey::new(ProviderKind::new("openai").unwrap(), flow_id, context)
-            .unwrap(),
+#[tokio::test]
+async fn same_identity_oauth_reauthorization_clears_snapshot_but_keeps_exhaustion() {
+    let Some(database) = TestDatabase::create("same_identity_reauthorization_quota").await else {
+        return;
+    };
+    let store = admin_account_store(&database.pool);
+    let (seed, context) = command(credential("acct_quota_reauth", "same-user"));
+    let id = store.commit_authorization(seed, &context).await.unwrap().result.account_id;
+    let evidence: (chrono::DateTime<Utc>, chrono::DateTime<Utc>) = sqlx::query_as(
+        "update provider_accounts set enabled = false,
+         provider_quota_json = '{}'::jsonb, quota_observed_at = now(),
+         quota_access_state = 'exhausted', quota_evidence = 'usage_limit_reached',
+         quota_access_observed_at = now(), quota_reset_at = now() + interval '1 hour',
+         updated_at = greatest(updated_at, now()) where id = $1
+         returning quota_access_observed_at, quota_reset_at",
+    )
+    .bind(id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    let reauthorize = AuthorizationCommit {
+        key: AuthorizationReceiptKey::new(
+            ProviderKind::new("openai").unwrap(),
+            "same-identity-reauthorize-flow",
+            &context,
+        ).unwrap(),
         pending: PendingAuthorizationMutation::new(
             ProviderKind::new("openai").unwrap(),
-            AuthorizationMutationTarget::Reauthorize {
-                account_id: id.clone(),
-            },
-            AuthorizationOwnerBinding::from_context(context),
+            AuthorizationMutationTarget::Reauthorize { account_id: id.clone() },
+            AuthorizationOwnerBinding::from_context(&context),
         ),
         settings: None,
         credential: AuthorizationCredentialCommit::Reauthorize(Box::new(
@@ -304,106 +318,40 @@ fn reauthorization(
                 account_id: id.clone(),
                 provider_kind: ProviderKind::new("openai").unwrap(),
                 expected_credential_revision: gateway_admin::model::Revision::new(1).unwrap(),
-                replacement_identity,
-                name: "remote profile".into(),
-                email: Some("new@example.com".into()),
+                replacement_identity: None,
+                name: "same identity".into(),
+                email: Some("same@example.com".into()),
                 plan_type: Some("plus".into()),
                 preserve_profile: false,
                 preserve_credential_state: false,
                 preserve_access_token_expiry: false,
+                native_refresh_plan: None,
                 provider_material: ProviderDocument::new(OpaqueProviderData::new(
-                    json!({"access_token":"rotated-test-only"})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
+                    json!({"access_token":"reauthorized-test-only"}).as_object().unwrap().clone(),
                 )),
                 has_refresh_token: false,
                 access_token_expires_at: None,
                 next_refresh_at: None,
             },
         )),
-    }
-}
-
-#[tokio::test]
-async fn reauthorization_keeps_disabled_account_quota_only_for_the_same_identity() {
-    let Some(database) = TestDatabase::create("reauthorization_quota").await else {
-        return;
     };
-    let store = admin_account_store(&database.pool);
-    let repository = PgProviderAccountRepository::new(database.pool.clone());
-    for (slot, replacement) in [
-        ("acct_same", None),
-        (
-            "acct_rebound",
-            Some(ProviderAccountIdentity::new(
-                "new-user".into(),
-                Some("new-workspace".into()),
-            )),
-        ),
-    ] {
-        let mut input = credential(slot, slot);
-        input.enabled = false;
-        let (seed, context) = command(input);
-        let id = store
-            .commit_authorization(seed, &context)
-            .await
-            .unwrap()
-            .result
-            .account_id;
-        let observed_at = SystemTime::from(Utc::now().round_subsecs(6));
-        let reset_at = Utc::now() + TimeDelta::days(2);
-        let weekly = json!({"rate_limit":{"secondary_window":{
-            "used_percent":42, "limit_window_seconds":604800, "reset_at":reset_at.timestamp()
-        }}});
-        let observation = QuotaObservation {
-            account_id: id.clone(),
-            expected_revision: CredentialRevision::new(1).unwrap(),
-            quota: OpaqueProviderData::new(weekly.as_object().unwrap().clone()),
-            observed_at,
-            state: QuotaState::allowed(observed_at),
-            expected_connection: None,
-            quota_pause: None,
-            plan_type: None,
-        };
-        assert_eq!(
-            repository
-                .compare_and_swap_quota(observation.clone())
-                .await
-                .unwrap(),
-            QuotaWriteOutcome::Updated
-        );
-        let same_identity = replacement.is_none();
-        store
-            .commit_authorization(reauthorization(&id, &context, slot, replacement), &context)
-            .await
-            .unwrap();
-        let account = repository.get_account(&id).await.unwrap().unwrap();
-        assert!(!account.enabled());
-        assert_eq!(account.email(), Some("new@example.com"));
-        assert_eq!(
-            repository
-                .compare_and_swap_quota(observation.clone())
-                .await
-                .unwrap(),
-            QuotaWriteOutcome::Conflict
-        );
-        let mut snapshots = repository
-            .get_quotas(std::slice::from_ref(&id))
-            .await
-            .unwrap();
-        if same_identity {
-            let current = snapshots
-                .pop()
-                .expect("same quota window after reauthorization");
-            assert_eq!(current.expected_revision, account.revision());
-            assert_eq!(current.observed_at, observed_at);
-            assert_eq!(current.quota, observation.quota);
-        } else {
-            assert!(snapshots.is_empty());
-            assert_eq!(account.quota(), QuotaState::unknown());
-        }
-    }
+    assert!(store.commit_authorization(reauthorize, &context).await.unwrap().newly_committed);
+    let (enabled, snapshot_cleared, state, reason, observed, reset): (
+        bool, bool, String, String, chrono::DateTime<Utc>, chrono::DateTime<Utc>,
+    ) = sqlx::query_as(
+        "select enabled, provider_quota_json is null and quota_observed_at is null,
+         quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at
+         from provider_accounts where id = $1",
+    )
+    .bind(id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(!enabled);
+    assert!(snapshot_cleared);
+    assert_eq!(state, "exhausted");
+    assert_eq!(reason, "usage_limit_reached");
+    assert_eq!((observed, reset), evidence);
     database.close().await;
 }
 
@@ -416,16 +364,53 @@ async fn reauthorization_replay_keeps_the_committed_revision_and_later_profile_e
     let (seed, context) = command(credential("acct_reauthorize", "reauthorize-user"));
     let receipt = store.commit_authorization(seed, &context).await.unwrap();
     let id = receipt.result.account_id.clone();
-    let command = reauthorization(
-        &id,
-        &context,
-        "reauthorize-flow",
-        Some(ProviderAccountIdentity::new(
-            "new-user".into(),
-            Some("new-workspace".into()),
+    let command = AuthorizationCommit {
+        key: AuthorizationReceiptKey::new(
+            ProviderKind::new("openai").unwrap(),
+            "reauthorize-flow",
+            &context,
+        )
+        .unwrap(),
+        pending: PendingAuthorizationMutation::new(
+            ProviderKind::new("openai").unwrap(),
+            AuthorizationMutationTarget::Reauthorize {
+                account_id: id.clone(),
+            },
+            AuthorizationOwnerBinding::from_context(&context),
+        ),
+        settings: None,
+        credential: AuthorizationCredentialCommit::Reauthorize(Box::new(
+            PreparedCredentialRotationFacts {
+                account_id: id.clone(),
+                provider_kind: ProviderKind::new("openai").unwrap(),
+                expected_credential_revision: gateway_admin::model::Revision::new(1).unwrap(),
+                replacement_identity: Some(ProviderAccountIdentity::new(
+                    "new-user".into(),
+                    Some("new-workspace".into()),
+                )),
+                name: "remote profile".into(),
+                email: Some("new@example.com".into()),
+                plan_type: Some("plus".into()),
+                preserve_profile: false,
+                preserve_credential_state: false,
+                preserve_access_token_expiry: false,
+                native_refresh_plan: None,
+                provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                    json!({"access_token":"rotated-test-only"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )),
+                has_refresh_token: false,
+                access_token_expires_at: None,
+                next_refresh_at: None,
+            },
         )),
-    );
+    };
     let rename = UpdateAccount {
+        supplier: None,
+        manual_starts_at: None,
+        manual_expires_at: None,
         account_id: id.to_string(),
         name: Some("renamed team".to_owned()),
         notes: None,

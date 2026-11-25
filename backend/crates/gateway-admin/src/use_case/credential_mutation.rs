@@ -63,10 +63,7 @@ pub(super) fn observe_account_quotas(
                         continue;
                     }
                 };
-                if &account.provider_kind != provider.provider_kind()
-                    || (!account.enabled
-                        && provider.supports_peer_connection(&account.authentication_kind))
-                {
+                if !account.enabled || &account.provider_kind != provider.provider_kind() {
                     continue;
                 }
                 // 后台查询与手动刷新共用认证能力分派，互联协议由 Admin 解释
@@ -153,6 +150,7 @@ pub(super) async fn pending_authorization(
         None => {
             use crate::model::proxies::AccountProxySelection;
             proxy = match &command.outbound_proxy {
+                Some(AccountProxySelection::Url(value)) => Some(value.clone()),
                 Some(AccountProxySelection::Saved(id)) => {
                     let record = proxies
                         .get(id)

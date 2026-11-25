@@ -79,6 +79,7 @@ pub trait ProviderAccountAdminRepository: Send + Sync {
 #[derive(Clone)]
 pub struct PgProviderAccountRepository {
     pub(crate) pool: PgPool,
+    state_notifications: Option<gateway_core::account::AccountStateNotifications>,
     protection: Option<std::sync::Arc<dyn gateway_core::provider_ports::ProviderCooldownPort>>,
 }
 
@@ -88,8 +89,18 @@ impl PgProviderAccountRepository {
         Self {
             pool,
             protection: None,
+            state_notifications: None,
         }
     }
+    #[must_use]
+    pub fn with_state_notifications(
+        mut self,
+        notifications: gateway_core::account::AccountStateNotifications,
+    ) -> Self {
+        self.state_notifications = Some(notifications);
+        self
+    }
+
     #[must_use]
     pub fn with_account_error_protection(
         mut self,
@@ -107,7 +118,7 @@ impl PgProviderAccountRepository {
         omissions: Option<&gateway_core::account::AccountCatalogOmissions>,
     ) -> StoreResult<Vec<ProviderAccountSummary>> {
         let mut query = sqlx::QueryBuilder::<Postgres>::new(
-            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
+            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_starts_at, manual_expires_at, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, quota_settings, quota_paused, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
@@ -205,7 +216,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
             return Err(invalid("plugin account page limit must be positive"));
         }
         let rows = sqlx::query(
-            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
+            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_starts_at, manual_expires_at, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, quota_settings, quota_paused, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
@@ -367,14 +378,21 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
     ) -> StoreResult<bool> {
         update.validate()?;
         let result = sqlx::query(
-            "update provider_accounts
+            "with previous as (
+                 select id, credential_state, last_error_reason from provider_accounts
+                 where id = $1 and credential_revision = $2
+                   and (credential_observed_at is null or credential_observed_at <= $4)
+                 for update
+             )
+             update provider_accounts a
              set credential_state = $3,
                  credential_observed_at = $4,
                  last_error_reason = $5,
                  last_error_message = $6,
-                 updated_at = greatest(now(), updated_at, $4)
-             where id = $1 and credential_revision = $2
-               and (credential_observed_at is null or credential_observed_at <= $4)",
+                 updated_at = greatest(now(), a.updated_at, $4)
+             from previous p where a.id = p.id
+             returning p.credential_state is distinct from $3
+                    or p.last_error_reason is distinct from $5 as state_changed",
         )
         .bind(update.account_id)
         .bind(to_i64(update.expected_revision.get())?)
@@ -382,10 +400,18 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         .bind(update.credential_observed_at)
         .bind(update.error_reason.map(AccountErrorReason::as_str))
         .bind(update.message.as_deref())
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|source| postgres_unavailable("apply provider account state", source))?;
-        Ok(result.rows_affected() == 1)
+        if let Some(row) = &result
+            && row
+                .try_get::<bool, _>("state_changed")
+                .map_err(|source| postgres_unavailable("decode account state change", source))?
+            && let Some(notifications) = &self.state_notifications
+        {
+            notifications.notify();
+        }
+        Ok(result.is_some())
     }
 
     async fn set_provider_account_enabled(&self, id: &str, enabled: bool) -> StoreResult<bool> {
@@ -435,12 +461,16 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
 
     async fn delete_provider_account(&self, id: &str) -> StoreResult<bool> {
         require_nonempty(ENTITY, "id", id)?;
-        let result = sqlx::query("delete from provider_accounts where id = $1 and not enabled")
+        let deleted = sqlx::query_scalar::<_, bool>(
+            "with deleted as (delete from provider_accounts where id = $1 and not enabled returning id),
+             observations as (delete from provider_account_native_refresh_plans where account_id in (select id from deleted))
+             select exists(select 1 from deleted)",
+        )
             .bind(id)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await
             .map_err(|source| postgres_unavailable("delete disabled provider account", source))?;
-        Ok(result.rows_affected() == 1)
+        Ok(deleted)
     }
 }
 
@@ -577,6 +607,24 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                     notes,
                 )
                 .await?;
+            }
+            if command.supplier.is_some() || command.manual_starts_at.is_some() || command.manual_expires_at.is_some() {
+                sqlx::query(
+                    "update provider_accounts set
+                     supplier = case when $2::text is null then supplier else nullif($2, '') end,
+                     manual_expires_at = case when $3 then $4::timestamptz else manual_expires_at end,
+                     manual_starts_at = case when $5 then $6::timestamptz else manual_starts_at end
+                     where id = any($1::text[])"
+                )
+                .bind(&command.account_ids)
+                .bind(command.supplier.as_deref().map(str::trim))
+                .bind(command.manual_expires_at.is_some())
+                .bind(command.manual_expires_at.flatten())
+                .bind(command.manual_starts_at.is_some())
+                .bind(command.manual_starts_at.flatten())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|source| postgres_unavailable("update manual account details", source))?;
             }
             if let Some(name) = command.name.as_deref() {
                 update_provider_account_name_in_transaction(
@@ -854,25 +902,21 @@ pub(crate) async fn rotate_provider_account_in_transaction(
     profile: &UpdateProviderAccount,
     replacement_identity: Option<&ProviderAccountIdentity>,
     update: &ProviderCredentialUpdate,
-    reauthorization: bool,
+    preserve_name: bool,
 ) -> StoreResult<Revision> {
     let replace_identity = replacement_identity.is_some();
-    // 同身份重新授权会更新账号资料，额度及本周期的预热进度仍属于该身份
-    let preserve_quota = !replace_identity && (reauthorization || update.preserve_profile);
     let upstream_user_id = replacement_identity.map(ProviderAccountIdentity::upstream_user_id);
     let upstream_account_id =
         replacement_identity.and_then(ProviderAccountIdentity::upstream_account_id);
     // 事务时间可能早于应用写入的额度观测，保留既有时间下界，避免轮换破坏时间约束
     let next = sqlx::query_scalar::<_, i64>(
-        "update provider_accounts
+        "with rotated as (
+         update provider_accounts
          set name = case when $14 or $16 then name else $4 end,
              email = case when $14 then email else $5 end,
              plan_type = case when $14 then plan_type else $6 end,
-             quota_warmup_state = case when $18 then quota_warmup_state else '{}'::jsonb end,
-             quota_warmup_revision = provider_accounts.quota_warmup_revision + 1,
-             provider_quota_json = case when $18 then provider_quota_json else null end,
-             quota_paused = case when $18 then quota_paused else false end,
-             quota_observed_at = case when $18 then quota_observed_at else null end,
+             quota_warmup_state = case when $14 then quota_warmup_state else '{}'::jsonb end, quota_warmup_revision = provider_accounts.quota_warmup_revision + 1, provider_quota_json = case when $14 then provider_quota_json else null end, quota_paused = case when $14 then quota_paused else false end,
+             quota_observed_at = case when $14 then quota_observed_at else null end,
              quota_access_state = case when $11 then 'unknown' else quota_access_state end,
              quota_evidence = case when $11 then null else quota_evidence end,
              quota_access_observed_at = case when $11 then null else quota_access_observed_at end,
@@ -898,7 +942,13 @@ pub(crate) async fn rotate_provider_account_in_transaction(
              updated_at = greatest(now(), updated_at)
          where id = $1 and provider_kind = $2
            and credential_revision = $3
-         returning credential_revision",
+         returning id, credential_revision
+         ), observed as (
+            insert into provider_account_native_refresh_plans (account_id, credential_revision, plan_type, observed_at)
+            select id, credential_revision, $18::text, clock_timestamp() from rotated where $18 is not null
+            on conflict (account_id) do update set credential_revision = excluded.credential_revision,
+                plan_type = excluded.plan_type, observed_at = excluded.observed_at
+         ) select credential_revision from rotated",
     )
     .bind(&update.account_id)
     .bind(&scope.provider_kind)
@@ -915,9 +965,9 @@ pub(crate) async fn rotate_provider_account_in_transaction(
     .bind(upstream_account_id)
     .bind(update.preserve_profile)
     .bind(update.preserve_credential_state)
-    .bind(reauthorization)
+    .bind(preserve_name)
     .bind(update.preserve_access_token_expiry)
-    .bind(preserve_quota)
+    .bind(&update.native_refresh_plan)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|error| {
@@ -1004,9 +1054,11 @@ pub(crate) async fn delete_provider_accounts_in_transaction(
     account_ids: &[String],
 ) -> StoreResult<()> {
     let deleted = sqlx::query_scalar::<_, String>(
-        "delete from provider_accounts
-         where id = any($1::text[]) and provider_kind = $2
-         returning id",
+        "with deleted as (
+           delete from provider_accounts where id = any($1::text[]) and provider_kind = $2 returning id
+         ), observations as (
+           delete from provider_account_native_refresh_plans where account_id in (select id from deleted)
+         ) select id from deleted",
     )
     .bind(account_ids)
     .bind(&scope.provider_kind)
@@ -1186,7 +1238,7 @@ pub(super) async fn import_provider_accounts_in_transaction(
 pub(super) async fn rotate_provider_account_admin_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: RotateProviderAccount,
-    reauthorization: bool,
+    preserve_name: bool,
 ) -> StoreResult<ProviderAccountAdminRotation> {
     command.scope.validate()?;
     require_nonempty(ENTITY, "account_id", &command.profile.id)?;
@@ -1215,7 +1267,7 @@ pub(super) async fn rotate_provider_account_admin_in_transaction(
         &command.profile,
         command.replacement_identity.as_ref(),
         &command.credential,
-        reauthorization,
+        preserve_name,
     )
     .await?;
     // 凭据 CAS、普通设置和审计共享事务，任何设置失败都回滚凭据更新
@@ -1261,7 +1313,7 @@ impl PgProviderAccountRepository {
             .map(AccountGroupId::as_str)
             .collect::<Vec<_>>();
         let rows = sqlx::query(
-            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
+            "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, supplier, manual_starts_at, manual_expires_at, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
                     access_token_expires_at, next_refresh_at, enabled, quota_settings, quota_paused, auto_use_quota_credits, concurrency_limit, weight, model_access_json, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,

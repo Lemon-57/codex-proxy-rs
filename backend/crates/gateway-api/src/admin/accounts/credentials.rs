@@ -2,6 +2,70 @@
 
 use super::*;
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ReplaceAccountRtRequest {
+    pub account_id: String,
+    pub expected_credential_revision: u64,
+    pub refresh_token: String,
+    #[serde(default)]
+    pub allow_plan_mismatch: bool,
+    #[serde(default)]
+    pub allow_workspace_and_plan_change: bool,
+    #[serde(default)]
+    pub allow_any_status: bool,
+}
+
+impl ReplaceAccountRtRequest {
+    pub(super) fn into_parts(
+        self,
+    ) -> Result<(ProviderAccountId, ProviderDocument), WireValidationError> {
+        require_account_id(&self.account_id, "accountId")?;
+        let account_id = ProviderAccountId::new(self.account_id)
+            .map_err(|_| WireValidationError::new("accountId"))?;
+        if self.expected_credential_revision == 0 {
+            return Err(WireValidationError::new("expectedCredentialRevision"));
+        }
+        if self.allow_any_status
+            && self.allow_workspace_and_plan_change
+            && !self.allow_plan_mismatch
+        {
+            return Err(WireValidationError::new("allowAnyStatus"));
+        }
+        if self.refresh_token.is_empty()
+            || self.refresh_token.len() > 32768
+            || !self
+                .refresh_token
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(WireValidationError::new("refreshToken"));
+        }
+        let material = Map::from_iter([
+            (
+                "supplied_refresh_token".to_owned(),
+                Value::String(self.refresh_token),
+            ),
+            (
+                "expected_credential_revision".to_owned(),
+                Value::from(self.expected_credential_revision),
+            ),
+            (
+                "allow_plan_mismatch".to_owned(),
+                Value::Bool(self.allow_plan_mismatch),
+            ),
+            (
+                "allow_workspace_and_plan_change".to_owned(),
+                Value::Bool(self.allow_workspace_and_plan_change),
+            ),
+        ]);
+        Ok((
+            account_id,
+            ProviderDocument::new(OpaqueProviderData::new(material)),
+        ))
+    }
+}
+
 fn validate_account_notes(notes: Option<&str>) -> Result<(), WireValidationError> {
     if notes.is_some_and(|notes| {
         notes.chars().count() > 500
@@ -115,6 +179,7 @@ impl AccountImportRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartAccountAuthorizationRequest {
     pub outbound_proxy_id: Option<String>,
+    pub outbound_proxy_url: Option<super::wire::AccountProxyUpdate>,
     pub provider: String,
     pub name: String,
     pub account_id: Option<String>,
@@ -147,7 +212,10 @@ impl StartAccountAuthorizationRequest {
                 context,
                 name: self.name.trim().to_owned(),
                 reauthorization,
-                outbound_proxy: super::wire::proxy_selection(self.outbound_proxy_id)?,
+                outbound_proxy: super::wire::proxy_selection(
+                    self.outbound_proxy_id,
+                    self.outbound_proxy_url,
+                )?,
             },
         ))
     }
@@ -160,6 +228,7 @@ pub struct CompleteAccountAuthorizationRequest {
     pub provider: String,
     pub flow_id: String,
     pub callback_url: String,
+    pub expected_identity_revision: Option<std::num::NonZeroU64>,
 }
 
 impl CompleteAccountAuthorizationRequest {
@@ -168,6 +237,9 @@ impl CompleteAccountAuthorizationRequest {
             settings.validate()?;
         }
         let provider = parse_provider(&self.provider)?;
+        if self.expected_identity_revision.is_some() && provider.as_str() != "openai" {
+            return Err(WireValidationError::new("expectedIdentityRevision"));
+        }
         validate_authorization_flow(&provider, &self.flow_id)?;
         require_text(&self.callback_url, MAX_CALLBACK_URL_BYTES, "callbackUrl")
     }
@@ -188,6 +260,7 @@ impl CompleteAccountAuthorizationRequest {
                 context,
                 flow_id: self.flow_id,
                 callback_url: self.callback_url,
+                expected_identity_revision: self.expected_identity_revision,
             },
         ))
     }
@@ -213,8 +286,12 @@ fn validate_authorization_flow(
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateAccountRequest {
+    pub supplier: Option<String>,
+    pub manual_starts_at: Option<String>,
+    pub manual_expires_at: Option<String>,
     pub connection: Option<AccountConnectionUpdateRequest>,
     pub outbound_proxy_id: Option<String>,
+    pub outbound_proxy_url: Option<super::wire::AccountProxyUpdate>,
     pub account_id: String,
     pub name: Option<String>,
     pub notes: Option<String>,
@@ -227,6 +304,22 @@ pub struct UpdateAccountRequest {
 }
 
 impl UpdateAccountRequest {
+    fn parse_manual_time(
+        value: Option<&str>,
+        field: &'static str,
+    ) -> Result<Option<Option<DateTime<Utc>>>, WireValidationError> {
+        value
+            .map(|value| {
+                if value.is_empty() {
+                    return Ok(None);
+                }
+                DateTime::parse_from_rfc3339(value)
+                    .map(|value| Some(value.to_utc()))
+                    .map_err(|_| WireValidationError::new(field))
+            })
+            .transpose()
+    }
+
     pub fn validate(&self) -> Result<(), WireValidationError> {
         require_account_id(&self.account_id, "accountId")?;
         if let Some(name) = &self.name {
@@ -236,6 +329,15 @@ impl UpdateAccountRequest {
             connection.validate()?;
         }
         validate_account_notes(self.notes.as_deref())?;
+        if self
+            .supplier
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > 100 || value.chars().any(char::is_control))
+        {
+            return Err(WireValidationError::new("supplier"));
+        }
+        Self::parse_manual_time(self.manual_starts_at.as_deref(), "manualStartsAt")?;
+        Self::parse_manual_time(self.manual_expires_at.as_deref(), "manualExpiresAt")?;
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
         validate_wire_group_ids(&self.group_ids)?;
@@ -246,11 +348,21 @@ impl UpdateAccountRequest {
         self,
     ) -> Result<(UpdateAccount, Option<ProviderDocument>), WireValidationError> {
         self.validate()?;
+        let manual_starts_at =
+            Self::parse_manual_time(self.manual_starts_at.as_deref(), "manualStartsAt")?;
+        let manual_expires_at =
+            Self::parse_manual_time(self.manual_expires_at.as_deref(), "manualExpiresAt")?;
         let connection = self
             .connection
             .map(AccountConnectionUpdateRequest::into_document);
         let settings = UpdateAccount {
-            outbound_proxy: super::wire::proxy_selection(self.outbound_proxy_id)?,
+            supplier: self.supplier,
+            manual_starts_at,
+            manual_expires_at,
+            outbound_proxy: super::wire::proxy_selection(
+                self.outbound_proxy_id,
+                self.outbound_proxy_url,
+            )?,
             account_id: self.account_id,
             name: self.name.map(|name| name.trim().to_owned()),
             notes: self.notes,

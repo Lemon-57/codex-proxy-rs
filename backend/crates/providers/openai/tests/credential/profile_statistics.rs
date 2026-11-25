@@ -206,7 +206,7 @@ async fn profile_avatar_reuses_cached_source_with_the_accounts_rotated_token() {
         .expect("profile statistics");
     store
         .repository()
-        .rotate_refreshed_oauth_secret(&account, secret("rotated-avatar-token"), None, None)
+        .rotate_refreshed_oauth_secret(&account, secret("rotated-avatar-token"), None, None, None)
         .await
         .expect("rotate avatar account token");
     let avatar = service
@@ -293,6 +293,7 @@ async fn subscription_discards_response_when_credential_rotates_during_query() {
             .rotate_refreshed_oauth_secret(
                 &account,
                 secret("rotated-subscription-token"),
+                None,
                 None,
                 None,
             )

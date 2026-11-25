@@ -147,6 +147,11 @@ export interface AccountQuotaBucketSettings {
 export interface Account {
   quotaSettings: Record<string, AccountQuotaBucketSettings>
   autoUseQuotaCredits: boolean
+  supplier: string | null
+  manualStartsAt: string | null
+  manualStartsAtDisplay: string | null
+  manualExpiresAt: string | null
+  manualExpiresAtDisplay: string | null
   upstream: AccountUpstream | null
   capabilities: AccountCapabilities
   outboundProxyId: string | null

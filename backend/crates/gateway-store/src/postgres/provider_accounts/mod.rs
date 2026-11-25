@@ -63,6 +63,7 @@ mod quota;
 mod quota_forecast;
 mod quota_history;
 mod quota_warmup;
+mod refresh_groups;
 mod repository;
 mod reset_credit_automation;
 mod rows;

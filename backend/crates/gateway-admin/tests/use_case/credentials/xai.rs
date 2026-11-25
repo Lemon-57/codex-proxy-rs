@@ -153,6 +153,7 @@ async fn xai_authorization_should_observe_quota_without_affecting_commit() {
             .complete_authorization(
                 &gateway_core::routing::ProviderKind::new("xai").unwrap(),
                 CompleteAuthorization {
+                    expected_identity_revision: None,
                     settings: None,
                     context: context("oauth-xai-create"),
                     flow_id: "flow-test".to_owned(),

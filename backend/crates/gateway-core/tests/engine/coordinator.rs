@@ -4002,6 +4002,7 @@ fn native_continuation_explicit_429_is_not_retried() {
             UpstreamSendState::Sent,
         )
         .with_status(429)
+        .with_session_binding_recovery()
         .with_replay_safe())],
         Some(ContinuationBinding::Pinned(continuation)),
     );
@@ -4021,6 +4022,7 @@ fn external_continuation_explicit_429_is_not_retried() {
             UpstreamSendState::Sent,
         )
         .with_status(429)
+        .with_session_binding_recovery()
         .with_replay_safe())],
         Some(continuation),
     );
@@ -5079,6 +5081,131 @@ fn transient_retry_is_suppressed_for_required_accounts_and_committed_output() {
         ));
         assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
     }
+}
+
+#[test]
+fn unavailable_transient_account_rotates_only_when_the_retained_policy_allows_it() {
+    for (policy, rotations, selection_prohibited, should_recover) in [
+        (TransientRetryPolicy::RetryThenRotateAccount, 3, false, true),
+        (TransientRetryPolicy::RetryThenReturnError, 3, false, false),
+        (
+            TransientRetryPolicy::RetryThenRotateAccount,
+            0,
+            false,
+            false,
+        ),
+        (TransientRetryPolicy::RetryThenRotateAccount, 3, true, false),
+    ] {
+        let operation = generate_operation();
+        let route_plan = plan_with_policy(
+            &operation,
+            AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(8).unwrap())
+                .with_max_account_rotations(rotations),
+        );
+        let failure = || Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(ProviderError::new(
+                ProviderErrorKind::UpstreamCapacityUnavailable,
+                UpstreamSendState::Sent,
+            )
+            .with_status(503)
+            .with_replay_safe()
+            .with_transient_retry(
+                NonZeroU32::new(3).unwrap(),
+                Duration::ZERO,
+                Duration::ZERO,
+                Duration::ZERO,
+                policy,
+            ))],
+        };
+        let selection_error = ProviderError::new(
+            ProviderErrorKind::AccountCapacityUnavailable,
+            UpstreamSendState::NotSent,
+        );
+        let selection_error = if selection_prohibited {
+            selection_error.with_retry_prohibited()
+        } else {
+            selection_error
+        };
+        let (coordinator, store, provider) = coordinator(vec![
+            failure(),
+            failure(),
+            failure(),
+            Script::Error(selection_error),
+            Script::Stream {
+                account_id: "acct_second",
+                items: complete_stream(None),
+            },
+        ]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        assert_eq!(
+            block_on(session.collect_uncommitted()).is_ok(),
+            should_recover
+        );
+        let contexts = provider.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), if should_recover { 5 } else { 4 });
+        assert_eq!(
+            contexts[3].required_account(),
+            Some(&ProviderAccountId::new("acct_first").unwrap())
+        );
+        if should_recover {
+            assert!(contexts[4].required_account().is_none());
+            assert!(
+                contexts[4]
+                    .excluded_accounts()
+                    .contains(&ProviderAccountId::new("acct_first").unwrap())
+            );
+            block_on(session.commit_downstream(Some(200))).unwrap();
+            let state = store.state.lock().unwrap();
+            assert_eq!(
+                state.finalizations.last().unwrap().send_state,
+                UpstreamSendState::Sent
+            );
+            assert_eq!(state.finalizations.last().unwrap().attempt_count, 4);
+        }
+    }
+}
+
+#[test]
+fn unavailable_transient_account_with_no_alternative_returns_the_original_failure() {
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let (coordinator, _, provider) = coordinator(vec![
+        Script::Stream {
+            account_id: "acct_first",
+            items: vec![Err(transient_rejection())],
+        },
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::AccountCapacityUnavailable,
+            UpstreamSendState::NotSent,
+        )),
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        )),
+    ]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .unwrap();
+    let error = block_on(session.collect_uncommitted()).unwrap_err();
+    assert!(
+        matches!(error, EngineError::Provider(error) if error.kind()==ProviderErrorKind::UpstreamCapacityUnavailable)
+    );
+    assert_eq!(provider.contexts.lock().unwrap().len(), 3);
 }
 
 #[test]
@@ -6909,10 +7036,12 @@ fn account_rotation_attempts_stop_at_the_independent_rotation_budget() {
         Script::Stream {
             account_id: "acct_first",
             items: vec![Err(ProviderError::new(
-                ProviderErrorKind::Transport,
-                UpstreamSendState::Sent,
+                ProviderErrorKind::PermissionDenied,
+                UpstreamSendState::NotSent,
             )
-            .with_pre_delivery_retry())],
+            .with_status(403)
+            .with_pre_delivery_retry()
+            .with_same_account_retry_blocked())],
         },
         Script::Stream {
             account_id: "acct_second",
@@ -6935,11 +7064,12 @@ fn account_rotation_attempts_stop_at_the_independent_rotation_budget() {
         Script::Stream {
             account_id: "acct_tool",
             items: vec![Err(ProviderError::new(
-                ProviderErrorKind::RateLimited,
-                UpstreamSendState::Sent,
+                ProviderErrorKind::PermissionDenied,
+                UpstreamSendState::NotSent,
             )
-            .with_status(429)
-            .with_replay_safe())],
+            .with_status(403)
+            .with_pre_delivery_retry()
+            .with_same_account_retry_blocked())],
         },
         // 预算内不应触达第 5 个账号，保留成功脚本以暴露超限重放
         Script::Stream {
@@ -6961,8 +7091,8 @@ fn account_rotation_attempts_stop_at_the_independent_rotation_budget() {
     let gateway_core::engine::EngineError::Provider(error) = error else {
         panic!("expected provider error")
     };
-    assert_eq!(error.kind(), ProviderErrorKind::RateLimited);
-    assert_eq!(error.upstream_status(), Some(429));
+    assert_eq!(error.kind(), ProviderErrorKind::PermissionDenied);
+    assert_eq!(error.upstream_status(), Some(403));
     let contexts = provider.contexts.lock().expect("contexts lock");
     assert_eq!(contexts.len(), 4, "the fifth account must not be replayed");
     let state = store.state.lock().expect("store lock");
@@ -6971,7 +7101,65 @@ fn account_rotation_attempts_stop_at_the_independent_rotation_budget() {
     assert_eq!(state.finalizations.len(), 1);
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Failed);
     assert_eq!(state.finalizations[0].attempt_count, 4);
-    assert_eq!(state.finalizations[0].upstream_status_code, Some(429));
+    assert_eq!(state.finalizations[0].upstream_status_code, Some(403));
+}
+
+#[test]
+fn websocket_opening_403_does_not_rotate_a_required_or_continuation_account() {
+    for native in [false, true] {
+        let operation = generate_operation();
+        let route_plan = plan(&operation);
+        let account = ProviderAccountId::new("acct_required").unwrap();
+        let binding = native.then(|| {
+            ContinuationBinding::Pinned(NativeContinuationPin::new(
+                PreviousResponseId::new("previous-secret-id"),
+                PreviousResponseId::new("provider-native-id"),
+                ClientApiKeyId::new("key_client_1").unwrap(),
+                ProviderKind::new("openai").unwrap(),
+                account.clone(),
+            ))
+        });
+        let (coordinator, _, provider) = coordinator(vec![
+            Script::Stream {
+                account_id: "acct_required",
+                items: vec![Err(ProviderError::new(
+                    ProviderErrorKind::PermissionDenied,
+                    UpstreamSendState::NotSent,
+                )
+                .with_status(403)
+                .with_pre_delivery_retry()
+                .with_same_account_retry_blocked())],
+            },
+            Script::Stream {
+                account_id: "acct_wrong",
+                items: complete_stream(None),
+            },
+        ]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            (!native).then_some(account.clone()),
+            binding,
+            CancellationToken::new(),
+        ))
+        .expect("start execution");
+        let error = block_on(session.collect_uncommitted()).expect_err("bound account must not rotate");
+        let gateway_core::engine::EngineError::Provider(error) = error else {
+            panic!("expected original provider error");
+        };
+        assert_eq!(error.kind(), ProviderErrorKind::PermissionDenied);
+        assert_eq!(error.upstream_status(), Some(403));
+        let contexts = provider.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), 1);
+        if native {
+            assert!(contexts[0].account_state_owner().unwrap().matches(
+                &ProviderKind::new("openai").unwrap(), &account,
+            ));
+        } else {
+            assert_eq!(contexts[0].required_account(), Some(&account));
+        }
+    }
 }
 
 #[test]

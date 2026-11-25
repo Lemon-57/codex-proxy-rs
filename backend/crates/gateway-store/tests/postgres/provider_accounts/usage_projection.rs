@@ -65,6 +65,8 @@ async fn quota_windows_reconcile_moved_requests_and_pending_deletions_without_wa
     let ranked = store
         .list_accounts(
             AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: PageSize::new(1).unwrap(),
                 provider_kind: None,
@@ -114,6 +116,8 @@ async fn quota_windows_reconcile_moved_requests_and_pending_deletions_without_wa
         let ranked = store
             .list_accounts(
                 AccountListQuery {
+                    plan_type: None,
+                    supplier: None,
                     page: 1,
                     page_size: PageSize::new(1).unwrap(),
                     provider_kind: None,

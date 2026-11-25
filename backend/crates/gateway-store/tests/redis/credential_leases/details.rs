@@ -157,8 +157,12 @@ async fn concurrency_details_bound_deep_pages_and_ignore_expired_and_reserved_le
             .arg(now + 120_000 + index)
             .arg(format!("seed|active-{index}|1"))
             .ignore();
+        // 只缩小夹具写入批次；仍保留全部成员和原有明细读取预算。
+        if index % 500 == 499 {
+            pipeline.query_async::<()>(&mut connection).await.unwrap();
+            pipeline.clear();
+        }
     }
-    pipeline.query_async::<()>(&mut connection).await.unwrap();
     let page = repository
         .account_concurrency(&request.resource_id, 9_981, 20)
         .await

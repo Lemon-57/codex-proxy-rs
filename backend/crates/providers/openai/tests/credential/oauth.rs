@@ -119,6 +119,134 @@ impl AuthorizationCodeExchanger for Exchanger {
     }
 }
 
+struct VerifiedExchanger {
+    token: String,
+    called: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl AuthorizationCodeExchanger for VerifiedExchanger {
+    async fn exchange_authorization_code(
+        &self,
+        _grant: AuthorizationCodeGrant,
+    ) -> Result<AuthorizationTokenSet, AuthorizationCodeExchangeError> {
+        self.called
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(AuthorizationTokenSet {
+            secret: CodexOAuthSecret {
+                access_token: SecretString::from(self.token.clone()),
+                refresh_token: Some(SecretString::from("new-test-refresh-token")),
+                id_token: None,
+            },
+            id_token: SecretString::from(self.token.clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn guarded_reauthorization_allows_profile_change_without_rebinding_identity() {
+    use secrecy::ExposeSecret;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for scenario in ["changed_profile", "wrong_subject", "stale_revision"] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = ProviderAccountId::new("acct_guarded_reauth").unwrap();
+        let current = account_profile("workspace-a");
+        let jwt = |workspace, plan, subject| {
+            id_token(serde_json::json!({
+                "sub": subject, "email": current.email,
+                "exp": (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+                "https://api.openai.com/auth": {
+                    "chatgpt_user_id": current.chatgpt_user_id,
+                    "chatgpt_account_id": workspace, "chatgpt_plan_type": plan
+                }
+            }))
+        };
+        let old_token = jwt("workspace-a", "pro", "original-subject");
+        let new_token = jwt(
+            "workspace-b",
+            "plus",
+            if scenario == "wrong_subject" {
+                "different-subject"
+            } else {
+                "original-subject"
+            },
+        );
+        store
+            .seed_oauth_credential(ImportCodexOAuthCredential {
+                account_id: account_id.to_string(),
+                name: "local label".into(),
+                secret: CodexOAuthSecret {
+                    access_token: SecretString::from(old_token.clone()),
+                    refresh_token: Some(SecretString::from("old-test-refresh-token")),
+                    id_token: Some(SecretString::from(old_token)),
+                },
+                verified_account: current,
+                next_refresh_at: None,
+                enabled: false,
+            })
+            .await;
+        let original = store.account(account_id.as_str()).unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(PendingStore::default());
+        let service = CodexOAuthAdminService::new(
+            pending.clone(),
+            Arc::new(VerifiedExchanger {
+                token: new_token,
+                called: called.clone(),
+            }),
+            store.clone(),
+            CodexCredentialAdmin,
+            profile(),
+        );
+        let started = service
+            .start_authorization(StartCodexOAuthAuthorization {
+                mutation: reauthorization_mutation(account_id.clone(), "guarded-reauth"),
+            })
+            .await
+            .unwrap();
+        let state = pending
+            .pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .state
+            .clone();
+        let result = service
+            .complete_authorization(CompleteCodexOAuthAuthorization {
+                owner_ref: "test-owner".into(),
+                flow_id: started.flow_id,
+                callback_url: SecretString::from(format!(
+                    "http://127.0.0.1:1455/auth/callback?code=browser&state={}",
+                    state.expose_secret(),
+                )),
+                expected_identity_revision: std::num::NonZeroU64::new(
+                    original.revision().get() + u64::from(scenario == "stale_revision"),
+                ),
+            })
+            .await;
+        match scenario {
+            "changed_profile" => {
+                let CompletedCodexOAuthCredential::Reauthorize(rotation) =
+                    result.unwrap().credential
+                else {
+                    panic!("expected reauthorization");
+                };
+                assert_eq!(rotation.profile.plan_type.as_deref(), Some("plus"));
+                assert_eq!(
+                    rotation.replacement_identity.unwrap().upstream_account_id(),
+                    Some("workspace-b")
+                );
+            }
+            "wrong_subject" => assert!(matches!(result, Err(CodexOAuthAdminError::TokenRejected))),
+            _ => assert!(matches!(result, Err(CodexOAuthAdminError::Conflict))),
+        }
+        assert_eq!(called.load(Ordering::Relaxed), scenario != "stale_revision");
+        assert_eq!(store.account(account_id.as_str()).unwrap(), original);
+    }
+}
+
 fn mutation() -> PendingAuthorizationMutation {
     let context = MutationContext {
         actor: MutationActor::System,
@@ -206,6 +334,7 @@ async fn complete_with_name(
         .clone();
     let completed = service
         .complete_authorization(CompleteCodexOAuthAuthorization {
+            expected_identity_revision: None,
             owner_ref: "test-owner".to_owned(),
             flow_id: started.flow_id,
             callback_url: SecretString::from(format!(
@@ -527,6 +656,7 @@ async fn reauthorization_binds_the_selected_slot_to_the_new_oauth_account() {
         .clone();
     let completed = service
         .complete_authorization(CompleteCodexOAuthAuthorization {
+            expected_identity_revision: None,
             owner_ref: "test-owner".into(),
             flow_id: started.flow_id,
             callback_url: SecretString::from(format!(

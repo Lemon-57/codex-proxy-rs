@@ -72,9 +72,9 @@ fn local_service(
 }
 
 #[tokio::test]
-async fn disabled_account_without_quota_is_observed_when_initial_delay_expires() {
+async fn zero_initial_delay_keeps_immediate_first_observation() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account_with_enabled(&store, "acct_initial_zero", false).await;
+    create_account(&store, "acct_initial_zero").await;
     let server = MockServer::start().await;
     mount_usage(&server, 200).await;
     let service = local_service(&store, &server, zero_delays());
@@ -87,6 +87,18 @@ async fn disabled_account_without_quota_is_observed_when_initial_delay_expires()
     // 已产生快照后退出首查路径，正常账号也不满足周期复核条件。
     service.synchronize().await.expect("second cycle");
     assert_eq!(usage_requests(&server).await, 1);
+}
+
+#[tokio::test]
+async fn disabled_account_is_not_queried_even_with_zero_initial_delay() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account_with_enabled(&store, "acct_disabled", false).await;
+    let server = MockServer::start().await;
+    mount_usage(&server, 200).await;
+    let service = local_service(&store, &server, zero_delays());
+
+    assert_eq!(service.synchronize().await.expect("quota cycle").updated, 0);
+    assert_eq!(usage_requests(&server).await, 0);
 }
 
 #[tokio::test]

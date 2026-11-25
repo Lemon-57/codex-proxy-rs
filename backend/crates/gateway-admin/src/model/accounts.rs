@@ -72,6 +72,8 @@ pub struct AccountSort {
 /// 账号列表的存储查询条件
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountListQuery {
+    pub plan_type: Option<String>,
+    pub supplier: Option<String>,
     pub page: u32,
     pub page_size: PageSize,
     pub provider_kind: Option<ProviderKind>,
@@ -79,6 +81,20 @@ pub struct AccountListQuery {
     pub search: Option<String>,
     pub status: Option<AccountStatus>,
     pub sort: Option<AccountSort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRefreshGroupMove {
+    pub provider: ProviderKind,
+    pub source_group: String,
+    pub target_group: String,
+    pub plan_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRefreshGroupCandidate {
+    pub account_id: String,
+    pub credential_revision: Revision,
 }
 
 /// Admin query service 从运行态存储取得的当前账号冷却快照
@@ -115,6 +131,9 @@ pub struct AccountRecord {
     pub quota_paused: bool,
     pub quota_settings: gateway_core::account::AccountQuotaSettings,
     pub auto_use_quota_credits: bool,
+    pub supplier: Option<String>,
+    pub manual_starts_at: Option<DateTime<Utc>>,
+    pub manual_expires_at: Option<DateTime<Utc>>,
     pub id: String,
     pub provider_kind: ProviderKind,
     pub groups: Vec<AccountGroupRef>,
@@ -231,6 +250,9 @@ pub struct AccountCapacity {
 /// 账号可编辑事实的一次性替换命令
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAccount {
+    pub supplier: Option<String>,
+    pub manual_starts_at: Option<Option<DateTime<Utc>>>,
+    pub manual_expires_at: Option<Option<DateTime<Utc>>>,
     pub account_id: String,
     /// 缺省保留名称，空字符串清除名称并使用邮箱展示
     pub name: Option<String>,

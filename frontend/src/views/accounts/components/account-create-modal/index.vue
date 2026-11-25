@@ -5,7 +5,7 @@ import type { AccountCreateForm, AccountImportMode } from '../../utils/accountCr
 import type { Account, AccountGroupRef } from '@/api'
 
 import { Openai, Xai } from '@boxicons/vue'
-import { ZButton, ZDialog, ZForm, ZIconButton, ZSegmented } from '@codex-proxy/ui'
+import { ZButton, ZDialog, ZForm, ZFormItem, ZIconButton, ZInput, ZSegmented } from '@codex-proxy/ui'
 import { Copy, LayoutGrid, Settings2 } from '@lucide/vue'
 import { computed, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -187,15 +187,26 @@ async function requestCreate() {
         <ZForm v-else-if="mode === 'api_key'" ref="formElement" :model="form" :rules="apiKeyRules" scroll-to-error focus-on-error novalidate @submit="requestCreate">
           <AccountApiKeyFields v-model="form.apiKey" :disabled="busy" />
         </ZForm>
-        <AccountImportFields
-          v-else
-          :key="mode"
-          v-model="importText"
-          :label="view.importInput.label"
-          :placeholder="view.importInput.placeholder"
-          :uploadable="view.importInput.uploadable"
-          :disabled="busy"
-        />
+        <template v-else>
+          <ZFormItem v-if="mode === 'refresh_token'" :label="t('accounts.onboarding.refreshTokenEmail')">
+            <ZInput
+              v-model="form.refreshTokenEmail"
+              type="email"
+              :aria-label="t('accounts.onboarding.refreshTokenEmail')"
+              :placeholder="t('accounts.onboarding.refreshTokenEmailPlaceholder')"
+              :disabled="busy"
+              autocomplete="off"
+            />
+          </ZFormItem>
+          <AccountImportFields
+            :key="mode"
+            v-model="importText"
+            :label="view.importInput.label"
+            :placeholder="view.importInput.placeholder"
+            :uploadable="view.importInput.uploadable"
+            :disabled="busy"
+          />
+        </template>
       </template>
     </div>
 

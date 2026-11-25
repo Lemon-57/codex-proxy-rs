@@ -7,7 +7,7 @@ import { Download, ListTodo, MoreHorizontal, Pencil, Search, Trash2, Upload } fr
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ProviderFilter from '@/components/ProviderFilter.vue'
-import { accountStatusFilterOptions } from '../constants'
+import { accountStatusFilterOptions, subscriptionOptions } from '../constants'
 
 const props = defineProps<{
   hasImportTasks: boolean
@@ -18,6 +18,7 @@ const props = defineProps<{
   exportDisabledReason: string
   groups: AccountGroupRef[]
   groupsLoading: boolean
+  supplierOptions: Array<{ label: string, value: string }>
 }>()
 
 const emit = defineEmits<{
@@ -31,6 +32,8 @@ const emit = defineEmits<{
 const { t } = useI18n({ useScope: 'global' })
 
 const search = defineModel<string>('search', { required: true })
+const supplier = defineModel<string>('supplier', { required: true })
+const planType = defineModel<string>('planType', { required: true })
 const status = defineModel<string>('status', { required: true })
 const provider = defineModel<string>('provider', { required: true })
 const group = defineModel<string>('group', { required: true })
@@ -73,6 +76,14 @@ const groupOptions = computed(() => [
       </ZInput>
 
       <ZSelect
+        v-model="group"
+        :options="groupOptions"
+        :disabled="groupsLoading"
+        :aria-label="t('accounts.filters.groupLabel')"
+        class="w-full min-w-0 xl:w-40 xl:shrink-0"
+      />
+
+      <ZSelect
         v-model="status"
         :options="accountStatusFilterOptions"
         :aria-label="t('accounts.filters.statusLabel')"
@@ -80,11 +91,19 @@ const groupOptions = computed(() => [
       />
 
       <ZSelect
-        v-model="group"
-        :options="groupOptions"
-        :disabled="groupsLoading"
-        :aria-label="t('accounts.filters.groupLabel')"
+        v-model="planType"
+        :options="subscriptionOptions"
+        filterable
+        aria-label="按订阅类型筛选"
         class="w-full min-w-0 xl:w-40 xl:shrink-0"
+      />
+
+      <ZSelect
+        v-model="supplier"
+        :options="supplierOptions"
+        aria-label="按供应商筛选"
+        filterable
+        class="col-span-2 min-w-0 sm:col-span-3 xl:w-44 xl:flex-none"
       />
 
       <ProviderFilter

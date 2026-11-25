@@ -325,7 +325,7 @@ async fn client_catalog_cache_does_not_survive_credential_rotation() {
     let first = service.client_model_catalog(&scope).await.expect("old");
     store
         .repository()
-        .rotate_refreshed_oauth_secret(&account, secret("rotated-access"), None, None)
+        .rotate_refreshed_oauth_secret(&account, secret("rotated-access"), None, None, None)
         .await
         .expect("rotate");
     assert!(service.client_model_catalog(&scope).await.is_err());

@@ -65,6 +65,7 @@ impl Drop for InstanceTask {
 struct MaintenanceTask {
     runtime: Arc<PluginRuntime>,
     snapshots: RuntimeSnapshotHandle,
+    account_changes: gateway_core::account::AccountStateNotifications,
 }
 
 impl PluginRuntime {
@@ -72,6 +73,14 @@ impl PluginRuntime {
     pub fn maintenance_worker(
         self: &Arc<Self>,
         snapshots: RuntimeSnapshotHandle,
+    ) -> Result<WorkerContribution, WorkerDefinitionError> {
+        self.maintenance_worker_with_account_changes(snapshots, Default::default())
+    }
+
+    pub fn maintenance_worker_with_account_changes(
+        self: &Arc<Self>,
+        snapshots: RuntimeSnapshotHandle,
+        account_changes: gateway_core::account::AccountStateNotifications,
     ) -> Result<WorkerContribution, WorkerDefinitionError> {
         Ok(WorkerContribution::Registration(
             WorkerRegistration::try_new(
@@ -87,6 +96,7 @@ impl PluginRuntime {
                     task: Box::new(MaintenanceTask {
                         runtime: self.clone(),
                         snapshots,
+                        account_changes,
                     }),
                 },
             )?,
@@ -99,6 +109,7 @@ impl DaemonTask for MaintenanceTask {
         Box::pin(async move {
             let cancellation = context.cancellation();
             let mut publications = self.snapshots.subscribe_publications();
+            let mut account_changes = self.account_changes.subscribe();
             let mut active: Option<Arc<PreparedSet>> = None;
             let mut revision = None;
             let mut tasks = BTreeMap::<String, InstanceTask>::new();
@@ -157,6 +168,12 @@ impl DaemonTask for MaintenanceTask {
                     biased;
                     () = cancellation.cancelled() => break,
                     changed = publications.next() => if changed.is_none() { break; },
+                    changed = account_changes.next() => {
+                        if changed.is_none() { break; }
+                        for task in tasks.values() {
+                            task.dirty.notify_one();
+                        }
+                    },
                     result = next_finished(&mut tasks), if !tasks.is_empty() => {
                         if let Some(instance_id) = result {
                             tasks.remove(&instance_id);

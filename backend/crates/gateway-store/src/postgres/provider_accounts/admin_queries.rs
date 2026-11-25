@@ -27,6 +27,11 @@ pub(crate) async fn load_admin_account_page(
         .search
         .as_deref()
         .map(|search| crate::postgres::literal_contains_pattern(&search.to_lowercase()));
+    let supplier_pattern = query
+        .supplier
+        .as_deref()
+        .map(|value| crate::postgres::literal_contains_pattern(&value.to_lowercase()));
+    let plan_type = query.plan_type.clone();
     let status = query.status.map(|status| status.as_str().to_owned());
     let (group_mode, group_id) = match query.group_filter.as_ref() {
         None => (0_i16, None),
@@ -52,6 +57,7 @@ pub(crate) async fn load_admin_account_page(
         "with usage_values as (select * from unnest($10::text[],$11::bigint[],$12::timestamptz[]) as usage(provider_account_ref,total_tokens,last_used_at)), account_statuses as (
            select a.id, a.provider_kind,
                   case
+                    when a.credential_state = 'invalid' then 'error'
                     when not a.enabled then 'disabled'
                     when a.credential_state <> 'ready'
                       or a.access_token_expires_at <= $2 then 'error'
@@ -82,7 +88,13 @@ pub(crate) async fn load_admin_account_page(
             where ($3::text is null or a.provider_kind = $3)
               and ($4::text is null or
                    lower(a.name) like $4 escape '\\' or
-                   lower(coalesce(a.email, '')) like $4 escape '\\')
+                   lower(coalesce(a.email, '')) like $4 escape '\\' or
+                   lower(coalesce(a.upstream_account_id, '')) like $4 escape '\\' or
+                   lower(coalesce(a.upstream_user_id, '')) like $4 escape '\\')
+              and ($14::text is null or
+                   (case when a.authentication_kind = 'api_key' then 'api'
+                    else coalesce(nullif(lower(trim(a.plan_type)), ''), 'unknown') end) = $14)
+              and ($13::text is null or lower(coalesce(a.supplier, '')) like $13 escape '\\')
               and ($5::text is null or status.admin_status = $5)
               and ($6::smallint = 0 or
                    ($6 = 1 and exists (
@@ -105,7 +117,7 @@ pub(crate) async fn load_admin_account_page(
              from runtime_settings
             where id = 1
          )
-         select coalesce(p.enabled, true) as outbound_proxy_enabled, coalesce(p.max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, p.auto_location, p.detected_location_json, p.location_country, p.location_region, p.location_city, p.location_timezone, a.outbound_proxy_id, a.outbound_proxy_url, a.id, a.provider_kind, a.name, a.notes, a.email, a.upstream_user_id,
+         select coalesce(p.enabled, true) as outbound_proxy_enabled, coalesce(p.max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, p.auto_location, p.detected_location_json, p.location_country, p.location_region, p.location_city, p.location_timezone, a.outbound_proxy_id, a.outbound_proxy_url, a.id, a.provider_kind, a.name, a.notes, a.supplier, a.manual_starts_at, a.manual_expires_at, a.email, a.upstream_user_id,
                 a.upstream_account_id, a.plan_type, a.authentication_kind,
                 a.credential_revision, a.has_refresh_token, a.access_token_expires_at,
                 a.next_refresh_at, a.enabled, a.quota_settings, a.quota_paused, a.auto_use_quota_credits, a.concurrency_limit, a.weight, a.model_access_json,
@@ -165,6 +177,8 @@ pub(crate) async fn load_admin_account_page(
                     .bind(usage_ids)
                     .bind(usage_tokens)
                     .bind(usage_latest)
+                    .bind(supplier_pattern)
+                    .bind(plan_type)
                     .fetch_all(&mut *snapshot.tx)
                     .await
                     .map_err(|source| postgres_unavailable("load admin account page", source))?;

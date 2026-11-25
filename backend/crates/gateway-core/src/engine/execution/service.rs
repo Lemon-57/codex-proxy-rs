@@ -1517,7 +1517,9 @@ impl DefaultExecutionService {
                 .observe_probe_failure(&observed, started_at, &error)
                 .await);
         }
+        let completed_text = events.iter().flat_map(|event| event.canonical_facts()).any(|fact| matches!(fact, GatewayEvent::Completed(meta) if meta.finish_reason() == Some(crate::event::FinishReason::Stop)));
         Ok(AccountProbeResult {
+            completed_text,
             text: events
                 .into_iter()
                 .flat_map(|event| event.into_parts().0)
