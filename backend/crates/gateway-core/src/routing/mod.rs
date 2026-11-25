@@ -13,7 +13,7 @@ pub use crate::identity::ProviderKind;
 pub use catalog::{
     ContributedModel, ContributedModelAlias, ProviderCatalogGeneration, ProviderCatalogPort,
     ProviderCatalogUnavailable, ProviderModelCapabilities, ProviderModelContent,
-    ProviderModelDescriptor, PublicModelDescriptor,
+    ProviderModelDescriptor, PublicModelDescriptor, ReasoningModelVariant,
 };
 pub use snapshot::RuntimeSnapshot;
 
@@ -118,6 +118,12 @@ impl fmt::Display for UpstreamModelId {
     }
 }
 
+impl std::borrow::Borrow<str> for UpstreamModelId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// `runtime_settings.config_revision`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConfigRevision(NonZeroU64);
@@ -151,6 +157,9 @@ pub struct ModelCapabilities {
     features: BTreeMap<Feature, SupportLevel>,
     max_output_tokens: Option<u64>,
     upstream_validates_features: bool,
+    generation_protocol: Option<&'static str>,
+    translated_generation_protocols: BTreeSet<&'static str>,
+    reasoning_variants: BTreeMap<String, ReasoningModelVariant>,
 }
 
 /// Provider 为客户端模型目录提供的展示与交互能力
@@ -423,6 +432,9 @@ impl ModelCapabilities {
             features: BTreeMap::new(),
             max_output_tokens,
             upstream_validates_features: false,
+            generation_protocol: None,
+            translated_generation_protocols: BTreeSet::new(),
+            reasoning_variants: BTreeMap::new(),
         }
     }
 
@@ -432,11 +444,66 @@ impl ModelCapabilities {
         self
     }
 
+    /// 分组名只按请求明确声明的档位解析，不推测默认型号
+    #[must_use]
+    pub fn with_reasoning_variants(
+        mut self,
+        variants: BTreeMap<String, ReasoningModelVariant>,
+    ) -> Self {
+        self.reasoning_variants = variants;
+        self
+    }
+
+    #[must_use]
+    pub fn reasoning_variants(&self) -> &BTreeMap<String, ReasoningModelVariant> {
+        &self.reasoning_variants
+    }
+
     /// 将请求形态 feature 的最终合法性判断交给上游 wire API
     #[must_use]
     pub const fn with_upstream_feature_validation(mut self) -> Self {
         self.upstream_validates_features = true;
         self
+    }
+
+    /// 声明原生生成协议；额外转换入口须显式登记，其他操作沿用各自的能力约束
+    #[must_use]
+    pub const fn with_generation_protocol(mut self, protocol: &'static str) -> Self {
+        self.generation_protocol = Some(protocol);
+        self
+    }
+
+    /// 声明 Provider 已实现的跨协议生成入口，不改变原生入口的资格
+    #[must_use]
+    pub fn with_translated_generation_protocols(
+        mut self,
+        protocols: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        self.translated_generation_protocols = protocols.into_iter().collect();
+        self
+    }
+
+    fn match_operation(
+        &self,
+        operation: &crate::operation::Operation,
+        requirements: &CapabilityRequirements,
+    ) -> Option<BTreeSet<Feature>> {
+        if operation.requires_native_protocol()
+            && self.generation_protocol != Some(operation.protocol())
+        {
+            return None;
+        }
+        if matches!(operation, crate::operation::Operation::Generate(_))
+            && self.generation_protocol.is_some_and(|protocol| {
+                protocol != operation.protocol()
+                    && !self
+                        .translated_generation_protocols
+                        .contains(operation.protocol())
+            })
+        {
+            return None;
+        }
+        self.match_requirements(requirements)
     }
 
     #[must_use]

@@ -316,9 +316,7 @@ impl CodexProvider {
                 .remember_turn(
                     turn,
                     affinity,
-                    context
-                        .account_selection_policy()
-                        .openai_session_affinity_ttl(),
+                    context.account_selection_policy().session_affinity_ttl(),
                 )
                 .await
                 .map_err(map_selection_error)?;
@@ -373,7 +371,14 @@ impl CodexProvider {
                 .map_err(|error| map_client_error(error, UpstreamSendState::NotSent, None).error)?
                 .with_middleware_headers(middleware_headers)
                 .with_outbound_middleware(outbound_middleware)
-                .with_privacy(context.privacy(), context.cancellation().clone()),
+                .with_account_privacy(
+                    context.privacy(),
+                    context.cancellation().clone(),
+                    lease.account(),
+                    affinity
+                        .as_ref()
+                        .map(|affinity| affinity.persistence_hash()),
+                ),
             response_origin: request.response_origin,
             endpoint_path: request.endpoint_path,
             body: request.body,
@@ -797,7 +802,7 @@ fn image_response_metering(
         .and_then(Value::as_u64);
     // 总量是上游独立报告的事实；图片明细是总输入/输出的子集，不能再次相加
     usage.total_tokens = raw.get("total_tokens").and_then(Value::as_u64);
-    let cost = crate::transport::usage::image_calculated_cost(request_body, &raw, prices);
+    let cost = crate::billing::image_calculated_cost(request_body, &raw, prices);
     (usage != Usage::default()).then_some((usage, cost))
 }
 

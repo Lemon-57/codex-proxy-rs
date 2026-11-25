@@ -11,8 +11,8 @@ use super::client::{
     CodexBackendClient, CodexClientResult, CodexRequestContext, OpenAiUpstreamProtocol,
     openai_subagent_from_metadata,
 };
-use super::profile::CodexWireProfile;
 use super::protocol::responses::CodexResponsesRequest;
+use crate::profile::CodexWireProfile;
 
 /// 不透传下游携带的认证、账号及相关身份字段，避免影响网关选定的上游身份
 /// 上游需要的官方身份头由网关构造；这里也包含通用认证和 Cookie 字段
@@ -59,7 +59,7 @@ pub fn build_codex_model_headers(
     Ok(headers)
 }
 
-/// Core 默认客户端身份，用于模型接口及 OAuth refresh；raw token exchange 不使用
+/// 客户端身份头供模型接口和服务端认证请求共用，不携带账号凭据
 pub fn build_codex_profile_headers(profile: &CodexWireProfile) -> CodexClientResult<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(

@@ -81,8 +81,8 @@ use provider_openai::credential::{
     CodexCookiePolicy, CodexCredentialCatalogService, CodexCredentialQuotaService,
     CodexCredentialSelector, ImportCodexOAuthCredential,
 };
+use provider_openai::profile::{CodexWireProfile, CodexWireProfileState};
 use provider_openai::transport::CodexWebSocketPool;
-use provider_openai::transport::profile::{CodexWireProfile, CodexWireProfileState};
 use provider_openai::{CodexProvider, OFFICIAL_CODEX_BASE_URL};
 use serde_json::{Map, Value, json};
 use tokio::{
@@ -1150,7 +1150,7 @@ fn selected_account_log_fields<'events>(
 
 fn wire_profile() -> CodexWireProfileState {
     CodexWireProfileState::new(CodexWireProfile {
-        client_kind: provider_openai::transport::profile::selection::ClientKind::Desktop,
+        client_kind: provider_openai::profile::selection::ClientKind::Desktop,
         originator: "codex_cli_rs".to_owned(),
         codex_version: "0.144.0".to_owned(),
         desktop_version: "1.0.0".to_owned(),
@@ -7492,7 +7492,7 @@ async fn relaxed_mode_skips_cache_preferences() {
                 "req_affinity_key",
                 contract_account_scope(),
                 account_policy()
-                    .with_openai_account_affinity(gateway_core::account::AccountAffinity::Relaxed),
+                    .with_account_affinity(gateway_core::account::AccountAffinity::Relaxed),
             ),
         )
         .await
@@ -8953,6 +8953,14 @@ async fn official_usage_limit_failure_persists_fact_without_fabricating_usage() 
     assert_eq!(
         account.quota().evidence(),
         Some(QuotaEvidence::UsageLimitReached)
+    );
+    assert_eq!(
+        account.quota().reset_at(),
+        Some(
+            chrono::DateTime::from_timestamp(reset_at, 0)
+                .unwrap()
+                .into()
+        )
     );
     let projected = store
         .get_quotas(&[account.id().clone()])
@@ -12570,6 +12578,7 @@ async fn quota_continuation_opening_rejection_projects_replay_without_losing_ups
 
 #[tokio::test]
 async fn quota_continuation_stream_rejection_only_projects_before_delivery() {
+    let reset_at = 1_900_000_000;
     for use_websocket in [false, true] {
         for semantic_output in [false, true] {
             for native_continuation in [false, true] {
@@ -12581,7 +12590,10 @@ async fn quota_continuation_stream_rejection_only_projects_before_delivery() {
                 if semantic_output {
                     events.push(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hello"}));
                 }
-                let original = json!({"type":"response.failed","response":{"id":"resp_quota","error":{"code":"usage_limit_reached","message":"You have reached your usage limit."}}});
+                let original = json!({"type":"response.failed","response":{"id":"resp_quota","error":{
+                    "code":"usage_limit_reached", "message":"You have reached your usage limit.",
+                    "resets_at": reset_at, "limit_window_minutes": 300
+                }}});
                 events.push(original.clone());
                 let (base_url, _http_server, websocket_server) = if use_websocket {
                     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -12650,6 +12662,12 @@ async fn quota_continuation_stream_rejection_only_projects_before_delivery() {
                     }
                 };
                 assert_eq!(error.kind(), ProviderErrorKind::QuotaExhausted);
+                let quota = store.account("acct_provider_contract").unwrap().quota();
+                assert_eq!(
+                    quota.reset_at(),
+                    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(reset_at))
+                );
+                assert_eq!(quota.limit_window_minutes(), Some(300));
                 assert_eq!(error.send_state(), UpstreamSendState::Sent);
                 assert_eq!(error.replay_is_safe(), !semantic_output);
                 assert_eq!(
