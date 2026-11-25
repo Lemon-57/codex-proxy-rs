@@ -1,0 +1,226 @@
+//! 验证宿主配置默认值、资源路径与系统更新参数解析
+
+use std::path::PathBuf;
+
+use gateway_host::config::{FileLoggingConfig, HostConfig, ListenConfig, LoggingConfig};
+use gateway_host::system_update::SystemUpdateConfig;
+
+#[test]
+fn host_config_should_default_update_assets_to_the_resolved_api_directory() {
+    let mut config = valid_config();
+    config.system_update.web_dist_dir = None;
+    let assets = std::path::Path::new("/srv/gateway/web/dist");
+
+    config
+        .resolve_and_validate(std::path::Path::new("/srv/gateway/deploy"), assets)
+        .expect("host config");
+
+    assert_eq!(config.system_update.web_dist_dir.as_deref(), Some(assets));
+}
+
+#[test]
+fn host_config_should_preserve_explicit_update_asset_directory() {
+    let mut config = valid_config();
+    config.system_update.web_dist_dir = Some(PathBuf::from("../custom/dist"));
+
+    config
+        .resolve_and_validate(
+            std::path::Path::new("/srv/gateway/deploy"),
+            std::path::Path::new("/srv/gateway/web/dist"),
+        )
+        .expect("host config");
+
+    assert_eq!(
+        config.system_update.web_dist_dir,
+        Some(PathBuf::from("/srv/gateway/deploy/../custom/dist"))
+    );
+}
+
+#[test]
+fn host_config_should_reject_empty_update_asset_directory() {
+    let mut config = valid_config();
+    config.system_update.web_dist_dir = Some(PathBuf::new());
+
+    assert!(matches!(
+        config.resolve_and_validate(
+            std::path::Path::new("/srv/gateway/deploy"),
+            std::path::Path::new("/srv/gateway/web/dist"),
+        ),
+        Err(gateway_host::ConfigError::InvalidField(
+            "host.system_update.web_dist_dir"
+        ))
+    ));
+}
+
+#[test]
+fn host_config_resolves_resource_paths_relative_to_configuration() {
+    let mut config = valid_config();
+    config
+        .resolve_and_validate(
+            std::path::Path::new("/srv/gateway"),
+            std::path::Path::new("/srv/gateway/web/dist"),
+        )
+        .expect("valid host config");
+
+    assert_eq!(
+        config.logging.file.directory,
+        PathBuf::from("/srv/gateway/.runtime/logs")
+    );
+    assert_eq!(
+        config.runtime_data_dir(),
+        PathBuf::from("/srv/gateway/runtime-data")
+    );
+    assert_eq!(
+        (
+            config.system_update.update_state_file,
+            config.system_update.update_lock_file,
+            config.system_update.update_temp_dir,
+        ),
+        (
+            PathBuf::from("/srv/gateway/runtime-data/update-state.json"),
+            PathBuf::from("/srv/gateway/runtime-data/update.lock"),
+            PathBuf::from("/srv/gateway/runtime-data/update-tmp"),
+        )
+    );
+}
+
+#[test]
+fn host_config_rejects_zero_worker_shutdown_window() {
+    let mut config = valid_config();
+    config.worker_shutdown_timeout_seconds = 0;
+
+    assert!(
+        config
+            .resolve_and_validate(
+                std::path::Path::new("/srv/gateway"),
+                std::path::Path::new("/srv/gateway/web/dist"),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn file_logging_rejects_zero_retention() {
+    let mut config = valid_config();
+    config.logging.file.retention_days = 0;
+    let error = config
+        .resolve_and_validate(
+            std::path::Path::new("/srv/gateway"),
+            std::path::Path::new("/srv/gateway/web/dist"),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        gateway_host::ConfigError::InvalidField("host.logging.file.retention_days")
+    ));
+}
+
+#[test]
+fn logging_defaults_to_time_retention() {
+    let value = serde_json::json!({
+        "level": "info", "stdout": true,
+        "file": { "enabled": true, "directory": "logs", "max_file_size_mb": 20 }
+    });
+    let config: LoggingConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(config.request_dump_retention_days, 1.0);
+    assert_eq!(config.file.retention_days, 7);
+    assert!(!config.oauth_recovery);
+}
+
+#[test]
+fn request_dump_retention_accepts_integer_and_fractional_yaml_days() {
+    for (input, expected) in [("1", 1.0), ("0.5", 0.5), ("0.25", 0.25), ("1.5", 1.5)] {
+        let yaml = format!(
+            "level: info\nstdout: true\nrequest_dump_retention_days: {input}\nfile:\n  enabled: true\n  directory: logs\n  max_file_size_mb: 20\n"
+        );
+        let mut config = valid_config();
+        config.logging = config::Config::builder()
+            .add_source(config::File::from_str(&yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        config
+            .resolve_and_validate(
+                std::path::Path::new("/srv/gateway"),
+                std::path::Path::new("/srv/gateway/web/dist"),
+            )
+            .unwrap();
+        assert_eq!(config.logging.request_dump_retention_days, expected);
+    }
+}
+
+#[test]
+fn request_dump_retention_rejects_invalid_durations() {
+    for days in [
+        0.0,
+        -0.5,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::MAX,
+        1e-20,
+    ] {
+        let mut config = valid_config();
+        config.logging.request_dump_retention_days = days;
+        let error = config
+            .resolve_and_validate(
+                std::path::Path::new("/srv/gateway"),
+                std::path::Path::new("/srv/gateway/web/dist"),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            gateway_host::ConfigError::InvalidField("host.logging.request_dump_retention_days")
+        ));
+    }
+}
+
+#[test]
+fn dedicated_file_channels_can_be_enabled_without_application_sinks() {
+    for oauth_recovery in [false, true] {
+        let mut config = valid_config();
+        config.logging.stdout = false;
+        config.logging.file.enabled = false;
+        config.logging.oauth_recovery = oauth_recovery;
+        config.logging.request_dump = !oauth_recovery;
+        config
+            .resolve_and_validate(
+                std::path::Path::new("/srv/gateway"),
+                std::path::Path::new("/srv/gateway/web/dist"),
+            )
+            .unwrap();
+    }
+}
+
+fn valid_config() -> HostConfig {
+    let system_update = SystemUpdateConfig {
+        update_state_file: PathBuf::from("update-state.json"),
+        update_lock_file: PathBuf::from("update.lock"),
+        update_temp_dir: PathBuf::from("update-tmp"),
+        ..SystemUpdateConfig::default()
+    };
+    HostConfig {
+        timezone: Default::default(),
+        listen: ListenConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 8080,
+        },
+        runtime_data_dir: PathBuf::from("runtime-data"),
+        logging: LoggingConfig {
+            level: "info".to_owned(),
+            stdout: true,
+            file: FileLoggingConfig {
+                enabled: true,
+                directory: PathBuf::from(".runtime/logs"),
+                retention_days: 7,
+                max_file_size_mb: 100,
+            },
+            oauth_recovery: false,
+            request_dump: false,
+            request_dump_retention_days: 1.0,
+        },
+        system_update,
+        worker_shutdown_timeout_seconds: 30,
+    }
+}

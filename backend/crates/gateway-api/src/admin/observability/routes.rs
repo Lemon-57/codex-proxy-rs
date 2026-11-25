@@ -1,0 +1,341 @@
+//! 固定 `/api/admin` 观测路由与 handler
+
+use crate::auth::SessionState;
+
+use super::*;
+
+pub fn router<S>() -> Router<S>
+where
+    S: SessionState + Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/api/admin/dashboard/summary", get(dashboard_summary::<S>))
+        .route("/api/admin/dashboard/trend", get(dashboard_trend::<S>))
+        .route("/api/admin/usage/records", get(usage_records::<S>))
+        .route(
+            "/api/admin/usage/records/detail",
+            get(usage_record_detail::<S>),
+        )
+        .route(
+            "/api/admin/usage/records/summary",
+            get(usage_records_summary::<S>),
+        )
+        .route(
+            "/api/admin/usage/insights/overview",
+            get(usage_insights_overview::<S>),
+        )
+        .route("/api/admin/usage/insights/health", get(usage_health::<S>))
+        .route(
+            "/api/admin/usage/insights/performance",
+            get(usage_performance::<S>),
+        )
+        .route("/api/admin/usage/insights/cost", get(usage_cost::<S>))
+        .route(
+            "/api/admin/usage/insights/diagnostics",
+            get(usage_insights_diagnostics::<S>),
+        )
+        .route("/api/admin/operations/errors", get(ops_errors::<S>))
+        .route(
+            "/api/admin/diagnostics/export",
+            get(super::export::download::<S>),
+        )
+}
+
+pub(crate) async fn dashboard_summary<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<DashboardQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let kind = query.trend_kind().map_err(map_wire_error)?;
+    // 概览与独立趋势使用同一部署日界
+    let range = dashboard_today_range(
+        query.start_time.as_deref(),
+        query.end_time.as_deref(),
+        query.period.as_deref(),
+        query.as_of,
+        state.admin_services().timezone(),
+    )
+    .map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .observability()
+        .dashboard_summary(range, domain_trend_kind(kind))
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(dashboard_view(result, kind, time)),
+    ))
+}
+
+pub(crate) async fn dashboard_trend<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<DashboardQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let kind = query.trend_kind().map_err(map_wire_error)?;
+    let range = dashboard_today_range(
+        query.start_time.as_deref(),
+        query.end_time.as_deref(),
+        query.period.as_deref(),
+        query.as_of,
+        state.admin_services().timezone(),
+    )
+    .map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .observability()
+        .dashboard_trend(range, domain_trend_kind(kind))
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(trend_view(result, kind, time)),
+    ))
+}
+
+pub(crate) async fn usage_records<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<UsageQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let command =
+        usage_command(&query, state.admin_services().timezone()).map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .observability()
+        .usage_records(command)
+        .await
+        .map_err(map_service_error)?;
+    let data = usage_page_view(result, time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+pub(crate) async fn usage_record_detail<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<DetailQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    query.validate().map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .observability()
+        .usage_record_detail(query.id.trim())
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(usage_detail_view(result, time)),
+    ))
+}
+
+pub(crate) async fn usage_records_summary<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<UsageAnalyticsQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let range = usage_range(
+        query.start_time.as_deref(),
+        query.end_time.as_deref(),
+        query.period.as_deref(),
+        query.as_of,
+        state.admin_services().timezone(),
+    )
+    .map_err(map_wire_error)?;
+    let filter = domain::UsageFilter {
+        provider_kind: non_empty(query.provider),
+        ..Default::default()
+    };
+    let result = state
+        .admin_services()
+        .observability()
+        .usage_summary(range, filter)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(usage_summary_view(
+            result,
+            crate::time::TimePresenter::new(state.admin_services().timezone()),
+        )),
+    ))
+}
+
+pub(crate) async fn usage_insights_overview<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<UsageAnalyticsQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let range = usage_range(
+        query.start_time.as_deref(),
+        query.end_time.as_deref(),
+        query.period.as_deref(),
+        query.as_of,
+        state.admin_services().timezone(),
+    )
+    .map_err(map_wire_error)?;
+    let filter = domain::UsageFilter {
+        provider_kind: non_empty(query.provider),
+        ..Default::default()
+    };
+    let result = state
+        .admin_services()
+        .observability()
+        .usage_insights(range, filter)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(usage_insights_view(result, time)),
+    ))
+}
+
+pub(crate) async fn usage_health<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<UsageAnalyticsQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    usage_metric_response(state, query, domain::UsageInsightMetric::Health).await
+}
+
+pub(crate) async fn usage_performance<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<UsageMetricQuery<UsagePerformanceMetricKind>>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let (range, metric) = query.into_parts();
+    usage_metric_response(state, range, metric.into()).await
+}
+
+pub(crate) async fn usage_cost<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<UsageMetricQuery<UsageCostMetricKind>>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let (range, metric) = query.into_parts();
+    usage_metric_response(state, range, metric.into()).await
+}
+
+async fn usage_metric_response<S>(
+    state: S,
+    query: UsageAnalyticsQuery,
+    metric: domain::UsageInsightMetric,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let range = usage_range(
+        query.start_time.as_deref(),
+        query.end_time.as_deref(),
+        query.period.as_deref(),
+        query.as_of,
+        state.admin_services().timezone(),
+    )
+    .map_err(map_wire_error)?;
+    let filter = domain::UsageFilter {
+        provider_kind: non_empty(query.provider),
+        ..Default::default()
+    };
+    let result = state
+        .admin_services()
+        .observability()
+        .usage_metric(range, filter, metric)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(usage_metric_view(result, time)),
+    ))
+}
+
+pub(crate) async fn usage_insights_diagnostics<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<DiagnosticsQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let dimension = query.dimension().map_err(map_wire_error)?;
+    let range = usage_range(
+        query.start_time.as_deref(),
+        query.end_time.as_deref(),
+        query.period.as_deref(),
+        query.as_of,
+        state.admin_services().timezone(),
+    )
+    .map_err(map_wire_error)?;
+    let filter = domain::UsageFilter {
+        provider_kind: non_empty(query.provider),
+        model: non_empty(query.model),
+        status_code: parse_status(query.status_code).map_err(map_wire_error)?,
+        ..domain::UsageFilter::default()
+    };
+    let result = state
+        .admin_services()
+        .observability()
+        .diagnostics(range, filter, domain_diagnostic_dimension(dimension))
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(diagnostics_view(
+            result,
+            dimension,
+            crate::time::TimePresenter::new(state.admin_services().timezone()),
+        )),
+    ))
+}
+
+pub(crate) async fn ops_errors<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<OpsQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let command = ops_command(&query, state.admin_services().timezone()).map_err(map_wire_error)?;
+    let result = state
+        .admin_services()
+        .observability()
+        .ops_errors(command)
+        .await
+        .map_err(map_service_error)?;
+    let data = ops_page_view(result, time);
+    Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}

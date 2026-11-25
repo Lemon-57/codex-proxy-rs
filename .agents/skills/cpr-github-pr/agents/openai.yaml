@@ -1,0 +1,6 @@
+interface:
+  display_name: "cpr-github-pr"
+  short_description: "准备、更新或审查 GitHub PR，回复讨论和审查意见"
+  default_prompt: "使用 $cpr-github-pr 按当前请求准备、更新、审查 PR 或回复讨论"
+policy:
+  allow_implicit_invocation: true

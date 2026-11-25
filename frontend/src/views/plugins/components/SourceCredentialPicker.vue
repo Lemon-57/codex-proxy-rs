@@ -1,0 +1,57 @@
+<script setup lang="ts">
+import type { PluginSourceCredential } from '@/api'
+
+import { ZCheckbox, ZIconButton } from '@codex-proxy/ui'
+
+import { Trash2 } from '@lucide/vue'
+import { useI18n } from 'vue-i18n'
+
+withDefaults(defineProps<{
+  credentials: PluginSourceCredential[]
+  disabled?: boolean
+}>(), {
+  disabled: false,
+})
+
+defineEmits<{ delete: [credential: PluginSourceCredential] }>()
+
+const { t } = useI18n({ useScope: 'global' })
+
+const selected = defineModel<string[]>({ required: true })
+function isSelected(id: string) {
+  return selected.value.includes(id)
+}
+
+function toggle(id: string, checked: boolean) {
+  selected.value = checked
+    ? [...selected.value, id]
+    : selected.value.filter(value => value !== id)
+}
+</script>
+
+<template>
+  <div class="grid gap-2">
+    <div
+      v-for="credential in credentials"
+      :key="credential.id"
+      class="flex min-w-0 items-center gap-3 rounded-z bg-z-fill-alter px-3 py-1.5"
+      :class="disabled ? 'opacity-60' : undefined"
+    >
+      <ZCheckbox
+        :model-value="isSelected(credential.id)"
+        :disabled="disabled"
+        :aria-label="t('plugins.credentials.selectDownloadCredentials', { name: credential.name })"
+        @update:model-value="toggle(credential.id, $event)"
+      />
+      <span class="flex min-w-0 flex-1 items-center gap-3">
+        <strong class="max-w-[45%] shrink-0 truncate text-z-sm text-z-text" :title="credential.name">{{ credential.name }}</strong>
+        <span class="min-w-0 flex-1 truncate font-mono text-z-xs text-z-text-secondary" :title="`${credential.origin}${credential.pathPrefix}`">
+          {{ credential.origin }}{{ credential.pathPrefix }}
+        </span>
+      </span>
+      <ZIconButton size="small" :aria-label="t('plugins.credentials.deleteDownloadCredentials', { name: credential.name })" :disabled="disabled" @click="$emit('delete', credential)">
+        <Trash2 class="size-3.5 text-z-error" />
+      </ZIconButton>
+    </div>
+  </div>
+</template>

@@ -1,0 +1,174 @@
+//! `ops_events` 中间失败与后台故障事实的 PostgreSQL owner
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use sqlx::PgPool;
+
+use crate::{StoreError, StoreResult, postgres_unavailable, require_nonempty};
+
+const ENTITY: &str = "ops event";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpsEventLevel {
+    Warning,
+    Error,
+}
+
+impl OpsEventLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpsEvent {
+    pub id: String,
+    pub model_request_id: Option<String>,
+    pub attempt_index: Option<u32>,
+    pub level: OpsEventLevel,
+    pub component: String,
+    pub operation: String,
+    pub provider_kind: Option<String>,
+    pub account_snapshot: Option<gateway_core::account::AccountHistorySnapshot>,
+    pub provider_account_ref: Option<String>,
+    pub upstream_model_id: Option<String>,
+    pub failure_kind: String,
+    pub upstream_send_state: Option<String>,
+    pub error_details: Option<String>,
+    pub status_code: Option<u16>,
+    pub provider_error_code: Option<String>,
+    pub retry_after_ms: Option<u64>,
+    pub upstream_request_id: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub message: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl OpsEvent {
+    pub fn validate(&self) -> StoreResult<()> {
+        require_nonempty(ENTITY, "id", &self.id)?;
+        require_nonempty(ENTITY, "component", &self.component)?;
+        require_nonempty(ENTITY, "operation", &self.operation)?;
+        require_nonempty(ENTITY, "failure_kind", &self.failure_kind)?;
+        require_nonempty(ENTITY, "message", &self.message)?;
+        let request_scoped = self.model_request_id.is_some();
+        let has_attempt = self.attempt_index.is_some_and(|index| index > 0);
+        if request_scoped != has_attempt {
+            return Err(invalid(
+                "request-scoped events require a model request and a positive attempt index",
+            ));
+        }
+        if self.attempt_index == Some(0) {
+            return Err(invalid("attempt_index must be positive"));
+        }
+        if self
+            .status_code
+            .is_some_and(|status| !(100..=599).contains(&status))
+        {
+            return Err(invalid("status_code must be between 100 and 599"));
+        }
+        if self
+            .upstream_send_state
+            .as_deref()
+            .is_some_and(|state| !matches!(state, "not_sent" | "sent" | "ambiguous"))
+        {
+            return Err(invalid("upstream_send_state is invalid"));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait OpsEventRepository: Send + Sync {
+    async fn append_ops_event(&self, event: OpsEvent) -> StoreResult<()>;
+}
+
+#[derive(Clone)]
+pub struct PgOpsEventRepository {
+    pool: PgPool,
+}
+
+impl PgOpsEventRepository {
+    #[must_use]
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl OpsEventRepository for PgOpsEventRepository {
+    async fn append_ops_event(&self, event: OpsEvent) -> StoreResult<()> {
+        event.validate()?;
+        sqlx::query(
+            "insert into ops_events (
+               id, model_request_id, attempt_index, level, component, operation,
+               provider_kind, provider_account_ref, upstream_model_id,
+               provider_account_name_snapshot, provider_account_email_snapshot,
+               provider_account_authentication_kind_snapshot, provider_account_plan_type_snapshot,
+               failure_kind, upstream_send_state, status_code, provider_error_code, retry_after_ms,
+               upstream_request_id, latency_ms, message, error_details,
+               created_at
+             ) values (
+               $1, $2, $3, $4, $5, $6, $7, $9, $10,
+               $8::jsonb ->> 'name',
+               $8::jsonb ->> 'email',
+               $8::jsonb ->> 'authenticationKind', $8::jsonb ->> 'planTypeSnapshot',
+               $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+             )",
+        )
+        .bind(event.id)
+        .bind(event.model_request_id)
+        .bind(
+            event
+                .attempt_index
+                .map(i32::try_from)
+                .transpose()
+                .map_err(|source| invalid("attempt index is too large").with_source(source))?,
+        )
+        .bind(event.level.as_str())
+        .bind(event.component)
+        .bind(event.operation)
+        .bind(event.provider_kind)
+        .bind(event.account_snapshot.map(sqlx::types::Json))
+        .bind(event.provider_account_ref)
+        .bind(event.upstream_model_id)
+        .bind(event.failure_kind)
+        .bind(event.upstream_send_state)
+        .bind(event.status_code.map(i32::from))
+        .bind(event.provider_error_code)
+        .bind(
+            event
+                .retry_after_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|source| invalid("retry_after_ms is too large").with_source(source))?,
+        )
+        .bind(event.upstream_request_id)
+        .bind(
+            event
+                .latency_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|source| invalid("latency_ms is too large").with_source(source))?,
+        )
+        .bind(event.message)
+        .bind(event.error_details)
+        .bind(event.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|source| postgres_unavailable("append ops event", source))?;
+        Ok(())
+    }
+}
+
+fn invalid(message: &str) -> StoreError {
+    StoreError::InvalidData {
+        source: None,
+        entity: ENTITY,
+        message: message.to_owned(),
+    }
+}

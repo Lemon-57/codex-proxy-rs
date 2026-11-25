@@ -1,0 +1,40 @@
+//! Provider 账号领域、持久化端口与同一 target 内的账号选择
+
+mod error;
+mod error_protection;
+pub use error_protection::*;
+mod fast_mode;
+pub use fast_mode::FastMode;
+mod location;
+pub use location::{InvalidRequestLocation, OpenAiRequestCountry, RequestLocation};
+mod model;
+mod model_access;
+pub use model_access::{
+    AccountModelAccess, AccountModelAccessMode, InvalidAccountModelAccess,
+    MAX_ACCOUNT_ACCESS_MODELS,
+};
+mod quota_settings;
+pub use quota_settings::{
+    AccountQuotaSettings, QuotaBucketSettings, QuotaBucketWarmup, QuotaMergeBase,
+    QuotaPauseDecision,
+};
+mod proxy;
+pub use proxy::{InvalidOutboundProxy, OutboundProxy};
+mod scheduling;
+pub mod scope;
+mod selection;
+mod store;
+mod upstream;
+
+pub use error::CredentialError;
+pub use model::*;
+pub use scheduling::{
+    QuotaResetPeriod, ResetWindowWeights, SchedulingConfigError, SmartSchedulingConfig,
+};
+pub(crate) use selection::smart_score;
+pub use selection::*;
+pub use store::{
+    AccountCatalogObservation, AccountCatalogOmissions, ProviderAccountStore, QuotaWarmupState,
+    QuotaWarmupStateUpdate, StoredAccountCatalog,
+};
+pub use upstream::*;

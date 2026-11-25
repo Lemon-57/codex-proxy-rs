@@ -1,0 +1,494 @@
+//! BackupTask 执行链测试：驱动内存 fake 端口跑完整 dump/upload/verify/retention 流程
+
+use std::sync::Arc;
+
+use chrono::{Duration, Utc};
+use gateway_admin::{
+    backup::task::BackupTask,
+    model::backup::{
+        BackupRecordSeed, BackupStatus, BackupTriggerKind, UpdateBackupScheduleCommand, code,
+    },
+    ports::backup::{BackupRepository, DatabaseDumpPort, DumpRequest},
+};
+use gateway_core::lifecycle::CancellationToken;
+use gateway_core::task::{DaemonTask, WorkerDaemonContext};
+
+use super::support::{
+    DUMP_CONTENT, FakeBackupRepository, FakeDumpPort, FakeObjectStore, backup_id,
+    configured_settings, sha256_hex, system_context,
+};
+
+#[tokio::test]
+async fn backup_task_runs_full_dump_upload_verify_pipeline() {
+    let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+    let dump = Arc::new(FakeDumpPort::new());
+    let object_store = Arc::new(FakeObjectStore::new());
+
+    let seed = BackupRecordSeed {
+        id: backup_id("manual"),
+        trigger_kind: BackupTriggerKind::Manual,
+        scheduled_at: None,
+        object_key: "codex/2026/08/01/manual.dump".to_owned(),
+        expires_at: None,
+    };
+    repository
+        .insert_backup_record(seed.clone(), &system_context())
+        .await
+        .expect("insert queued");
+
+    let task = BackupTask::new(repository.clone(), dump.clone(), object_store.clone());
+    task.run_cycle(&CancellationToken::new())
+        .await
+        .expect("run cycle");
+
+    let records = repository.all_records();
+    assert_eq!(records.len(), 1);
+    let finished = &records[0];
+    assert_eq!(finished.status, BackupStatus::Completed);
+    assert_eq!(finished.size_bytes, Some(DUMP_CONTENT.len() as u64));
+    assert_eq!(
+        finished.sha256.as_deref(),
+        Some(sha256_hex(DUMP_CONTENT).as_str())
+    );
+
+    // 对象已上传且内容与本地归档一致
+    let stored = object_store
+        .object(&seed.object_key)
+        .expect("uploaded object exists");
+    assert_eq!(stored.as_slice(), DUMP_CONTENT);
+    assert!(dump.inspect_staging(&seed.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn backup_task_marks_failed_when_dump_port_fails() {
+    let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+    let dump = Arc::new(FakeDumpPort::new().fail_next_dump());
+    let object_store = Arc::new(FakeObjectStore::new());
+
+    let seed = BackupRecordSeed {
+        id: backup_id("fail"),
+        trigger_kind: BackupTriggerKind::Manual,
+        scheduled_at: None,
+        object_key: "codex/2026/08/01/fail.dump".to_owned(),
+        expires_at: None,
+    };
+    repository
+        .insert_backup_record(seed.clone(), &system_context())
+        .await
+        .expect("insert queued");
+
+    let task = BackupTask::new(repository.clone(), dump.clone(), object_store.clone());
+    task.run_cycle(&CancellationToken::new())
+        .await
+        .expect("run cycle");
+
+    let records = repository.all_records();
+    let failed = &records[0];
+    assert_eq!(failed.status, BackupStatus::Failed);
+    assert_eq!(failed.error_code.as_deref(), Some("backup.pg_dump_failed"));
+    assert!(failed.completed_at.is_some());
+    // 归档未上传，对象不存在
+    assert!(object_store.object(&seed.object_key).is_none());
+}
+
+#[tokio::test]
+async fn backup_task_marks_failed_with_the_upload_error() {
+    let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+    let dump = Arc::new(FakeDumpPort::new());
+    let object_store =
+        Arc::new(FakeObjectStore::new().fail_upload(code::S3_UPLOAD_FAILED, "对象存储拒绝上传"));
+    let seed = BackupRecordSeed {
+        id: backup_id("upload-failure"),
+        trigger_kind: BackupTriggerKind::Manual,
+        scheduled_at: None,
+        object_key: "codex/2026/08/01/upload-failure.dump".to_owned(),
+        expires_at: None,
+    };
+    repository
+        .insert_backup_record(seed.clone(), &system_context())
+        .await
+        .expect("insert queued");
+
+    let task = BackupTask::new(repository.clone(), dump, object_store);
+    task.run_cycle(&CancellationToken::new())
+        .await
+        .expect("run cycle");
+
+    let records = repository.all_records();
+    let failed = &records[0];
+    assert_eq!(failed.status, BackupStatus::Failed);
+    assert_eq!(failed.error_code.as_deref(), Some(code::S3_UPLOAD_FAILED));
+    assert_eq!(
+        failed.error_message.as_deref(),
+        Some("上传到对象存储失败：对象存储拒绝上传")
+    );
+}
+
+#[tokio::test]
+async fn backup_task_recovery_marks_failed_with_the_upload_error() {
+    let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+    let dump = Arc::new(FakeDumpPort::new());
+    let object_store =
+        Arc::new(FakeObjectStore::new().fail_upload(code::S3_UPLOAD_FAILED, "对象存储拒绝上传"));
+    let seed = BackupRecordSeed {
+        id: backup_id("recovered-upload-failure"),
+        trigger_kind: BackupTriggerKind::Manual,
+        scheduled_at: None,
+        object_key: "codex/2026/08/01/recovered-upload-failure.dump".to_owned(),
+        expires_at: None,
+    };
+    repository
+        .insert_backup_record(seed.clone(), &system_context())
+        .await
+        .expect("insert queued");
+    let cancellation = CancellationToken::new();
+    dump.dump(DumpRequest {
+        backup_id: seed.id.clone(),
+        cancellation: cancellation.clone(),
+    })
+    .await
+    .expect("stage dump");
+    repository.force_status(&seed.id, BackupStatus::Dumping);
+
+    let task = BackupTask::new(repository.clone(), dump, object_store);
+    task.run_cycle(&cancellation).await.expect("run cycle");
+
+    let records = repository.all_records();
+    let failed = &records[0];
+    assert_eq!(failed.status, BackupStatus::Failed);
+    assert_eq!(failed.error_code.as_deref(), Some(code::S3_UPLOAD_FAILED));
+    assert_eq!(
+        failed.error_message.as_deref(),
+        Some("上传到对象存储失败：对象存储拒绝上传")
+    );
+}
+
+#[tokio::test]
+async fn retention_cleans_expired_scheduled_backups() {
+    let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+    let dump = Arc::new(FakeDumpPort::new());
+    let object_store = Arc::new(FakeObjectStore::new());
+
+    // 造一条旧 completed 计划备份（超过 retention_days）与一条新备份
+    let old_seed = BackupRecordSeed {
+        id: backup_id("old"),
+        trigger_kind: BackupTriggerKind::Scheduled,
+        scheduled_at: Some(Utc::now() - Duration::days(40)),
+        object_key: "codex/2026/06/01/old.dump".to_owned(),
+        expires_at: None,
+    };
+    let new_seed = BackupRecordSeed {
+        id: backup_id("new"),
+        trigger_kind: BackupTriggerKind::Scheduled,
+        scheduled_at: Some(Utc::now() - Duration::days(1)),
+        object_key: "codex/2026/07/01/new.dump".to_owned(),
+        expires_at: None,
+    };
+    repository
+        .insert_backup_record(old_seed.clone(), &system_context())
+        .await
+        .expect("insert old");
+    // 旧备份 40 天前完成（释放活跃名额），再插入新备份
+    let now = Utc::now();
+    repository.set_completed(&backup_id("old"), now - Duration::days(40));
+    repository
+        .insert_backup_record(new_seed.clone(), &system_context())
+        .await
+        .expect("insert new");
+    // 新备份 1 天前完成
+    repository.set_completed(&backup_id("new"), now - Duration::days(1));
+    // 两个对象都已上传
+    object_store
+        .objects
+        .lock()
+        .expect("objects")
+        .insert(old_seed.object_key.clone(), DUMP_CONTENT.to_vec());
+    object_store
+        .objects
+        .lock()
+        .expect("objects")
+        .insert(new_seed.object_key.clone(), DUMP_CONTENT.to_vec());
+
+    // 设置 retention_days = 30
+    repository
+        .update_schedule_settings(
+            UpdateBackupScheduleCommand {
+                schedule_enabled: false,
+                cron_expression: "0 2 * * *".to_owned(),
+
+                retention_days: 30,
+                retention_count: 0,
+            },
+            None,
+            &system_context(),
+            Default::default(),
+        )
+        .await
+        .expect("set retention");
+
+    let task = BackupTask::new(repository.clone(), dump.clone(), object_store.clone());
+    task.run_cycle(&CancellationToken::new())
+        .await
+        .expect("run cycle");
+
+    // 旧备份被硬删除，对象被删除；新备份保留
+    let records = repository.all_records();
+    let ids: Vec<_> = records.iter().map(|record| record.id.as_str()).collect();
+    assert_eq!(ids, vec![backup_id("new").as_str()]);
+    assert!(object_store.object(&old_seed.object_key).is_none());
+    assert!(object_store.object(&new_seed.object_key).is_some());
+}
+
+#[tokio::test]
+async fn retention_scans_all_pages_and_deletes_only_one_batch_per_cycle() {
+    for (retention_days, retention_count, retained) in [
+        (0, 999, 999),
+        (0, 1000, 1000),
+        (0, 1001, 1001),
+        (30, 0, 1000),
+    ] {
+        let mut settings = configured_settings();
+        settings.retention_days = retention_days;
+        settings.retention_count = retention_count;
+        let repository = Arc::new(FakeBackupRepository::new(settings));
+        let object_store = Arc::new(FakeObjectStore::new());
+        let now = Utc::now();
+        let mut seeds = Vec::new();
+        for index in 0..retained + 15 {
+            let completed_at = if retention_days > 0 && index >= retained {
+                now - Duration::days(40) - Duration::minutes(index)
+            } else {
+                now - Duration::minutes(index)
+            };
+            let seed = BackupRecordSeed {
+                id: backup_id(&format!("retention-{index}")),
+                trigger_kind: BackupTriggerKind::Scheduled,
+                scheduled_at: Some(completed_at),
+                object_key: format!("codex/retention-{index}.dump"),
+                expires_at: None,
+            };
+            repository
+                .insert_backup_record(seed.clone(), &system_context())
+                .await
+                .expect("insert scheduled backup");
+            repository.set_completed(&seed.id, completed_at);
+            object_store
+                .objects
+                .lock()
+                .expect("objects")
+                .insert(seed.object_key.clone(), DUMP_CONTENT.to_vec());
+            seeds.push(seed);
+        }
+        let task = BackupTask::new(
+            repository.clone(),
+            Arc::new(FakeDumpPort::new()),
+            object_store.clone(),
+        );
+
+        for deleted in [10, 15] {
+            task.run_cycle(&CancellationToken::new())
+                .await
+                .expect("run retention cycle");
+            let records = repository.all_records();
+            assert_eq!(records.len(), seeds.len() - deleted);
+            for (index, seed) in seeds.iter().enumerate() {
+                let retained = usize::try_from(retained).unwrap();
+                let should_remain = index < retained || index >= retained + deleted;
+                assert_eq!(
+                    records.iter().any(|record| record.id == seed.id),
+                    should_remain,
+                    "record {index}, retention days {retention_days}, count {retention_count}"
+                );
+                assert_eq!(
+                    object_store.object(&seed.object_key).is_some(),
+                    should_remain
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn timezone_change_rebases_future_cursor_without_running_old_due_backup() {
+    let mut settings = configured_settings();
+    settings.schedule_enabled = true;
+    settings.cron_expression = Some("0 2 * * *".to_owned());
+    settings.schedule_timezone = Some("Asia/Shanghai".to_owned());
+    settings.next_run_at = Some(Utc::now() - Duration::days(1));
+    let repository = Arc::new(FakeBackupRepository::new(settings));
+    let task = BackupTask::new(
+        repository.clone(),
+        Arc::new(FakeDumpPort::new()),
+        Arc::new(FakeObjectStore::new()),
+    )
+    .with_timezone("UTC".parse().unwrap());
+    task.run_cycle(&CancellationToken::new()).await.unwrap();
+    let settings = repository.load_settings().await.unwrap();
+    assert_eq!(settings.schedule_timezone.as_deref(), Some("UTC"));
+    assert!(settings.next_run_at.unwrap() > Utc::now());
+    assert!(repository.all_records().is_empty());
+    task.run_cycle(&CancellationToken::new()).await.unwrap();
+    assert!(repository.all_records().is_empty());
+}
+
+#[tokio::test]
+async fn completed_recovery_removes_staging_for_dumping_and_uploading_tasks() {
+    for (status, remote_exists) in [
+        (BackupStatus::Dumping, false),
+        (BackupStatus::Uploading, false),
+        (BackupStatus::Uploading, true),
+    ] {
+        let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+        let dump = Arc::new(FakeDumpPort::new());
+        let object_store = Arc::new(FakeObjectStore::new());
+        let seed = BackupRecordSeed {
+            id: backup_id("recovery-cleanup"),
+            trigger_kind: BackupTriggerKind::Manual,
+            scheduled_at: None,
+            object_key: "recovery.dump".to_owned(),
+            expires_at: None,
+        };
+        repository
+            .insert_backup_record(seed.clone(), &system_context())
+            .await
+            .unwrap();
+        let artifact = dump
+            .dump(DumpRequest {
+                backup_id: seed.id.clone(),
+                cancellation: CancellationToken::new(),
+            })
+            .await
+            .unwrap();
+        repository.force_status(&seed.id, BackupStatus::Dumping);
+        if status == BackupStatus::Uploading {
+            repository
+                .transition_status(
+                    &seed.id,
+                    gateway_admin::model::backup::BackupStatusTransition::try_new(
+                        BackupStatus::Dumping,
+                        status,
+                    )
+                    .unwrap(),
+                    gateway_admin::ports::backup::StatusTransitionUpdate {
+                        size_bytes: Some(artifact.size_bytes),
+                        sha256: Some(artifact.sha256),
+                        ..Default::default()
+                    },
+                    Utc::now(),
+                )
+                .await
+                .unwrap();
+        }
+        if remote_exists {
+            object_store
+                .objects
+                .lock()
+                .unwrap()
+                .insert(seed.object_key.clone(), DUMP_CONTENT.to_vec());
+        }
+        BackupTask::new(repository.clone(), dump.clone(), object_store)
+            .run_cycle(&CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(repository.all_records()[0].status, BackupStatus::Completed);
+        assert!(
+            dump.inspect_staging(&seed.id).await.unwrap().is_none(),
+            "completed recovery must remove staging: {status:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn manual_backup_preserves_primary_and_final_delete_failures() {
+    for (upload_fails, expiring) in [(false, false), (true, false), (false, true)] {
+        let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+        let dump = Arc::new(FakeDumpPort::new());
+        let store = FakeObjectStore::new().fail_delete(code::S3_PERMISSION_DENIED);
+        let store = Arc::new(if upload_fails {
+            store.fail_upload(code::S3_UPLOAD_FAILED, "上传失败")
+        } else {
+            store.fail_head(code::REMOTE_VERIFICATION_FAILED)
+        });
+        let seed = BackupRecordSeed {
+            id: backup_id("cleanup-failure"),
+            trigger_kind: BackupTriggerKind::Manual,
+            scheduled_at: None,
+            object_key: "codex/cleanup-failure.dump".into(),
+            expires_at: expiring.then(|| Utc::now() + Duration::hours(1)),
+        };
+        repository
+            .insert_backup_record(seed.clone(), &system_context())
+            .await
+            .unwrap();
+        let task = BackupTask::new(repository.clone(), dump.clone(), store.clone());
+        task.run_cycle(&CancellationToken::new()).await.unwrap();
+        let records = repository.all_records();
+        let record = &records[0];
+        assert_eq!(record.status, BackupStatus::Failed);
+        assert_eq!(
+            record.error_code.as_deref(),
+            Some(if upload_fails {
+                code::S3_UPLOAD_FAILED
+            } else {
+                code::REMOTE_VERIFICATION_FAILED
+            })
+        );
+        let message = record.error_message.as_deref().unwrap();
+        assert!(message.contains(if upload_fails {
+            "上传失败"
+        } else {
+            "HEAD failed"
+        }));
+        assert!(message.contains("DeleteObject"));
+        assert!(message.contains(code::S3_PERMISSION_DENIED));
+        assert!(message.contains(if expiring {
+            "等待备份到期清理"
+        } else {
+            "未安排自动重试"
+        }));
+        assert_eq!(store.object(&seed.object_key).is_some(), !upload_fails);
+        assert!(dump.inspect_staging(&seed.id).await.unwrap().is_none());
+        task.run_cycle(&CancellationToken::new()).await.unwrap();
+        assert_eq!(
+            repository.all_records()[0].error_message,
+            record.error_message
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn daemon_reports_success_only_after_a_complete_cycle_and_recovers_after_store_failure() {
+    let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+    let task = Arc::new(BackupTask::new(
+        repository.clone(),
+        Arc::new(FakeDumpPort::new()),
+        Arc::new(FakeObjectStore::new()),
+    ));
+    let context = WorkerDaemonContext::new(CancellationToken::new());
+    repository.set_settings_unavailable(true);
+    let error = task.run(context.clone()).await.unwrap_err();
+    assert_eq!(error.as_safe_str(), "backup store failed");
+    assert_eq!(context.completed_cycles(), 0);
+
+    repository.set_settings_unavailable(false);
+    let recovered = WorkerDaemonContext::new(CancellationToken::new());
+    let worker = tokio::spawn({
+        let task = task.clone();
+        let context = recovered.clone();
+        async move { task.run(context).await }
+    });
+    recovered.progress_since(0).await;
+    assert_eq!(recovered.completed_cycles(), 1);
+    repository.set_settings_unavailable(true);
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    assert_eq!(
+        worker.await.unwrap().unwrap_err().as_safe_str(),
+        "backup store failed"
+    );
+    assert_eq!(recovered.completed_cycles(), 1);
+
+    let cancelled = WorkerDaemonContext::new(CancellationToken::new());
+    cancelled.cancellation().cancel();
+    task.run(cancelled.clone()).await.unwrap();
+    assert_eq!(cancelled.completed_cycles(), 0);
+}

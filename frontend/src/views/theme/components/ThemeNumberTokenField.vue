@@ -1,0 +1,68 @@
+<script setup lang="ts">
+import { ZIconButton, ZInputNumber, ZSlider } from '@codex-proxy/ui'
+
+import { RotateCcw } from '@lucide/vue'
+
+import { useI18n } from 'vue-i18n'
+
+defineProps<{
+  label: string
+  token: string
+  value: number
+  min: number
+  max: number
+  step?: number
+  unit?: string
+  overridden?: boolean
+}>()
+
+const emit = defineEmits<{
+  change: [value: number]
+  reset: []
+}>()
+
+const { t } = useI18n({ useScope: 'global' })
+</script>
+
+<template>
+  <div class="grid gap-3 rounded-z-lg bg-z-fill-quaternary px-3 py-3">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2">
+          <strong class="text-z-sm font-bold text-z-text">{{ label }}</strong>
+          <span v-if="overridden" class="rounded-full bg-z-primary-container px-1.5 py-0.5 text-[9px] font-heavy text-z-primary-on-container">{{ t('appearance.color.modified') }}</span>
+        </div>
+        <code class="mt-1 block truncate font-mono text-[10px] text-z-text-quaternary">{{ token }}</code>
+      </div>
+      <div class="flex items-center gap-1">
+        <ZInputNumber
+          size="small"
+          :model-value="value"
+          :aria-label="label"
+          :min="min"
+          :max="max"
+          :step="step ?? 1"
+          :unit="unit ?? 'px'"
+          @update:model-value="emit('change', $event)"
+        />
+        <ZIconButton
+          v-if="overridden"
+          :aria-label="t('appearance.color.restoreDerivedValue')"
+          size="small"
+          @click="emit('reset')"
+        >
+          <RotateCcw class="size-3.5" />
+        </ZIconButton>
+      </div>
+    </div>
+    <ZSlider
+      :model-value="value"
+      :min="min"
+      :max="max"
+      :step="step ?? 1"
+      :aria-label="label"
+      :unit="unit ?? 'px'"
+      @update:model-value="emit('change', $event)"
+    />
+  </div>
+</template>

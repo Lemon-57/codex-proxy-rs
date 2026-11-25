@@ -1,0 +1,456 @@
+//! 验证 Redis 认证会话的续期、撤销、固定有效期与原子限流
+
+use std::time::Duration;
+
+use chrono::Utc;
+use gateway_store::redis::{
+    AuthSessionRecord, AuthStateRepository, RedisAuthStateRepository, SessionSubjectRecord,
+};
+use redis::aio::ConnectionManager;
+use uuid::Uuid;
+
+#[tokio::test]
+async fn client_session_should_use_fixed_ttl_without_storing_session_or_api_key_secrets() {
+    let Some((repository, mut connection, namespace)) = auth_repository().await else {
+        return;
+    };
+    let session_id = "client_session_real_secret";
+    let raw_api_key = "cpr_raw_key_must_never_enter_redis";
+    let session = AuthSessionRecord {
+        subject: SessionSubjectRecord::Key {
+            client_key_id: "key-42".to_owned(),
+        },
+        renewal: None,
+        absolute_expires_at: None,
+        expires_at: Utc::now() + chrono::Duration::seconds(60),
+    };
+
+    repository
+        .store_session(session_id, &session)
+        .await
+        .expect("store client session");
+    assert_eq!(
+        repository
+            .load_session(session_id)
+            .await
+            .expect("load client session"),
+        Some(session.clone())
+    );
+
+    let keys = redis::cmd("KEYS")
+        .arg(format!("{namespace}:*"))
+        .query_async::<Vec<String>>(&mut connection)
+        .await
+        .expect("list isolated client state keys");
+    assert_eq!(keys.len(), 1);
+    let key = &keys[0];
+    assert!(!key.contains(session_id));
+    assert!(!key.contains(raw_api_key));
+    assert_session_expiry(&mut connection, key, session.expires_at).await;
+    let payload = redis::cmd("GET")
+        .arg(key)
+        .query_async::<String>(&mut connection)
+        .await
+        .expect("read client session payload");
+    assert!(payload.contains("key-42"));
+    assert!(!payload.contains(session_id));
+    assert!(!payload.contains(raw_api_key));
+
+    assert_eq!(
+        repository
+            .delete_session(session_id)
+            .await
+            .expect("delete client session"),
+        Some(session)
+    );
+}
+
+#[tokio::test]
+async fn login_rate_limit_should_enforce_source_and_global_buckets_atomically() {
+    let Some((repository, _connection, _namespace)) = auth_repository().await else {
+        return;
+    };
+    let window = Duration::from_secs(60);
+
+    assert_eq!(
+        repository
+            .consume_login_attempt("203.0.113.10", 2, 3, window)
+            .await
+            .expect("first source attempt"),
+        None
+    );
+    assert_eq!(
+        repository
+            .consume_login_attempt("203.0.113.10", 2, 3, window)
+            .await
+            .expect("second source attempt"),
+        None
+    );
+    assert!(
+        repository
+            .consume_login_attempt("203.0.113.10", 2, 3, window)
+            .await
+            .expect("source rejection")
+            .is_some()
+    );
+    assert!(
+        repository
+            .consume_login_attempt("203.0.113.11", 2, 3, window)
+            .await
+            .expect("global rejection")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn client_session_should_reject_invalid_intervals_and_rate_limit_policies() {
+    let Some((repository, _connection, _namespace)) = auth_repository().await else {
+        return;
+    };
+    let now = Utc::now();
+    let invalid = AuthSessionRecord {
+        subject: SessionSubjectRecord::Key {
+            client_key_id: "key-42".to_owned(),
+        },
+        renewal: None,
+        absolute_expires_at: None,
+        expires_at: now,
+    };
+
+    assert!(repository.store_session("invalid", &invalid).await.is_err());
+    assert!(
+        repository
+            .consume_login_attempt("203.0.113.10", 0, 1, Duration::from_secs(60))
+            .await
+            .is_err()
+    );
+    assert!(
+        repository
+            .consume_login_attempt("203.0.113.10", 1, 1, Duration::ZERO)
+            .await
+            .is_err()
+    );
+}
+
+async fn auth_repository() -> Option<(RedisAuthStateRepository, ConnectionManager, String)> {
+    let redis_url = crate::support::test_env("CPR_TEST_REDIS_URL")?;
+    let client = redis::Client::open(redis_url).expect("valid CPR_TEST_REDIS_URL");
+    let connection = client
+        .get_connection_manager()
+        .await
+        .expect("connect test Redis");
+    let namespace = format!("gateway-store-test-{}", Uuid::new_v4());
+    let repository = RedisAuthStateRepository::new(connection.clone(), &namespace)
+        .expect("valid client state namespace");
+    let full_namespace = format!("{namespace}:auth:v1");
+    Some((repository, connection, full_namespace))
+}
+
+async fn assert_session_expiry(
+    connection: &mut ConnectionManager,
+    key: &str,
+    expires_at: chrono::DateTime<Utc>,
+) {
+    // PXAT 固定绝对到期时间；PTTL 使用 Redis 时钟，不能与客户端相对时长直接比较
+    let (stored_expiry, ttl): (i64, i64) = redis::pipe()
+        .cmd("PEXPIRETIME")
+        .arg(key)
+        .cmd("PTTL")
+        .arg(key)
+        .query_async(connection)
+        .await
+        .expect("read session expiry and ttl");
+    assert_eq!(stored_expiry, expires_at.timestamp_millis());
+    assert!(
+        ttl > 0,
+        "session must have a finite positive TTL, got {ttl}"
+    );
+}
+
+#[test]
+fn admin_auth_state_rejects_invalid_ttl_boundaries() {
+    let session = AuthSessionRecord {
+        subject: SessionSubjectRecord::Admin {
+            credential_fingerprint: String::new(),
+            admin_user_id: "admin".to_owned(),
+        },
+        renewal: None,
+        absolute_expires_at: None,
+        expires_at: Utc::now() - chrono::Duration::seconds(1),
+    };
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let Some((repository, _connection, _namespace)) = runtime.block_on(auth_repository()) else {
+        return;
+    };
+    assert!(
+        runtime
+            .block_on(repository.store_session("expired-session", &session))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn admin_auth_state_keeps_fixed_ttl_and_opaque_keys() {
+    let Some((repository, mut connection, namespace)) = auth_repository().await else {
+        return;
+    };
+    let session_id = "session-real-secret-id";
+    let password = "must-never-enter-redis";
+    let admin_api_key = "admin-must-never-enter-redis";
+    let session = AuthSessionRecord {
+        subject: SessionSubjectRecord::Admin {
+            credential_fingerprint: "test-password-fingerprint".to_owned(),
+            admin_user_id: "default-admin".to_owned(),
+        },
+        renewal: None,
+        absolute_expires_at: None,
+        expires_at: Utc::now() + chrono::Duration::seconds(60),
+    };
+
+    repository
+        .store_session(session_id, &session)
+        .await
+        .expect("store session");
+    assert_eq!(
+        repository
+            .load_session(session_id)
+            .await
+            .expect("load session"),
+        Some(session.clone())
+    );
+
+    let keys = redis::cmd("KEYS")
+        .arg(format!("{namespace}:*"))
+        .query_async::<Vec<String>>(&mut connection)
+        .await
+        .expect("list isolated test keys");
+    assert_eq!(keys.len(), 1);
+    for key in &keys {
+        assert!(!key.contains(session_id));
+        assert_session_expiry(&mut connection, key, session.expires_at).await;
+        let value = redis::cmd("GET")
+            .arg(key)
+            .query_async::<String>(&mut connection)
+            .await
+            .expect("read isolated test value");
+        assert!(!value.contains(session_id));
+        assert!(!value.contains(password));
+        assert!(!value.contains(admin_api_key));
+    }
+
+    assert_eq!(
+        repository
+            .delete_session(session_id)
+            .await
+            .expect("delete session"),
+        Some(session)
+    );
+    assert_eq!(
+        repository
+            .load_session(session_id)
+            .await
+            .expect("load deleted session"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn unified_session_rejects_invalid_identities_and_loads_legacy_admin_payloads() {
+    let Some((repository, mut connection, namespace)) = auth_repository().await else {
+        return;
+    };
+    let token = "malformed-session-fixture";
+    repository
+        .store_session(
+            token,
+            &AuthSessionRecord {
+                subject: SessionSubjectRecord::Key {
+                    client_key_id: "key-42".to_owned(),
+                },
+                renewal: None,
+                absolute_expires_at: None,
+                expires_at: Utc::now() + chrono::Duration::seconds(60),
+            },
+        )
+        .await
+        .unwrap();
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("{namespace}:session:*"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    for subject in [
+        serde_json::json!({"type": "superadmin", "admin_user_id": "admin"}),
+        serde_json::json!({"type": "admin", "admin_user_id": "admin", "client_key_id": "key-42"}),
+        serde_json::json!({"type": "key", "client_key_id": ""}),
+        serde_json::json!({"type": "key", "admin_user_id": "admin"}),
+    ] {
+        let payload = serde_json::json!({"subject": subject, "expires_at": (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339()});
+        redis::cmd("SET")
+            .arg(&keys[0])
+            .arg(payload.to_string())
+            .arg("EX")
+            .arg(60)
+            .query_async::<()>(&mut connection)
+            .await
+            .unwrap();
+        assert!(repository.load_session(token).await.is_err());
+    }
+
+    // 旧版会话仍能解码，空指纹交由认证服务判定失效，避免升级后返回存储故障
+    let legacy = serde_json::json!({
+        "subject": {"type": "admin", "admin_user_id": "admin"},
+        "expires_at": (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+    });
+    redis::cmd("SET")
+        .arg(&keys[0])
+        .arg(legacy.to_string())
+        .arg("EX")
+        .arg(60)
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .load_session(token)
+            .await
+            .unwrap()
+            .unwrap()
+            .subject,
+        SessionSubjectRecord::Admin {
+            admin_user_id: "admin".to_owned(),
+            credential_fingerprint: String::new(),
+        }
+    );
+}
+
+fn renewable_record() -> AuthSessionRecord {
+    AuthSessionRecord {
+        subject: SessionSubjectRecord::Admin {
+            admin_user_id: "admin".into(),
+            credential_fingerprint: "fingerprint".into(),
+        },
+        expires_at: Utc::now() - chrono::Duration::minutes(1),
+        absolute_expires_at: Some(Utc::now() + chrono::Duration::minutes(10)),
+        renewal: Some(gateway_admin::model::auth::SessionRenewal {
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            access_digest: [1; 32],
+            refresh_digest: [2; 32],
+            previous: None,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn rotation_is_atomic_and_logout_cannot_be_undone_by_inflight_refresh() {
+    let Some((repository, _, _)) = auth_repository().await else {
+        return;
+    };
+    let original = renewable_record();
+    repository
+        .store_session("rotation", &original)
+        .await
+        .unwrap();
+    let mut replacement = original.clone();
+    replacement.expires_at = Utc::now() + chrono::Duration::minutes(1);
+    replacement.renewal.as_mut().unwrap().refresh_digest = [3; 32];
+    let mut competing = replacement.clone();
+    competing.renewal.as_mut().unwrap().refresh_digest = [4; 32];
+    let (first, second) = tokio::join!(
+        repository.compare_exchange_session("rotation", &original, Some(&replacement)),
+        repository.compare_exchange_session("rotation", &original, Some(&competing)),
+    );
+    let first = first.unwrap().unwrap();
+    assert_eq!(second.unwrap(), Some(first.clone()));
+    assert_eq!(
+        repository.load_session("rotation").await.unwrap(),
+        Some(first.clone())
+    );
+    // 过时快照不能撤销已轮换的状态；领域层重新核对后才决定是否撤销
+    assert_eq!(
+        repository
+            .compare_exchange_session("rotation", &original, None)
+            .await
+            .unwrap(),
+        Some(first.clone())
+    );
+    assert!(
+        repository
+            .compare_exchange_session("rotation", &first, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repository
+            .compare_exchange_session("rotation", &first, Some(&replacement))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(repository.load_session("rotation").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn redis_retains_refresh_after_access_expiry_but_never_resurrects_expired_sessions() {
+    let Some((repository, mut connection, namespace)) = auth_repository().await else {
+        return;
+    };
+    let original = renewable_record();
+    repository
+        .store_session("expiry-race", &original)
+        .await
+        .unwrap();
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("{namespace}:session:*"))
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_session_expiry(
+        &mut connection,
+        &keys[0],
+        original.renewal.as_ref().unwrap().expires_at,
+    )
+    .await;
+    assert_eq!(
+        repository.load_session("expiry-race").await.unwrap(),
+        Some(original.clone())
+    );
+    let mut replacement = original.clone();
+    replacement.renewal.as_mut().unwrap().expires_at = Utc::now() + chrono::Duration::minutes(6);
+    assert_eq!(
+        repository
+            .compare_exchange_session("expiry-race", &original, Some(&replacement))
+            .await
+            .unwrap(),
+        Some(replacement.clone())
+    );
+    assert_session_expiry(
+        &mut connection,
+        &keys[0],
+        replacement.renewal.as_ref().unwrap().expires_at,
+    )
+    .await;
+    redis::cmd("PEXPIRE")
+        .arg(&keys[0])
+        .arg(1)
+        .query_async::<()>(&mut connection)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        repository
+            .compare_exchange_session("expiry-race", &replacement, Some(&replacement))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repository
+            .load_session("expiry-race")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

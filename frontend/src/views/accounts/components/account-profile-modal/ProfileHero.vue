@@ -1,0 +1,85 @@
+<script setup lang="ts">
+import type { Account, AccountProfileStatisticsResponse } from '@/api'
+
+import { UserRound } from '@lucide/vue'
+
+import { computed, shallowRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+import { accountProfileAvatarUrl } from '@/api'
+import AccountPlanBadge from '@/components/account/AccountPlanBadge.vue'
+import { stablePresetVisualToneClass } from '@/utils/color'
+
+const props = defineProps<{
+  account: Account
+  profile: AccountProfileStatisticsResponse | null
+}>()
+
+const { t } = useI18n({ useScope: 'global' })
+
+const imageFailed = shallowRef(false)
+const displayName = computed(
+  () => props.profile?.displayName || props.profile?.username || props.account.email || props.account.name || t('accounts.profile.accountUser'),
+)
+const username = computed(() => (props.profile?.username
+  ? `@${props.profile?.username.replace(/^@/, '')}`
+  : null))
+const accountIdentity = computed(() => props.account.email?.trim() || props.account.accountId?.trim())
+const initial = computed(() => Array.from(displayName.value.trim())[0]?.toUpperCase() || null)
+const avatarToneClass = computed(() =>
+  stablePresetVisualToneClass(props.account.id || accountIdentity.value || displayName.value),
+)
+const avatarUrl = computed(() => {
+  const sourceUrl = props.profile?.imageUrl?.trim()
+  return props.account.capabilities.avatar && sourceUrl
+    ? accountProfileAvatarUrl(props.account.id, sourceUrl)
+    : null
+})
+watch(
+  avatarUrl,
+  () => {
+    imageFailed.value = false
+  },
+)
+</script>
+
+<template>
+  <section
+    class="flex min-w-0 items-center"
+    aria-labelledby="profile-display-name"
+  >
+    <div class="flex min-w-0 items-center gap-3.5">
+      <span
+        class="grid size-14 shrink-0 place-items-center overflow-hidden rounded-full text-xl font-heavy"
+        :class="avatarToneClass"
+      >
+        <img
+          v-if="avatarUrl && !imageFailed"
+          :src="avatarUrl"
+          :alt="t('accounts.profile.avatarFor', { displayName })"
+          class="size-full object-cover"
+          referrerpolicy="no-referrer"
+          @error="imageFailed = true"
+        >
+        <span v-else-if="initial">{{ initial }}</span>
+        <UserRound v-else class="size-6" />
+      </span>
+
+      <div class="min-w-0 flex-1">
+        <div class="flex min-w-0 items-center gap-2">
+          <h3 id="profile-display-name" class="m-0 min-w-0 truncate text-z-lg leading-tight font-heavy text-z-text">
+            {{ displayName }}
+          </h3>
+          <AccountPlanBadge :upstream="account.upstream" :authentication-kind="account.authenticationKind" :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
+        </div>
+        <div
+          v-if="username || accountIdentity"
+          class="mt-1.5 grid min-w-0 gap-0.5 text-z-xs font-semibold text-z-text-secondary"
+        >
+          <span v-if="username" class="truncate">{{ username }}</span>
+          <span v-if="accountIdentity" class="truncate" :title="accountIdentity">{{ accountIdentity }}</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</template>

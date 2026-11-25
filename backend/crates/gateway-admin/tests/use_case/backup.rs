@@ -1,0 +1,158 @@
+//! BackupService 用例测试：通过 AdminHarness 注入 fake 备份端口构造真实服务
+
+use std::sync::Arc;
+
+use gateway_admin::model::backup::BackupStatus;
+use gateway_admin::ports::backup::BackupStorePorts;
+
+use crate::backup::support::{
+    FakeAuthStore, FakeBackupRepository, FakeDumpPort, FakeObjectStore, configured_settings,
+    system_context,
+};
+
+use super::AdminHarness;
+
+#[tokio::test]
+async fn backup_service_creates_downloads_and_deletes_with_audit() {
+    let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+    let dump = Arc::new(FakeDumpPort::new());
+    let object_store = Arc::new(FakeObjectStore::new());
+    let auth = Arc::new(FakeAuthStore::new());
+
+    let services = AdminHarness::new()
+        .auth(auth.clone())
+        .backup(BackupStorePorts::new(
+            repository.clone(),
+            dump,
+            object_store,
+        ))
+        .build()
+        .await;
+
+    // 创建手动备份 → queued + 审计
+    let created = services
+        .backups()
+        .create_backup(&system_context(), None)
+        .await
+        .expect("create backup");
+    assert_eq!(created.status, BackupStatus::Queued);
+    assert!(created.object_key.starts_with("codex/"));
+    assert!(
+        repository
+            .audit_events()
+            .iter()
+            .any(|event| event.action == "backup.created"
+                && event.entity_ref == created.id
+                && event.request_id.as_deref() == Some(system_context().request_id.as_str()))
+    );
+
+    // 下载地址要求 completed 记录
+    repository.force_status(&created.id, BackupStatus::Completed);
+    let download = services
+        .backups()
+        .download_url(&system_context(), &created.id)
+        .await
+        .expect("download url");
+    assert!(download.url.starts_with("https://presigned.example.com/"));
+    assert!(
+        auth.audit_actions()
+            .iter()
+            .any(|action| action == "backup.download_url_created")
+    );
+
+    // 删除 → deleting + 审计
+    let deleting = services
+        .backups()
+        .delete_backup(&system_context(), &created.id)
+        .await
+        .expect("delete backup");
+    assert_eq!(deleting.status, BackupStatus::Deleting);
+    assert!(
+        repository
+            .audit_events()
+            .iter()
+            .any(|event| event.action == "backup.delete_requested"
+                && event.entity_ref == created.id
+                && event.changed_fields == ["status"])
+    );
+}
+
+#[tokio::test]
+async fn backup_service_rejects_download_of_non_completed_record() {
+    let repository = Arc::new(FakeBackupRepository::new(configured_settings()));
+    let dump = Arc::new(FakeDumpPort::new());
+    let object_store = Arc::new(FakeObjectStore::new());
+    let auth = Arc::new(FakeAuthStore::new());
+
+    let services = AdminHarness::new()
+        .auth(auth.clone())
+        .backup(BackupStorePorts::new(
+            repository.clone(),
+            dump,
+            object_store,
+        ))
+        .build()
+        .await;
+
+    let created = services
+        .backups()
+        .create_backup(&system_context(), None)
+        .await
+        .expect("create backup");
+
+    // queued 记录不能创建下载地址
+    let error = services
+        .backups()
+        .download_url(&system_context(), &created.id)
+        .await
+        .expect_err("non-completed record must be rejected");
+    assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Conflict);
+}
+
+#[tokio::test]
+async fn failed_delete_probe_does_not_refresh_verification() {
+    use gateway_admin::{model::backup::code, ports::backup::BackupRepository as _};
+    for succeeds in [false, true] {
+        let mut settings = configured_settings();
+        settings.last_verified_at = None;
+        let repository = Arc::new(FakeBackupRepository::new(settings));
+        let auth = Arc::new(FakeAuthStore::new());
+        let store = FakeObjectStore::new();
+        let store = if succeeds {
+            store
+        } else {
+            store.fail_connection(code::S3_PERMISSION_DENIED)
+        };
+        let services = AdminHarness::new()
+            .auth(auth.clone())
+            .backup(BackupStorePorts::new(
+                repository.clone(),
+                Arc::new(FakeDumpPort::new()),
+                Arc::new(store),
+            ))
+            .build()
+            .await;
+        let result = services
+            .backups()
+            .test_connection(&system_context())
+            .await
+            .unwrap();
+        assert_eq!(result.ok, succeeds);
+        assert_eq!(
+            repository
+                .load_settings()
+                .await
+                .unwrap()
+                .last_verified_at
+                .is_some(),
+            succeeds
+        );
+        assert_eq!(
+            auth.audit_actions()
+                .iter()
+                .filter(|action| action.as_str() == "backup.s3_connection_tested")
+                .count(),
+            1
+        );
+    }
+}
