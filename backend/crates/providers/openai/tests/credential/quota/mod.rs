@@ -7,6 +7,7 @@ mod recovery;
 mod refresh_timing;
 mod reset_credits;
 mod reset_recovery;
+mod revoked;
 mod scheduling;
 mod slots;
 mod snapshot;
