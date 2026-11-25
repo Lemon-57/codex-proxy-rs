@@ -415,16 +415,34 @@ async fn disabling_an_account_prevents_periodic_quota_queries_at_reset() {
     let account = store.account(account_id).unwrap();
     let server = MockServer::start().await;
     let service = quota_service_with_base_url(&store, reqwest::Client::new(), server.uri());
-    let reset = now.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64 - 114;
-    mount_usage(&server, json!({"rate_limit": {"allowed": true, "primary_window": {
-        "used_percent": 100, "reset_at": reset, "limit_window_seconds": 18_000,
-    }}})).await;
-    service.refresh_account(account.id()).await.expect("seed quota snapshot");
+    let reset = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 114;
+    mount_usage(
+        &server,
+        json!({"rate_limit": {"allowed": true, "primary_window": {
+            "used_percent": 100, "reset_at": reset, "limit_window_seconds": 18_000,
+        }}}),
+    )
+    .await;
+    service
+        .refresh_account(account.id())
+        .await
+        .expect("seed quota snapshot");
     store.set_enabled(account.id(), false).await.unwrap();
-    mount_usage(&server, json!({"rate_limit": {"allowed": true, "primary_window": {
-        "used_percent": 0, "reset_at": reset + 18_000, "limit_window_seconds": 18_000,
-    }}})).await;
-    let summary = service.synchronize_at(reset_grace(reset)).await.expect("quota cycle");
+    mount_usage(
+        &server,
+        json!({"rate_limit": {"allowed": true, "primary_window": {
+            "used_percent": 0, "reset_at": reset + 18_000, "limit_window_seconds": 18_000,
+        }}}),
+    )
+    .await;
+    let summary = service
+        .synchronize_at(reset_grace(reset))
+        .await
+        .expect("quota cycle");
     assert_eq!(summary.updated, 0);
     assert!(server.received_requests().await.unwrap().is_empty());
 }

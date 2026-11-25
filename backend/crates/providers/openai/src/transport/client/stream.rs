@@ -9,7 +9,8 @@ use std::{
 
 use futures::{StreamExt, TryStreamExt};
 use gateway_protocol::openai::{
-    CodexGuardianRole, X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER, X_OPENAI_MEMGEN_REQUEST_HEADER,
+    CodexGuardianRole, X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER,
+    X_OPENAI_MEMGEN_REQUEST_HEADER,
     events::{self, retry_after_seconds_from_body},
     sse::{SseEventDecoder, SseFrame},
 };

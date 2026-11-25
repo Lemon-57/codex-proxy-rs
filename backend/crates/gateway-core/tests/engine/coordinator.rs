@@ -7139,7 +7139,8 @@ fn websocket_opening_403_does_not_rotate_a_required_or_continuation_account() {
             CancellationToken::new(),
         ))
         .expect("start execution");
-        let error = block_on(session.collect_uncommitted()).expect_err("bound account must not rotate");
+        let error =
+            block_on(session.collect_uncommitted()).expect_err("bound account must not rotate");
         let gateway_core::engine::EngineError::Provider(error) = error else {
             panic!("expected original provider error");
         };
@@ -7148,9 +7149,12 @@ fn websocket_opening_403_does_not_rotate_a_required_or_continuation_account() {
         let contexts = provider.contexts.lock().unwrap();
         assert_eq!(contexts.len(), 1);
         if native {
-            assert!(contexts[0].account_state_owner().unwrap().matches(
-                &ProviderKind::new("openai").unwrap(), &account,
-            ));
+            assert!(
+                contexts[0]
+                    .account_state_owner()
+                    .unwrap()
+                    .matches(&ProviderKind::new("openai").unwrap(), &account,)
+            );
         } else {
             assert_eq!(contexts[0].required_account(), Some(&account));
         }

@@ -9330,7 +9330,9 @@ async fn explicit_spend_limits_stop_retry_and_mark_quota_exhausted() {
             } else {
                 ResponsesTransport::Http
             };
-            store.seed_api_key(account_id, server.uri(), transport).await;
+            store
+                .seed_api_key(account_id, server.uri(), transport)
+                .await;
             Mock::given(method(if use_websocket { "GET" } else { "POST" }))
                 .and(path("/responses"))
                 .respond_with(ResponseTemplate::new(429).set_body_json(json!({
@@ -9340,12 +9342,20 @@ async fn explicit_spend_limits_stop_retry_and_mark_quota_exhausted() {
                 .mount(&server)
                 .await;
             let cooldowns = Arc::new(MemoryCooldownPort::new());
-            let (provider, _) = provider_with_cooldowns(&store, server.uri(), Arc::clone(&cooldowns));
-            let operation = if use_websocket { generate_operation() } else { http_generate_operation() };
-            let mut stream = provider.execute(
-                planned_request("openai", operation),
-                context("req_spend_limit", CancellationToken::new()),
-            ).await.unwrap();
+            let (provider, _) =
+                provider_with_cooldowns(&store, server.uri(), Arc::clone(&cooldowns));
+            let operation = if use_websocket {
+                generate_operation()
+            } else {
+                http_generate_operation()
+            };
+            let mut stream = provider
+                .execute(
+                    planned_request("openai", operation),
+                    context("req_spend_limit", CancellationToken::new()),
+                )
+                .await
+                .unwrap();
             let error = loop {
                 match stream.next().await {
                     Some(Ok(_)) => {}
@@ -9354,7 +9364,10 @@ async fn explicit_spend_limits_stop_retry_and_mark_quota_exhausted() {
                 }
             };
             assert_eq!(error.kind(), ProviderErrorKind::QuotaExhausted);
-            assert_eq!(error.upstream_code().map(|value| value.as_str()), Some(code));
+            assert_eq!(
+                error.upstream_code().map(|value| value.as_str()),
+                Some(code)
+            );
             assert!(error.retry_is_prohibited());
             assert!(!error.replay_is_safe());
             let account = store.account(account_id).unwrap();
@@ -9387,11 +9400,18 @@ async fn only_unattributed_websocket_403_can_rotate_without_account_penalty() {
             .await;
         let cooldowns = Arc::new(MemoryCooldownPort::new());
         let (provider, _) = provider_with_cooldowns(&store, server.uri(), Arc::clone(&cooldowns));
-        let operation = if websocket { generate_operation() } else { http_generate_operation() };
-        let mut stream = provider.execute(
-            planned_request("openai", operation),
-            context("req_upgrade_forbidden", CancellationToken::new()),
-        ).await.unwrap();
+        let operation = if websocket {
+            generate_operation()
+        } else {
+            http_generate_operation()
+        };
+        let mut stream = provider
+            .execute(
+                planned_request("openai", operation),
+                context("req_upgrade_forbidden", CancellationToken::new()),
+            )
+            .await
+            .unwrap();
         let error = loop {
             match stream.next().await {
                 Some(Ok(_)) => {}
@@ -9399,13 +9419,26 @@ async fn only_unattributed_websocket_403_can_rotate_without_account_penalty() {
                 None => panic!("expected 403 rejection"),
             }
         };
-        assert_eq!(error.upstream_status(), Some(403), "websocket={websocket}, body={body:?}: {error:?}");
-        assert_eq!(matches!(error.pre_delivery_retry(), Some(PreDeliveryRetry::AccountRotation)), rotate, "websocket={websocket}, body={body:?}");
+        assert_eq!(
+            error.upstream_status(),
+            Some(403),
+            "websocket={websocket}, body={body:?}: {error:?}"
+        );
+        assert_eq!(
+            matches!(
+                error.pre_delivery_retry(),
+                Some(PreDeliveryRetry::AccountRotation)
+            ),
+            rotate,
+            "websocket={websocket}, body={body:?}"
+        );
         if rotate {
             assert!(!error.retry_is_prohibited());
             assert!(error.same_account_retry_blocked());
             assert!(!error.requests_session_binding_recovery());
-            assert!(!provider_openai::openai_failure_affects_account_score(&error));
+            assert!(!provider_openai::openai_failure_affects_account_score(
+                &error
+            ));
             let account = store.account(account_id).unwrap();
             assert!(account.enabled());
             assert_eq!(account.quota().access(), QuotaAccessState::Unknown);

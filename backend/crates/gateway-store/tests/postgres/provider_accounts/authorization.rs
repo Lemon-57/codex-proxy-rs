@@ -288,7 +288,12 @@ async fn same_identity_oauth_reauthorization_clears_snapshot_but_keeps_exhaustio
     };
     let store = admin_account_store(&database.pool);
     let (seed, context) = command(credential("acct_quota_reauth", "same-user"));
-    let id = store.commit_authorization(seed, &context).await.unwrap().result.account_id;
+    let id = store
+        .commit_authorization(seed, &context)
+        .await
+        .unwrap()
+        .result
+        .account_id;
     let evidence: (chrono::DateTime<Utc>, chrono::DateTime<Utc>) = sqlx::query_as(
         "update provider_accounts set enabled = false,
          provider_quota_json = '{}'::jsonb, quota_observed_at = now(),
@@ -306,10 +311,13 @@ async fn same_identity_oauth_reauthorization_clears_snapshot_but_keeps_exhaustio
             ProviderKind::new("openai").unwrap(),
             "same-identity-reauthorize-flow",
             &context,
-        ).unwrap(),
+        )
+        .unwrap(),
         pending: PendingAuthorizationMutation::new(
             ProviderKind::new("openai").unwrap(),
-            AuthorizationMutationTarget::Reauthorize { account_id: id.clone() },
+            AuthorizationMutationTarget::Reauthorize {
+                account_id: id.clone(),
+            },
             AuthorizationOwnerBinding::from_context(&context),
         ),
         settings: None,
@@ -327,7 +335,10 @@ async fn same_identity_oauth_reauthorization_clears_snapshot_but_keeps_exhaustio
                 preserve_access_token_expiry: false,
                 native_refresh_plan: None,
                 provider_material: ProviderDocument::new(OpaqueProviderData::new(
-                    json!({"access_token":"reauthorized-test-only"}).as_object().unwrap().clone(),
+                    json!({"access_token":"reauthorized-test-only"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
                 )),
                 has_refresh_token: false,
                 access_token_expires_at: None,
@@ -335,9 +346,20 @@ async fn same_identity_oauth_reauthorization_clears_snapshot_but_keeps_exhaustio
             },
         )),
     };
-    assert!(store.commit_authorization(reauthorize, &context).await.unwrap().newly_committed);
+    assert!(
+        store
+            .commit_authorization(reauthorize, &context)
+            .await
+            .unwrap()
+            .newly_committed
+    );
     let (enabled, snapshot_cleared, state, reason, observed, reset): (
-        bool, bool, String, String, chrono::DateTime<Utc>, chrono::DateTime<Utc>,
+        bool,
+        bool,
+        String,
+        String,
+        chrono::DateTime<Utc>,
+        chrono::DateTime<Utc>,
     ) = sqlx::query_as(
         "select enabled, provider_quota_json is null and quota_observed_at is null,
          quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at

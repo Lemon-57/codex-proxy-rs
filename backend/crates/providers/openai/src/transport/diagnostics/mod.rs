@@ -469,14 +469,16 @@ fn classify_upstream_failure(
         return CodexFailureCategory::TurnRateLimited;
     }
     if matches!(status, None | Some(StatusCode::TOO_MANY_REQUESTS))
-        && [code.as_str(), error_type.as_str()].into_iter().any(|value| {
-            matches!(
-                value,
-                "api_key_spend_limit_exceeded"
-                    | "project_spend_limit_exceeded"
-                    | "organization_spend_limit_exceeded"
-            )
-        })
+        && [code.as_str(), error_type.as_str()]
+            .into_iter()
+            .any(|value| {
+                matches!(
+                    value,
+                    "api_key_spend_limit_exceeded"
+                        | "project_spend_limit_exceeded"
+                        | "organization_spend_limit_exceeded"
+                )
+            })
     {
         return CodexFailureCategory::SpendLimitExceeded;
     }

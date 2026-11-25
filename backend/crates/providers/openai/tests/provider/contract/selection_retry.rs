@@ -63,7 +63,13 @@ async fn websocket_pool_opening_403_shares_the_turn_rate_limit_rotation_budget()
     use gateway_core::account::AccountAffinity;
     for exhaust in [false, true] {
         let store = Arc::new(MemoryAccountStore::default());
-        for account in ["acct_provider_contract", "acct_subagent_a", "acct_subagent_b", "acct_affinity", "acct_local_affinity"] {
+        for account in [
+            "acct_provider_contract",
+            "acct_subagent_a",
+            "acct_subagent_b",
+            "acct_affinity",
+            "acct_local_affinity",
+        ] {
             create_account(&store, account).await;
         }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -74,7 +80,10 @@ async fn websocket_pool_opening_403_shares_the_turn_rate_limit_rotation_budget()
                 let (stream, _) = listener.accept().await.unwrap();
                 if index == 0 || (!exhaust && index == 2) {
                     let mut socket = accept_codex_test_websocket(stream).await;
-                    assert!(matches!(socket.next().await.unwrap().unwrap(), Message::Text(_)));
+                    assert!(matches!(
+                        socket.next().await.unwrap().unwrap(),
+                        Message::Text(_)
+                    ));
                     if index == 0 {
                         socket.send(Message::Text(json!({
                             "type":"error", "status":429,
@@ -82,8 +91,13 @@ async fn websocket_pool_opening_403_shares_the_turn_rate_limit_rotation_budget()
                         }).to_string().into())).await.unwrap();
                     } else {
                         for line in CAPTURE_COMPLETED_SSE.lines() {
-                            if let Some(data) = line.strip_prefix("data: ") && data != "[DONE]" {
-                                socket.send(Message::Text(data.to_owned().into())).await.unwrap();
+                            if let Some(data) = line.strip_prefix("data: ")
+                                && data != "[DONE]"
+                            {
+                                socket
+                                    .send(Message::Text(data.to_owned().into()))
+                                    .await
+                                    .unwrap();
                             }
                         }
                     }
@@ -104,34 +118,58 @@ async fn websocket_pool_opening_403_shares_the_turn_rate_limit_rotation_budget()
         });
         let leases = Arc::new(TestLeaseCoordinator::default());
         let provider = provider_with_affinity_and_base_url_and_leases(
-            &store, Arc::new(MemorySessionAffinity::default()), base, Arc::clone(&leases),
+            &store,
+            Arc::new(MemorySessionAffinity::default()),
+            base,
+            Arc::clone(&leases),
         );
-        let providers = ProviderRegistry::new([provider as Arc<dyn gateway_core::engine::provider::Provider>]).unwrap();
-        let coordinator = AttemptCoordinator::new(GatewayEngine::new(Arc::new(NoopExecutionStore), providers));
-        let Operation::Generate(generate) = turn_request("mixed-websocket-session", "mixed-websocket-turn") else {
+        let providers =
+            ProviderRegistry::new([provider as Arc<dyn gateway_core::engine::provider::Provider>])
+                .unwrap();
+        let coordinator =
+            AttemptCoordinator::new(GatewayEngine::new(Arc::new(NoopExecutionStore), providers));
+        let Operation::Generate(generate) =
+            turn_request("mixed-websocket-session", "mixed-websocket-turn")
+        else {
             unreachable!()
         };
         let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
-            generate.protocol_payload().clone().with_context(Map::from_iter([
-                ("use_websocket".into(), json!(true)),
-            ])),
+            generate
+                .protocol_payload()
+                .clone()
+                .with_context(Map::from_iter([("use_websocket".into(), json!(true))])),
         ));
         let settings = SettingsValues::new(3, "smart", Default::default(), None, None)
             .with_account_affinity(AccountAffinity::Preferred)
             .with_max_retry_after_seconds(120)
             .with_max_account_rotations(3);
-        let mut session = coordinator.start(
-            execution_request("req_mixed_websocket_rotation", &operation, Duration::from_secs(5)),
-            operation.clone(), execution_plan_with_settings(&operation, settings),
-            None, None, CancellationToken::new(),
-        ).await.unwrap();
-        let result = timeout(Duration::from_secs(5), session.collect_uncommitted()).await.unwrap();
+        let mut session = coordinator
+            .start(
+                execution_request(
+                    "req_mixed_websocket_rotation",
+                    &operation,
+                    Duration::from_secs(5),
+                ),
+                operation.clone(),
+                execution_plan_with_settings(&operation, settings),
+                None,
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let result = timeout(Duration::from_secs(5), session.collect_uncommitted())
+            .await
+            .unwrap();
         if exhaust {
             let EngineError::Provider(error) = result.unwrap_err() else {
                 panic!("expected provider rejection");
             };
             assert_eq!(error.send_state(), UpstreamSendState::NotSent);
-            assert_eq!(error.diagnostic().and_then(|diagnostic| diagnostic.code()), Some("websocket_upgrade_403"));
+            assert_eq!(
+                error.diagnostic().and_then(|diagnostic| diagnostic.code()),
+                Some("websocket_upgrade_403")
+            );
             let response = error.client_visible_upstream_response().unwrap();
             assert_eq!(response.status(), 403);
             assert!(response.body().is_empty());
@@ -139,10 +177,20 @@ async fn websocket_pool_opening_403_shares_the_turn_rate_limit_rotation_budget()
             assert!(result.is_ok(), "{result:?}");
             session.commit_downstream(Some(200)).await.unwrap();
         }
-        timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
         let requests = leases.requests.lock().unwrap();
         assert_eq!(requests.len(), expected_attempts);
-        assert_eq!(requests.iter().map(|request| request.account_id()).collect::<BTreeSet<_>>().len(), expected_attempts);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.account_id())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            expected_attempts
+        );
     }
 }
 
