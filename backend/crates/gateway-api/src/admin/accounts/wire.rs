@@ -408,6 +408,10 @@ pub struct AccountCapacityView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountCapabilitiesView {
+    pub credential_refresh: bool,
+    pub reauthorize: bool,
+    pub credential_export: bool,
+    pub model_catalog_download: bool,
     pub quota_settings_supported: bool,
     pub quota_credits: bool,
     pub quota: bool,
@@ -422,6 +426,10 @@ pub struct AccountCapabilitiesView {
 impl From<gateway_admin::model::accounts::ProviderAccountCapabilities> for AccountCapabilitiesView {
     fn from(value: gateway_admin::model::accounts::ProviderAccountCapabilities) -> Self {
         Self {
+            credential_refresh: value.credential_refresh,
+            reauthorize: value.reauthorize,
+            credential_export: value.credential_export,
+            model_catalog_download: value.model_catalog_download,
             quota: value.quota,
             quota_refresh: value.quota_refresh,
             profile: value.profile,
@@ -536,6 +544,7 @@ pub struct AccountQuotaWindowView {
 pub enum AccountUsageWindowKind {
     General,
     Daily,
+    RecentWeek,
     Weekly,
     Monthly,
     Quota,

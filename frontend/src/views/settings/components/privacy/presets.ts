@@ -1,4 +1,4 @@
-import type { PrivacyAction, PrivacyRule, PrivacySample, PrivacyScope, PrivacyStep } from '@/api/modules/settings/privacy'
+import type { PrivacyAction, PrivacyRule, PrivacySample, PrivacyScope, PrivacyStep } from '@/api'
 import { cloneDeep } from 'es-toolkit'
 import { computed } from 'vue'
 import { t } from '@/i18n'
@@ -27,6 +27,10 @@ export const scopes = computed<{ value: PrivacyScope, label: string }[]>(() => (
 ]))
 export const actions = computed<{ value: PrivacyAction, label: string }[]>(() => ([
   {
+    value: 'anonymize_project',
+    label: t('settings.privacy.presets.anonymizeProject'),
+  },
+  {
     value: 'regex_replace',
     label: t('settings.privacy.presets.regularReplacement'),
   },
@@ -48,6 +52,10 @@ export const fieldsByScope = computed<Partial<Record<PrivacyScope, { value: stri
     {
       value: '',
       label: t('settings.privacy.presets.customFieldPath'),
+    },
+    {
+      value: '$.workspaces.*.associated_remote_urls',
+      label: t('settings.privacy.presets.gitRemoteCollection'),
     },
     {
       value: '$.workspaces.*.associated_remote_urls.*',
@@ -111,7 +119,41 @@ export function newRule(): PrivacyRule {
   }
 }
 
+// 化名从原始路径派生，用户名替换不能改变其身份输入
+const workspaceSteps: Partial<PrivacyStep>[] = [
+  {
+    scope: 'turn_metadata',
+    selector: '$.workspaces',
+    action: 'anonymize_project',
+    pattern: null,
+  },
+  {
+    scope: 'turn_metadata',
+    selector: '$.workspaces',
+    action: 'rename_key',
+    pattern: String.raw`(?i)^((?:[a-z]:)?[/\\](?:home|users)[/\\])[^/\\]+([/\\])`,
+    replacement: `\${1}user\${2}`,
+  },
+  {
+    scope: 'turn_metadata',
+    selector: '$.workspaces.*.associated_remote_urls',
+    action: 'remove_field',
+    pattern: null,
+  },
+  {
+    scope: 'turn_metadata',
+    selector: '$.workspaces.*.latest_git_commit_hash',
+    action: 'remove_field',
+    pattern: null,
+  },
+]
+
 export const presets = computed<{ key: string, name: string, steps: Partial<PrivacyStep>[] }[]>(() => ([
+  {
+    key: 'session-workspace',
+    name: t('settings.privacy.presets.anonymizeWorkspace'),
+    steps: workspaceSteps,
+  },
   {
     key: 'workspace',
     name: t('settings.privacy.presets.unifyWorkspaceInformation'),
@@ -209,6 +251,7 @@ export function exampleRequest(): PrivacySample {
       },
     },
     headers: {
+      'session-id': ['example-session'],
       'x-codex-turn-metadata': [
         JSON.stringify(metadata),
       ],

@@ -830,12 +830,46 @@ impl ProviderQuotaWindow {
     }
 }
 
-/// 账号用量统计周期，完整周/月额度优先，随后使用 Provider 提供的本地滚动日统计
+/// 账号用量统计周期，区分上游额度周期与独立的本地统计范围
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AccountUsagePeriod {
     Weekly,
     Monthly,
     Daily,
+    RecentWeek,
+}
+
+/// 缺少可归属整号的额度窗口时，Provider 选择的本地用量范围
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AccountUsageLookback {
+    #[default]
+    RollingDay,
+    RecentWeek,
+}
+
+impl AccountUsageLookback {
+    pub(crate) fn range(
+        self,
+        now: DateTime<Utc>,
+        timezone: gateway_core::time::DeploymentTimeZone,
+    ) -> Result<super::observability::TimeRange, super::AdminModelError> {
+        use super::observability::{CalendarPeriod, TimeRange};
+
+        match self {
+            Self::RollingDay => Ok(TimeRange {
+                start: now - chrono::Duration::hours(24),
+                end: now,
+            }),
+            Self::RecentWeek => TimeRange::calendar_at(CalendarPeriod::SevenDays, now, timezone),
+        }
+    }
+
+    pub(crate) fn period(self) -> AccountUsagePeriod {
+        match self {
+            Self::RollingDay => AccountUsagePeriod::Daily,
+            Self::RecentWeek => AccountUsagePeriod::RecentWeek,
+        }
+    }
 }
 
 /// Provider 解释 quota 所需的公共请求事实
@@ -1092,9 +1126,6 @@ impl ProviderQuota {
     /// 语义，绝不读取 Provider 私有 JSON
     #[must_use]
     pub fn representative_used_percent(&self) -> Option<f64> {
-        if self.limit_reached {
-            return Some(100.0);
-        }
         self.representative_used_window()
             .map(|(_, used_percent)| used_percent)
     }
@@ -1113,39 +1144,16 @@ impl ProviderQuota {
             })
     }
 
-    /// 将已确认的账号级额度耗尽事实投影到展示窗口
-    ///
-    /// Provider 已指出具体触顶窗口时只归一化这些窗口；否则归一化 Dashboard
-    /// 同样会选择的代表窗口，避免把多个独立额度窗口全部伪造成已用尽
+    /// 只对 Provider 已明确触顶的窗口展示满额，账号耗尽本身不能定位窗口
     pub fn apply_limit_reached_display(&mut self) {
-        if !self.limit_reached {
-            return;
-        }
-        let reached_windows = self
-            .windows
-            .iter()
-            .enumerate()
-            .filter_map(|(index, window)| window.limit_reached.then_some(index))
-            .collect::<Vec<_>>();
-        if !reached_windows.is_empty() {
-            for index in reached_windows {
-                self.windows[index].used_percent = Some(100.0);
+        if self.limit_reached {
+            for window in self
+                .windows
+                .iter_mut()
+                .filter(|window| window.limit_reached)
+            {
+                window.used_percent = Some(100.0);
             }
-            return;
-        }
-        let representative = self
-            .representative_used_window()
-            .map(|(index, _)| index)
-            .or_else(|| {
-                self.windows
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(index, window)| (quota_usage_priority(window), *index))
-                    .map(|(index, _)| index)
-            });
-        if let Some(index) = representative {
-            self.windows[index].used_percent = Some(100.0);
-            self.windows[index].limit_reached = true;
         }
     }
 
@@ -1308,6 +1316,8 @@ pub struct AccountDirectoryItem {
     pub plan_type_display: Option<String>,
     pub projection: gateway_core::account::AccountStatusProjection,
     pub usage: Option<super::accounts::AccountUsage>,
+    /// Admin 选择的本地统计周期，不要求存在对应的上游额度窗口
+    pub usage_period: Option<AccountUsagePeriod>,
     pub quota: ProviderQuota,
 }
 

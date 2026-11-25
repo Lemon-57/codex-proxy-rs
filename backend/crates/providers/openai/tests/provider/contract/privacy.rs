@@ -1,7 +1,7 @@
 //! 隐私规则在真实 HTTP、WebSocket 和发送前拒绝边界的合同
 
 use super::*;
-use crate::transport::privacy::{policy, rule};
+use crate::transport::privacy::{policy, rule, workspace_rule};
 use gateway_core::settings::privacy::{CodexPrivacyPolicy, PrivacyAction, PrivacyScope};
 
 fn privacy_context(policy: &CodexPrivacyPolicy, fallback: bool) -> AttemptContext {
@@ -66,6 +66,193 @@ fn metadata_operation() -> Operation {
     Operation::Generate(GenerateRequest::from_protocol_payload(
         ProtocolPayload::json_object("openai", body.as_object().unwrap().clone()).unwrap(),
     ))
+}
+
+fn workspace_operation(session: &str, owner: &str) -> Operation {
+    let metadata = json!({"session_id":session,"turn_state":"source-turn-state","baggage":"source-baggage","workspaces":{
+        "/Users/alex/projects/private":{"associated_remote_urls":{"origin":"https://example.invalid/private"},"latest_git_commit_hash":"abc","has_changes":true}
+    }});
+    let body = json!({"model":"gpt-5.4","input":"read /Users/alex/projects/private/note.txt",
+        "client_metadata":{"x-codex-turn-metadata":metadata.to_string()}});
+    let payload = ProtocolPayload::json_object("openai", body.as_object().unwrap().clone())
+        .unwrap()
+        .with_context(
+            json!({"session_id":session,"turn_metadata":metadata.to_string()})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+    let state = ProviderSessionState::new(
+        "openai",
+        json!({"account_id":owner, "conversation_id":session, "continuation_scope":"persisted"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    Operation::Generate(
+        GenerateRequest::from_protocol_payload(payload).with_provider_session_state(state),
+    )
+}
+
+fn workspace_policy() -> CodexPrivacyPolicy {
+    policy(vec![workspace_rule("user")])
+}
+
+fn assert_workspace_alias(header: &str, body: &Value) -> String {
+    let header: Value = serde_json::from_str(header).unwrap();
+    let client: Value = serde_json::from_str(
+        body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(header["workspaces"], client["workspaces"]);
+    let workspaces = header["workspaces"].as_object().unwrap();
+    assert_eq!(workspaces.len(), 1);
+    let (path, metadata) = workspaces.iter().next().unwrap();
+    assert!(path.starts_with("/Users/user/projects/"));
+    assert!(!path.contains("private"));
+    assert_eq!(*metadata, json!({"has_changes":true}));
+    assert_eq!(
+        body["input"][0]["content"][0]["text"],
+        "read /Users/alex/projects/private/note.txt"
+    );
+    path.clone()
+}
+
+#[tokio::test]
+async fn privacy_workspace_rotation_and_account_isolation_share_the_selected_account() {
+    let stores = [
+        Arc::new(MemoryAccountStore::default()),
+        Arc::new(MemoryAccountStore::default()),
+    ];
+    let accounts = ["acct_provider_contract", "acct_scope_new"];
+    for (store, account) in stores.iter().zip(accounts) {
+        create_account(store, account).await;
+    }
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .mount(&server)
+        .await;
+    let providers = stores.map(|store| provider_with_base_url(&store, server.uri()));
+    for (account, session, owner) in [
+        (0, "workspace-session-a", 0),
+        (0, "workspace-session-a", 0),
+        (1, "workspace-session-a", 0),
+        (1, "workspace-session-a", 1),
+        (1, "workspace-session-b", 1),
+        (0, "workspace-session-a", 1),
+    ] {
+        let mut stream = providers[account]
+            .clone()
+            .execute(
+                planned_request("openai", workspace_operation(session, accounts[owner])),
+                privacy_context(&workspace_policy(), true),
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    }
+    let requests = server.received_requests().await.unwrap();
+    let aliases = requests
+        .iter()
+        .map(|request| {
+            assert_workspace_alias(
+                request.headers["x-codex-turn-metadata"].to_str().unwrap(),
+                &captured_request_body(request),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(aliases.len(), 6);
+    assert_eq!(aliases[0], aliases[1]);
+    assert_ne!(aliases[0], aliases[2]);
+    assert_eq!(aliases[2], aliases[3]);
+    assert_ne!(aliases[3], aliases[4]);
+    assert_eq!(aliases[0], aliases[5]);
+    for (index, request) in requests.iter().enumerate() {
+        let metadata: Value =
+            serde_json::from_str(request.headers["x-codex-turn-metadata"].to_str().unwrap())
+                .unwrap();
+        let switched = matches!(index, 2 | 5);
+        for field in ["turn_state", "baggage"] {
+            assert_eq!(metadata.get(field).is_none(), switched);
+        }
+    }
+}
+
+#[tokio::test]
+async fn privacy_workspace_alias_matches_websocket_opening_and_reused_frames() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut metadata = String::new();
+        let mut socket =
+            crate::transport::accept_codex_test_websocket_with(stream, |request, response| {
+                metadata = request.headers()["x-codex-turn-metadata"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                response.headers_mut().insert(
+                    "sec-websocket-extensions",
+                    "permessage-deflate".parse().unwrap(),
+                );
+            })
+            .await;
+        let mut aliases = Vec::new();
+        for n in 0..2 {
+            let frame = timeout(Duration::from_secs(10), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap();
+            let body: Value = serde_json::from_str(&frame).unwrap();
+            aliases.push(assert_workspace_alias(&metadata, &body));
+            let completed = json!({"type":"response.completed","response":{
+                "id":format!("resp_workspace_{n}"),"model":"gpt-5.4","status":"completed","output":[]
+            }});
+            socket
+                .send(Message::Text(completed.to_string().into()))
+                .await
+                .unwrap();
+        }
+        assert_eq!(aliases[0], aliases[1]);
+    });
+    let provider = provider_with_base_url(&store, format!("http://{address}"));
+    for _ in 0..2 {
+        let mut stream = provider
+            .clone()
+            .execute(
+                planned_request(
+                    "openai",
+                    workspace_operation("workspace-session", "acct_provider_contract"),
+                ),
+                privacy_context(&workspace_policy(), false),
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(15), async {
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+    captured.await.unwrap();
 }
 
 fn assert_metadata_filtered(raw: &str, client_copy: bool) {

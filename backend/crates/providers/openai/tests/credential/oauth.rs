@@ -25,7 +25,7 @@ use provider_openai::credential::{
     CompletedCodexOAuthCredential, ImportCodexOAuthCredential, StartCodexOAuthAuthorization,
     StoredCodexPendingAuthorization,
 };
-use provider_openai::transport::profile::CodexWireProfileState;
+use provider_openai::profile::CodexWireProfileState;
 use secrecy::SecretString;
 use url::Url;
 use uuid::Uuid;
@@ -299,6 +299,7 @@ async fn complete_with_name(
         Arc::new(MemoryAccountStore::default()),
         CodexCredentialAdmin,
         profile(),
+        crate::support::runtime_policy(),
     );
     let started = service
         .start_authorization(StartCodexOAuthAuthorization {
@@ -357,6 +358,11 @@ async fn authorize_url_matches_the_official_desktop_parameter_contract() {
         Arc::new(MemoryAccountStore::default()),
         CodexCredentialAdmin,
         wire_profile,
+        Arc::new(crate::support::RequestProfileRuntimePolicy(Mutex::new(
+            gateway_core::account::OpaqueProviderData::new(serde_json::json!({
+                "client": "desktop", "platform": "macos", "versionMode": "latest", "osVersion": "27.0.1"
+            }).as_object().unwrap().clone()),
+        ))),
     );
     let started = service
         .start_authorization(StartCodexOAuthAuthorization {
@@ -508,8 +514,56 @@ async fn authorize_url_matches_the_official_desktop_parameter_contract() {
     assert!(!parameters.contains_key("nonce"));
 }
 
+#[tokio::test]
+async fn authorization_uses_global_cli_metadata_and_rejects_invalid_configuration() {
+    let document = |value: serde_json::Value| {
+        gateway_core::account::OpaqueProviderData::new(value.as_object().unwrap().clone())
+    };
+    let policy = Arc::new(crate::support::RequestProfileRuntimePolicy(Mutex::new(
+        document(
+            serde_json::json!({"client":"cli","platform":"macos","versionMode":"fixed","codexVersion":"0.170.0"}),
+        ),
+    )));
+    let service = CodexOAuthAdminService::new(
+        Arc::new(PendingStore::default()),
+        Arc::new(Exchanger {
+            id_token: "unused".into(),
+        }),
+        Arc::new(MemoryAccountStore::default()),
+        CodexCredentialAdmin,
+        profile(),
+        policy.clone(),
+    );
+    let started = service
+        .start_authorization(StartCodexOAuthAuthorization {
+            mutation: mutation(),
+        })
+        .await
+        .unwrap();
+    let outer = Url::parse(&started.authorization_url).unwrap();
+    let inner = outer
+        .query_pairs()
+        .find(|(name, _)| name == "authorize_url")
+        .unwrap()
+        .1
+        .into_owned();
+    let inner = Url::parse(&inner).unwrap();
+    let parameters: std::collections::BTreeMap<_, _> = inner.query_pairs().into_owned().collect();
+    assert_eq!(parameters["originator"], "codex_cli_rs");
+    assert!(!parameters.contains_key("codex_app_version"));
+    *policy.0.lock().unwrap() = document(serde_json::json!({"client":"unsupported"}));
+    assert!(matches!(
+        service
+            .start_authorization(StartCodexOAuthAuthorization {
+                mutation: mutation()
+            })
+            .await,
+        Err(CodexOAuthAdminError::Profile(_))
+    ));
+}
+
 fn profile() -> CodexWireProfileState {
-    provider_openai::transport::profile::CodexWireProfileState::new(Default::default())
+    provider_openai::profile::CodexWireProfileState::new(Default::default())
 }
 
 #[tokio::test]
@@ -524,6 +578,7 @@ async fn separate_new_authorizations_use_distinct_surface_stable_ids() {
             Arc::new(MemoryAccountStore::default()),
             CodexCredentialAdmin,
             profile(),
+            crate::support::runtime_policy(),
         );
         let started = service
             .start_authorization(StartCodexOAuthAuthorization {
@@ -581,6 +636,7 @@ async fn repeated_reauthorization_preserves_surface_id_with_a_cleared_name() {
             store.clone(),
             CodexCredentialAdmin,
             profile(),
+            crate::support::runtime_policy(),
         );
         let started = service
             .start_authorization(StartCodexOAuthAuthorization {
@@ -639,6 +695,7 @@ async fn reauthorization_binds_the_selected_slot_to_the_new_oauth_account() {
         store,
         CodexCredentialAdmin,
         profile(),
+        crate::support::runtime_policy(),
     );
     let started = service
         .start_authorization(StartCodexOAuthAuthorization {

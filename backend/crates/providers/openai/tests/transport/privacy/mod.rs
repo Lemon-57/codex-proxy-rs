@@ -2,6 +2,7 @@
 
 mod changes;
 mod steps;
+mod workspace;
 
 use gateway_core::settings::privacy::*;
 use provider_openai::transport::privacy::{compile, preview};
@@ -28,6 +29,33 @@ fn step(scope: PrivacyScope, selector: &str, action: PrivacyAction) -> PrivacySt
         case_insensitive: false,
         multi_line: false,
     }
+}
+
+pub(crate) fn workspace_rule(username: &str) -> PrivacyRule {
+    let mut configured = rule(
+        PrivacyScope::TurnMetadata,
+        "$.workspaces",
+        PrivacyAction::AnonymizeProject,
+    );
+    let mut rename = step(
+        PrivacyScope::TurnMetadata,
+        "$.workspaces",
+        PrivacyAction::RenameKey,
+    );
+    rename.pattern = Some(r"(?i)^((?:[a-z]:)?[/\\](?:home|users)[/\\])[^/\\]+([/\\])".into());
+    rename.replacement = format!("${{1}}{username}${{2}}");
+    configured.steps.push(rename);
+    for selector in [
+        "$.workspaces.*.associated_remote_urls",
+        "$.workspaces.*.latest_git_commit_hash",
+    ] {
+        configured.steps.push(step(
+            PrivacyScope::TurnMetadata,
+            selector,
+            PrivacyAction::RemoveField,
+        ));
+    }
+    configured
 }
 
 pub(crate) fn policy(rules: Vec<PrivacyRule>) -> CodexPrivacyPolicy {
@@ -298,13 +326,21 @@ fn privacy_validates_regex_paths_captures_and_execution_limits() {
     let mut body = json!({"items":vec![json!({}); 10_001]});
     let original = body.clone();
     let error = policy
-        .apply(&mut body, &mut Default::default(), &mut None, &|| false)
+        .apply(&mut body, &mut Default::default(), &mut None, None, &|| {
+            false
+        })
         .unwrap_err();
     assert_eq!(error.reason, "规则执行步数超限");
     assert_eq!(body, original);
     assert!(
         policy
-            .apply(&mut json!({}), &mut Default::default(), &mut None, &|| true)
+            .apply(
+                &mut json!({}),
+                &mut Default::default(),
+                &mut None,
+                None,
+                &|| true
+            )
             .is_err()
     );
 }

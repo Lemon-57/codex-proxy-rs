@@ -55,14 +55,25 @@ pub fn grok_catalog_service(
     transport: Arc<dyn GrokModelCatalogTransport>,
     cache: Arc<dyn GrokCredentialCatalogCache>,
 ) -> GrokCredentialCatalogService {
-    GrokCredentialCatalogService::new(repository, transport, cache, xai_wire_profile())
+    GrokCredentialCatalogService::new(
+        repository,
+        transport,
+        cache,
+        xai_wire_profile(),
+        crate::support::runtime_policy(),
+    )
 }
 
 pub fn grok_quota_service(
     repository: GrokCredentialRepository,
     transport: Arc<dyn GrokBillingTransport>,
 ) -> GrokCredentialQuotaService {
-    GrokCredentialQuotaService::new(repository, transport, xai_wire_profile())
+    GrokCredentialQuotaService::new(
+        repository,
+        transport,
+        xai_wire_profile(),
+        crate::support::runtime_policy(),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -805,7 +816,42 @@ pub fn create_input(suffix: &str, subject: &str) -> CreateGrokCredential {
 
 pub struct StaticRuntimePolicy;
 
-pub struct TestSessionAffinity;
+pub struct RequestProfileRuntimePolicy(pub Mutex<gateway_core::account::OpaqueProviderData>);
+
+impl ProviderRuntimePolicyPort for RequestProfileRuntimePolicy {
+    fn load_request_profile<'a>(
+        &'a self,
+        provider: &'a ProviderKind,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<Option<gateway_core::account::OpaqueProviderData>, ProviderStoreError>,
+    > {
+        assert_eq!(provider.as_str(), "xai");
+        let profile = self.0.lock().unwrap().clone();
+        Box::pin(async move { Ok(Some(profile)) })
+    }
+
+    fn load_refresh_policy(
+        &self,
+    ) -> futures::future::BoxFuture<'_, Result<ProviderRefreshPolicy, ProviderStoreError>> {
+        Box::pin(async { Ok(refresh_policy()) })
+    }
+}
+
+#[derive(Default)]
+pub struct TestSessionAffinity {
+    pub bindings: Mutex<
+        BTreeMap<
+            (ProviderKind, ProviderSessionAffinityKey),
+            (
+                gateway_core::provider_ports::ProviderSessionBinding,
+                Duration,
+            ),
+        >,
+    >,
+    pub reject_next_claim: std::sync::atomic::AtomicBool,
+    pub claims: std::sync::atomic::AtomicUsize,
+}
 
 pub struct TestSessionExclusions;
 
@@ -835,27 +881,54 @@ impl MemoryCooldownPort {
 impl ProviderSessionAffinityPort for TestSessionAffinity {
     fn load<'a>(
         &'a self,
-        _: &'a ProviderKind,
-        _: &'a ProviderSessionAffinityKey,
+        provider: &'a ProviderKind,
+        key: &'a ProviderSessionAffinityKey,
     ) -> futures::future::BoxFuture<
         'a,
         Result<Option<gateway_core::provider_ports::ProviderSessionBinding>, ProviderStoreError>,
     > {
-        Box::pin(async { Ok(None) })
+        Box::pin(async move {
+            Ok(lock(&self.bindings)
+                .get(&(provider.clone(), key.clone()))
+                .map(|(binding, _)| binding.clone()))
+        })
     }
     fn round_robin_cursor<'a>(
         &'a self,
         _: &'a ProviderKind,
         _: &'a gateway_core::policy::ClientApiKeyId,
     ) -> futures::future::BoxFuture<'a, Result<u64, ProviderStoreError>> {
-        panic!("xAI does not read session round robin cursors")
+        panic!("unused session round robin cursor")
     }
     fn admit_account<'a>(
         &'a self,
-        _: &'a ProviderKind,
-        _: gateway_core::provider_ports::ProviderAccountAdmission<'a>,
+        provider: &'a ProviderKind,
+        admission: gateway_core::provider_ports::ProviderAccountAdmission<'a>,
     ) -> futures::future::BoxFuture<'a, Result<bool, ProviderStoreError>> {
-        panic!("xAI does not claim OpenAI sessions")
+        Box::pin(async move {
+            let count = self
+                .claims
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if self
+                .reject_next_claim
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Ok(false);
+            }
+            let claim = admission.session().expect("session admission");
+            let mut bindings = lock(&self.bindings);
+            let key = (provider.clone(), claim.key.clone());
+            if bindings.get(&key).map(|(binding, _)| binding) != claim.expected {
+                return Ok(false);
+            }
+            let binding = gateway_core::provider_ports::ProviderSessionBinding::new(
+                claim.account.clone(),
+                format!("{count:032x}"),
+            )?;
+            bindings.insert(key, (binding, claim.ttl));
+            Ok(true)
+        })
     }
     fn load_alias<'a>(
         &'a self,

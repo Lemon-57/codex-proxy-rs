@@ -3,9 +3,8 @@
 pub(crate) mod evidence;
 
 use super::client::CodexClientVisibleUpstreamResponse;
-use super::protocol::responses::ResponsesSseFailure;
+use super::protocol::responses::{ResponsesSseFailure, UsageLimitWindow, upstream_error_object};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use chrono::{DateTime, Utc};
 use reqwest::{StatusCode, header::HeaderMap};
 use serde_json::Value;
 
@@ -78,8 +77,7 @@ pub struct CodexUpstreamFailure {
     pub(crate) client_response: Option<Box<CodexClientVisibleUpstreamResponse>>,
     pub(crate) identity_error_code: Option<String>,
     pub(crate) has_identity_authorization_error: bool,
-    /// 官方 `usage_limit_reached` 错误体携带的窗口重置时间（Unix 秒）
-    pub(crate) usage_limit_resets_at: Option<i64>,
+    usage_limit: UsageLimitWindow,
     pub(crate) retry_after_seconds: Option<u64>,
     /// 上游错误头声明不再重试当前账号
     pub(crate) no_more_retry: bool,
@@ -128,9 +126,7 @@ impl CodexUpstreamFailure {
             client_response: client_response.cloned().map(Box::new),
             identity_error_code: diagnostics.identity_error_code.clone(),
             has_identity_authorization_error: diagnostics.identity_authorization_error.is_some(),
-            usage_limit_resets_at: (category == CodexFailureCategory::UsageLimitExhausted)
-                .then_some(fields.resets_at)
-                .flatten(),
+            usage_limit: fields.usage_limit,
             retry_after_seconds,
             no_more_retry: gateway_protocol::openai::events::upstream_no_more_retry_from_body(body),
             request_id: diagnostics.request_id.clone(),
@@ -160,7 +156,7 @@ impl CodexUpstreamFailure {
             error_type: failure.upstream_type.clone(),
             message: failure.message.clone(),
             client_message: Some(failure.message.clone()),
-            resets_at: None,
+            usage_limit: failure.usage_limit,
         };
         let status = failure
             .explicit_status_code
@@ -184,7 +180,7 @@ impl CodexUpstreamFailure {
             client_response: None,
             identity_error_code: diagnostics.identity_error_code.clone(),
             has_identity_authorization_error: diagnostics.identity_authorization_error.is_some(),
-            usage_limit_resets_at: None,
+            usage_limit: fields.usage_limit,
             retry_after_seconds: failure.retry_after_seconds,
             no_more_retry: failure.no_more_retry,
             request_id: failure
@@ -197,6 +193,14 @@ impl CodexUpstreamFailure {
             send_phase,
             category,
         }
+    }
+
+    pub(crate) fn account_usage_limit(&self) -> UsageLimitWindow {
+        self.usage_limit.for_headers(
+            self.rate_limit_headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )
     }
 
     /// 返回上游失败分类
@@ -247,7 +251,7 @@ struct ParsedUpstreamError {
     error_type: Option<String>,
     message: String,
     client_message: Option<String>,
-    resets_at: Option<i64>,
+    usage_limit: UsageLimitWindow,
 }
 
 impl ParsedUpstreamError {
@@ -264,14 +268,10 @@ impl ParsedUpstreamError {
                 error_type: None,
                 message: body.to_owned(),
                 client_message: None,
-                resets_at: None,
+                usage_limit: UsageLimitWindow::default(),
             };
         };
-        let error = value
-            .pointer("/response/error")
-            .or_else(|| value.get("error"))
-            .or_else(|| value.get("detail"))
-            .unwrap_or(&value);
+        let error = upstream_error_object(&value);
         let code_value = error.get("code").or_else(|| value.get("code"));
         let upstream_fields = gateway_core::upstream::UpstreamFailureFields {
             status: None,
@@ -305,17 +305,13 @@ impl ParsedUpstreamError {
             .clone()
             .or_else(|| error.as_str().and_then(non_empty_owned))
             .unwrap_or_else(|| body.to_owned());
-        let resets_at = error
-            .get("resets_at")
-            .and_then(Value::as_i64)
-            .filter(|seconds| DateTime::<Utc>::from_timestamp(*seconds, 0).is_some());
         Self {
             upstream_fields,
             code,
             error_type,
             message,
             client_message,
-            resets_at,
+            usage_limit: UsageLimitWindow::from_payload(&value),
         }
     }
 }

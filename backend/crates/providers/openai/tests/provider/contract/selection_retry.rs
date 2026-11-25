@@ -10,6 +10,7 @@ use gateway_core::engine::{
 };
 use gateway_core::error::StoreError;
 use gateway_core::routing::AccountRoutingSnapshot;
+use tokio::net::TcpSocket;
 
 struct NoopExecutionStore;
 
@@ -116,7 +117,7 @@ async fn websocket_pool_opening_403_shares_the_turn_rate_limit_rotation_budget()
             ])),
         ));
         let settings = SettingsValues::new(3, "smart", Default::default(), None, None)
-            .with_openai_account_affinity(AccountAffinity::Preferred)
+            .with_account_affinity(AccountAffinity::Preferred)
             .with_max_retry_after_seconds(120)
             .with_max_account_rotations(3);
         let mut session = coordinator.start(
@@ -270,7 +271,7 @@ async fn turn_rate_limit_rotates_and_hands_preferred_session_to_the_admitted_acc
                 providers,
             ));
             let settings = SettingsValues::new(3, "smart", Default::default(), None, None)
-                .with_openai_account_affinity(AccountAffinity::Preferred)
+                .with_account_affinity(AccountAffinity::Preferred)
                 .with_max_account_rotations(rotations);
             let plan = execution_plan_with_settings(&operation, settings);
             let mut session = coordinator
@@ -733,9 +734,13 @@ async fn refused_connections_respect_the_same_rotation_limit_over_http_and_webso
                 continue;
             }
             let store = Arc::new(MemoryAccountStore::default());
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = listener.local_addr().unwrap();
-            drop(listener);
+            let socket = TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let endpoint = socket.local_addr().unwrap();
+            // Linux 上保留未监听的 socket，让拨号被拒绝且并发测试无法占用端口
+            // macOS 上未监听的绑定可能让拨号超时，继续使用已释放的端口
+            #[cfg(not(target_os = "linux"))]
+            drop(socket);
             let proxy =
                 gateway_core::account::OutboundProxy::parse(&format!("socks5h://{endpoint}"))
                     .unwrap();
