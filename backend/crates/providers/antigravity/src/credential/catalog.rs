@@ -352,7 +352,7 @@ impl CatalogService {
             .collect();
         let mut due = self
             .accounts
-            .list_for_provider(&self.kind, false)
+            .list_for_provider(&self.kind)
             .await
             .map_err(|e| WorkerTaskError::safe("读取 Antigravity 账号失败").with_source(e))?;
         due.retain(|account| {

@@ -198,6 +198,7 @@ async fn guarded_reauthorization_allows_profile_change_without_rebinding_identit
             store.clone(),
             CodexCredentialAdmin,
             profile(),
+            crate::support::runtime_policy(),
         );
         let started = service
             .start_authorization(StartCodexOAuthAuthorization {

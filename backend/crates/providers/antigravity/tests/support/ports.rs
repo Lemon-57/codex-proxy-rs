@@ -497,15 +497,12 @@ impl ProviderAccountStore for MemoryPorts {
     async fn list_for_provider(
         &self,
         provider: &ProviderKind,
-        include_disabled: bool,
     ) -> Result<Vec<ProviderAccount>, StoreError> {
         Ok(self
             .list_accounts()
             .await?
             .into_iter()
-            .filter(|account| {
-                account.provider() == provider && (include_disabled || account.enabled())
-            })
+            .filter(|account| account.provider() == provider && account.enabled())
             .collect())
     }
     async fn list_for_provider_accounts(

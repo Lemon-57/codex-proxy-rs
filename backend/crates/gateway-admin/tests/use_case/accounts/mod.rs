@@ -3103,6 +3103,8 @@ async fn accounts_list_and_detail_keep_recent_week_usage_separate_from_group_quo
         let page = services
             .accounts()
             .list(AccountListQuery {
+                plan_type: None,
+                supplier: None,
                 page: 1,
                 page_size: gateway_admin::model::PageSize::new(20).unwrap(),
                 provider_kind: None,

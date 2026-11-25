@@ -234,6 +234,9 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
         quota_paused: false,
         quota_settings: Default::default(),
         auto_use_quota_credits: false,
+        supplier: None,
+        manual_starts_at: None,
+        manual_expires_at: None,
         outbound_proxy_id: None,
         outbound_proxy_enabled: true,
         notes: None,
@@ -758,6 +761,7 @@ mod errors {
                         secret("replacement-test-token"),
                         before.access_token_expires_at(),
                         None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -1177,7 +1181,7 @@ mod errors {
                 material["allow_workspace_and_plan_change"] = json!(true);
             }
             let result = bundle
-                .admin_provider()
+                .admin
                 .prepare_rotation(PrepareCredentialRotation {
                     account: account_record(&before),
                     provider_material: ProviderDocument::new(OpaqueProviderData::new(
@@ -1284,7 +1288,7 @@ mod errors {
             .unwrap();
             let account = store.account("acct_refresh_plan").unwrap();
             let prepared = bundle
-                .admin_provider()
+                .admin
                 .prepare_refresh(PrepareCredentialRefresh {
                     account: account_record(&account),
                 })

@@ -310,6 +310,7 @@ async fn xai_admin_provider_restores_full_pending_envelope_and_binds_owner() {
     let wrong_owner = bundle
         .admin
         .complete_authorization(CompleteAuthorization {
+            expected_identity_revision: None,
             settings: None,
             context: MutationContext {
                 actor: MutationActor::AdminSession {
@@ -331,6 +332,7 @@ async fn xai_admin_provider_restores_full_pending_envelope_and_binds_owner() {
     let invalid_callback = bundle
         .admin
         .complete_authorization(CompleteAuthorization {
+            expected_identity_revision: None,
             settings: None,
             context: owner,
             flow_id: flow_id.to_owned(),
@@ -354,6 +356,7 @@ async fn xai_admin_provider_restores_full_pending_envelope_and_binds_owner() {
     let mismatched_envelope = bundle
         .admin
         .complete_authorization(CompleteAuthorization {
+            expected_identity_revision: None,
             settings: None,
             context: MutationContext {
                 actor: MutationActor::AdminSession {

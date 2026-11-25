@@ -121,6 +121,7 @@ pub(super) fn prepared_rotation(
         access_token_expires_at,
         next_refresh_at,
         account_state: _,
+        native_refresh_plan,
     } = credential.into_parts();
     if profile != credential_profile || profile.account_id != account_id {
         return Err(provider_error(ProviderAdminErrorKind::Internal));
@@ -138,6 +139,7 @@ pub(super) fn prepared_rotation(
             preserve_profile,
             preserve_credential_state: false,
             preserve_access_token_expiry,
+            native_refresh_plan,
             provider_material: ProviderDocument::new(OpaqueProviderData::new(
                 credential.into_inner(),
             )),

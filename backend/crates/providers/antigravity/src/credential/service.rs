@@ -291,6 +291,7 @@ impl CredentialService {
             preserve_profile: true,
             preserve_credential_state: false,
             preserve_access_token_expiry: false,
+            native_refresh_plan: None,
             provider_material: document(grant.material)?,
             has_refresh_token: true,
             access_token_expires_at: Some(grant.expires_at),

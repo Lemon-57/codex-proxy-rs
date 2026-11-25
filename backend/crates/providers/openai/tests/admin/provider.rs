@@ -782,6 +782,7 @@ async fn openai_admin_provider_persists_the_full_pending_envelope_and_binds_owne
     let error = bundle
         .admin
         .complete_authorization(CompleteAuthorization {
+            expected_identity_revision: None,
             settings: None,
             context: MutationContext {
                 actor: MutationActor::AdminSession {
@@ -863,6 +864,7 @@ async fn oauth_connection_failures_preserve_safe_diagnostics_and_release_the_cla
         let error = bundle
             .admin
             .complete_authorization(CompleteAuthorization {
+                expected_identity_revision: None,
                 settings: None,
                 context,
                 flow_id: started.flow_id,

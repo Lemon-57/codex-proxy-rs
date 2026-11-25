@@ -252,7 +252,7 @@ impl QuotaService {
     ) -> Result<(), WorkerTaskError> {
         let mut accounts = self
             .accounts
-            .list_for_provider(&self.kind, false)
+            .list_for_provider(&self.kind)
             .await
             .map_err(|e| WorkerTaskError::safe("读取 Antigravity 账号失败").with_source(e))?;
         let ids: Vec<_> = accounts.iter().map(|a| a.id().clone()).collect();
