@@ -260,7 +260,7 @@ Messages 与 Responses 的转换边界见 [Messages 请求](#messages-请求)，
 | GET | `/v1beta/models`、`/v1beta/models/{model}` | Gemini 格式的模型列表与详情，见[模型目录](#模型目录) |
 | POST | `/v1beta:{method}`（客户端后台指标） | 验证 Key 后返回 `{}`，不启动模型请求 |
 
-普通生成从上游 JSON 的 `response` 中取出原生正文，流式生成逐个解开 SSE 数据帧。原生正文保留工具参数、结果、思考签名和未知字段。客户端归属读取 `User-Agent`、`X-Goog-Api-Client`。网关错误使用 Google RPC 风格的 `error.code`、`error.status` 和 `error.message`。[Google 原生生成协议](https://ai.google.dev/api/generate-content)
+普通生成从上游 JSON 的 `response` 中取出原生正文，流式生成逐个解开 SSE 数据帧。等待首帧和后续帧时，网关保持静默。首帧前的失败保留 HTTP 错误状态。原生正文保留工具参数、结果、思考签名和未知字段。客户端归属读取 `User-Agent`、`X-Goog-Api-Client`。网关错误使用 Google RPC 风格的 `error.code`、`error.status` 和 `error.message`。[Google 原生生成协议](https://ai.google.dev/api/generate-content)
 
 CPR 在 AGY 的原生与转换入口透传未被过滤的 HTTP 扩展头，保留同名多值的原始字节。下游鉴权、Cookie、账号身份、客户端画像和 HTTP 传输头不透传；认证、项目和 UA 由所选账号与冻结画像生成。`X-Goog-User-Project` 属于调用方指定的计费项目，不能覆盖所选账号的项目，见 [Google 系统参数](https://docs.cloud.google.com/apis/docs/system-parameters)
 
@@ -272,7 +272,11 @@ CPR 在 AGY 的原生与转换入口透传未被过滤的 HTTP 扩展头，保�
 
 AGY 上游计数与生成响应的 `usageMetadata.promptTokenCount` 口径不完全一致：系统提示、工具定义及工具结果未完整计入计数返回值。原生与 Messages 计数均保留这一上游口径，不能作为完整上下文占用或计费用量的精确值
 
-Antigravity 模型也可通过 `/v1/responses`、`/v1/chat/completions` 和 `/v1/messages` 调用，均支持 JSON 与 SSE。转换入口支持文本、内嵌图片／文档、函数工具及结果、生成参数和 JSON Schema；未知内容块返回请求错误，模型自身不支持的参数由上游校验。原生入口不经过转换器；所有 AGY 入口在出站时使用同一份系统提示词配置，替换客户端系统指令，其余原生字段保持原始表达
+Antigravity 模型也可通过 `/v1/responses`、`/v1/chat/completions` 和 `/v1/messages` 调用，均支持 JSON 与 SSE。转换入口支持文本、内嵌图片／文档、函数工具及结果、生成参数和 JSON Schema；未知内容块返回请求错误，模型自身不支持的参数由上游校验。原生入口不经过转换器；常规生成与计数在出站时使用同一份 AGY 系统提示词配置，替换客户端系统指令，其余原生字段保持原始表达
+
+Responses 编码请求可以同时声明函数和可选的 `web_search`。AGY 向编码模型发送可用函数，保留 `tool_choice` 和 `allowed_tools` 的约束。显式选择搜索，或要求必须调用工具且只允许搜索时，网关取最后一条用户文本作为查询，向该账号目录的首个 `webSearchModelIds` 型号发送独立的实时搜索请求。账号及其授权分组须同时允许原型号与搜索型号
+
+搜索支持 `filters.allowed_domains` 和 `filters.blocked_domains`。强制搜索遇到缓存模式、无法满足的搜索选项或缺少可用搜索型号时返回请求错误。JSON 与 SSE 均按上游实际查询与来源返回 `web_search_call` 和正文引用；传入 `include: ["web_search_call.action.sources"]` 可读取搜索来源列表
 
 工具多轮调用须带回完整助手输出。Responses 的 `reasoning.encrypted_content` 和 Messages 的 `thinking.signature` 携带 GenAI 工具与思考签名及其所属内容，客户端应原样回传。Chat 沿用现有合同，只返回可读思考内容；转换器对缺少签名的工具调用使用 Google 官方的 `skip_thought_signature_validator` 兜底值，不增加服务端签名缓存。工具与思考的真实签名优先于兜底；普通可见文本的可选签名不附加到转换输出，以保持 CLI 最终文本完整。省略签名或使用兜底可能影响后续模型表现，见 [Google 签名规则](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking/thought-signatures)。Antigravity 转换入口不支持 `previous_response_id` 续接
 
@@ -763,6 +767,14 @@ API Key 上游返回完整 Codex `models` 目录时沿用该合同；仅返回�
 xAI 没有 Codex 原生目录，使用官方 CLI proxy 当前目录生成通用画像。推理菜单读取
 `reasoning_efforts` 对象列表，默认值只取菜单中的显式标记；缺失时保持未知
 
+Antigravity 在 Codex 目录中按上游声明的分组展示基础模型。思考菜单只列出当前 Key 可调用的成员档位，
+默认选中 `medium`，不可用时选首个可用档位。例如对 `gemini-4-hydrogen` 发送 `reasoning.effort: "high"`，
+会路由到 `gemini-4-hydrogen-high`。普通模型列表仍提供可直接调用的完整型号
+
+分组中的可用档位和账号都支持图片时，Codex 可发送图片。网关取可用成员中最小的 `maxTokens` 作为该组的默认上下文窗口和可覆盖上限，
+有成员未声明时保持未知。成员说明一致时，选模列表显示上游用途说明或下线提示。
+显式请求的输出 Token 数按实际型号和账号的 `maxOutputTokens` 选路，未声明上限的账号交由上游校验
+
 已知模型只路由到明确提供该模型的 Provider，账号不可用时不转发给其他平台的未知模型通道。
 未知模型只在当前范围与路由约束下存在唯一 Provider 透传候选时发送；无法确定归属时返回不可用错误，
 可通过 Client Key 分组限定目标平台。Provider 在选号时检查账号模型政策与目录资格，
@@ -774,7 +786,7 @@ OpenAI 聚合当前 Key 范围内合格 OAuth 和 API Key 账号的目录。每�
 
 后台刷新失败或超时保留该账号最后成功的结果。当前范围没有任何可用的已知目录时返回 `503 model_catalog_unavailable`。
 成功读取但全部条目被账号政策过滤时返回空列表。
-目录保留完整的原生 Codex 模型对象。对于 OpenAI API Key 普通模型列表和 xAI 目录生成的通用画像，
+目录保留完整的原生 Codex 模型对象。对于 Provider 生成的通用画像，
 当前 Key 可访问的适配器若声明了同名模型，其画像在原位置替换通用画像。仅由插件提供的可见模型按声明顺序追加到所属 Provider 的条目之后
 
 服务启动时批量恢复账号目录；目录读取只检查本地账号资格和 Client Key 范围，不等待上游查询。
@@ -1867,7 +1879,7 @@ Google 授权后，将浏览器中的完整 `http://localhost:8085/auth/callback
 
 Antigravity 主动额度刷新同时读取套餐与上游模型组额度，优先采用明确的付费套餐。`g1-pro-tier`、`g1-ultra-tier` 分别显示为 `Google AI Pro`、`Google AI Ultra`，缺少套餐不推断为免费账号
 
-`quota.windows` 只保留上游模型组各自的 5 小时与周额度、已用百分比及重置时间，同组窗口共享 `limitId`。这些窗口的 `accountWide` 为 `false`，不能相加为整号余额，也不用于整号周/月容量预测；缺失的上游百分比保持未知。本地 24 小时请求统计通过账号 `usage` 单独返回，不生成上游额度窗口
+`quota.windows` 返回上游模型组的 5 小时与周额度、已用百分比及重置时间，同组窗口共享 `limitId`，`accountWide` 为 `false`。缺失的上游百分比保持未知。网关从额度分组的成员名单与同次模型目录确定模型 ID，按各窗口重置时间与时长汇总本地请求的 `localUsage`。无匹配请求时总 Token 为 0，成员或窗口边界无法确认时 `localUsage` 为空。账号 `usage` 单独返回近一周的本地用量，分组窗口不参与整号周/月容量预测
 
 OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上游请求总超时为 60 秒
 
@@ -2296,7 +2308,7 @@ xAI 由本地账号/模型冷却、无可选账号、并发容量不足及选号
 默认队列满返回 `429` / `concurrency_queue_full`，排队超时返回 `429` / `concurrency_queue_timeout`；
 WebSocket 使用对应错误事件。等待期间不发送上游请求，取消后释放等待位置，排队重查不重复计入 RPM。
 SSE 在 Key 准入完成并取得执行会话前不发送保活帧，此阶段保留 HTTP 错误状态；
-取得会话后的账号等待受 SSE 保活覆盖，已开始交付的失败沿用流内错误合同
+Responses、Chat Completions 和 Messages 在取得会话后为账号等待发送心跳，已开始交付的失败沿用各入口的流内错误合同
 
 任一周期的已落库金额与当前进程已接管的待结算费用合计达到限额后拒绝新请求，已准入请求可完成并使金额超过阈值。
 HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly_budget_exceeded`，
