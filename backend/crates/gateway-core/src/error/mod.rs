@@ -543,6 +543,7 @@ struct ProviderErrorUpstreamValues {
 
 #[derive(Clone, Default)]
 struct ProviderErrorFailureObservation {
+    invalid_request_message: Option<&'static str>,
     unreachable_proxy: Option<crate::upstream::ProxyEndpoint>,
     session_binding_recovery: bool,
     continuation_unavailable_reason: Option<&'static str>,
@@ -581,6 +582,17 @@ impl ProviderError {
             client_visible_upstream_response: None,
             atomic_client_events: None,
         }
+    }
+
+    /// 本地请求校验只向客户端返回固定提示，内部原因仍独立保存
+    #[must_use]
+    pub fn invalid_request(message: &'static str) -> Self {
+        let mut error = Self::new(
+            ProviderErrorKind::InvalidRequest,
+            UpstreamSendState::NotSent,
+        );
+        error.failure_observation_mut().invalid_request_message = Some(message);
+        error
     }
 
     pub(crate) fn group_feature_denied(feature: DeniedGroupFeature) -> Self {
@@ -1378,7 +1390,11 @@ impl GatewayError {
             }
             ProviderErrorKind::InvalidRequest => Self::new(
                 GatewayErrorKind::InvalidRequest,
-                "Invalid upstream request.",
+                error
+                    .failure_observation
+                    .as_ref()
+                    .and_then(|details| details.invalid_request_message)
+                    .unwrap_or("Invalid upstream request."),
             ),
             ProviderErrorKind::SessionPolicyRestricted => Self::new(
                 GatewayErrorKind::InvalidRequest,

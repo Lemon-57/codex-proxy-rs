@@ -424,10 +424,15 @@ impl FrozenAccountScope {
     #[must_use]
     pub fn excluding_account(&self, account: ProviderAccountId) -> Self {
         let mut restricted = self.clone();
-        let mut excluded = self.excluded_account_ids.as_ref().clone();
-        excluded.insert(account);
-        restricted.excluded_account_ids = Arc::new(excluded);
+        restricted.exclude_accounts([account]);
         restricted
+    }
+
+    pub(crate) fn exclude_accounts(
+        &mut self,
+        accounts: impl IntoIterator<Item = ProviderAccountId>,
+    ) {
+        Arc::make_mut(&mut self.excluded_account_ids).extend(accounts);
     }
 
     #[must_use]
@@ -478,6 +483,18 @@ impl FrozenAccountScope {
     #[must_use]
     pub fn allows_unidentified_model(&self, account_id: &ProviderAccountId) -> bool {
         self.allows_with_policy(account_id, |access| access.allows_optional_model(None))
+    }
+
+    /// 同一个账号和授权该账号的同一个分组须同时允许请求型号和实际执行型号
+    pub(crate) fn allows_model_pair(
+        &self,
+        account: &ProviderAccountId,
+        requested: &str,
+        actual: &str,
+    ) -> bool {
+        self.allows_with_policy(account, |access| {
+            access.allows(requested) && access.allows(actual)
+        })
     }
 
     /// 只报告所有已启用绑定分组均明确拒绝模型的情况，空池沿用原路由错误
